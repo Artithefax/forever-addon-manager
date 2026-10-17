@@ -31,6 +31,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import urllib.error
 import urllib.request
 import webbrowser
 import zipfile
@@ -757,9 +758,18 @@ def is_frozen() -> bool:
     return bool(getattr(sys, "frozen", False))
 
 
+class NoReleaseYet(Exception):
+    """Im Repo gibt es (noch) kein veröffentlichtes Release."""
+
+
 def check_self_update(token: str = "") -> dict | None:
     """Liefert die Release-Infos, wenn auf GitHub eine neuere Version liegt."""
-    info = github_latest(UPDATE_REPO, token)
+    try:
+        info = github_latest(UPDATE_REPO, token)
+    except urllib.error.HTTPError as e:
+        if e.code == 404:      # GitHub meldet 404, solange kein Release veröffentlicht ist
+            raise NoReleaseYet() from e
+        raise
     if parse_version(info["tag"]) > parse_version(APP_VERSION):
         return info
     return None
@@ -1509,7 +1519,8 @@ class App(BaseTk):
                 self.busy = False
                 self.config(cursor="")
                 if err:
-                    log.error("%s", err)
+                    if not isinstance(err, NoReleaseYet):
+                        log.error("%s", err)
                     if err_cb:
                         err_cb(err)
                     else:
@@ -2200,10 +2211,24 @@ class App(BaseTk):
             self.offer_manager_update(info, silent)
 
         def failed(err):
+            if isinstance(err, NoReleaseYet):
+                log.info("Manager-Update: noch kein Release in %s", UPDATE_REPO)
+                self.set_status("Für den Manager gibt es noch kein Release auf GitHub.")
+                if not silent and messagebox.askyesno(
+                        APP_NAME, f"Im Repository {UPDATE_REPO} wurde noch kein Release "
+                                  "veröffentlicht – deshalb gibt es auch nichts zu aktualisieren.\n\n"
+                                  "Release-Seite auf GitHub öffnen?"):
+                    self.open_link(f"https://github.com/{UPDATE_REPO}/releases")
+                return
             log.warning("Manager-Update-Prüfung fehlgeschlagen: %s", err)
             self.set_status("Manager-Update-Prüfung fehlgeschlagen.")
             if not silent:
-                messagebox.showerror(APP_NAME, f"Update-Prüfung fehlgeschlagen:\n{err}")
+                msg = str(err)
+                if isinstance(err, urllib.error.HTTPError) and err.code == 403:
+                    msg = "GitHub hat die Anfrage abgelehnt (Limit erreicht?). Bitte in einer Stunde erneut versuchen."
+                elif isinstance(err, urllib.error.URLError):
+                    msg = f"Keine Verbindung zu GitHub ({err.reason})."
+                messagebox.showerror(APP_NAME, f"Update-Prüfung fehlgeschlagen:\n{msg}")
 
         self.run_bg("Suche Manager-Update", lambda: check_self_update(token), done, failed)
 
