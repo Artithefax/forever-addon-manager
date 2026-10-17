@@ -51,7 +51,7 @@ except Exception:                      # noqa – Paket fehlt oder Tk-Erweiterun
     HAS_DND = False
 
 APP_NAME = "Forever Addon Manager"
-APP_VERSION = "2.3.0"
+APP_VERSION = "2.4.0"
 USER_AGENT = f"ForeverAddonManager/{APP_VERSION}"
 
 # Selbst-Update über GitHub-Releases dieses Repos
@@ -201,6 +201,19 @@ def read_game_version(root: str, flavor: str) -> tuple[str, int] | None:
             a, b, c = (int(x) for x in m.groups())
             return f"{a}.{b}.{c}", a * 10000 + b * 100 + c
     return None
+
+
+def find_wow_exe(root: str, flavor: str) -> Path | None:
+    """Sucht die Spiel-.exe im Versionsordner (z. B. WowClassicB.exe in _classic_beta_)."""
+    folder = Path(root) / flavor
+    if not root or not flavor or not folder.is_dir():
+        return None
+    skip = ("error", "crash", "launcher", "update", "repair", "uninstall")
+    exes = [e for e in folder.glob("*.exe")
+            if e.name.lower().startswith("wow") and not any(x in e.name.lower() for x in skip)]
+    if not exes:
+        return None
+    return max(exes, key=lambda e: e.stat().st_size)   # die eigentliche Spieldatei ist die größte
 
 
 def running_wow(root: str, flavor: str) -> list[str]:
@@ -950,6 +963,17 @@ def apply_theme(root) -> dict:
               lightcolor=[("active", t["btn_primary_hi"])],
               darkcolor=[("active", t["btn_primary_hi"])])
 
+    # Spielen-Button in der Kopfzeile: Bronze mit Goldrand
+    style.configure("Play.TButton", background=t["btn_primary"], foreground=t["btn_text"],
+                    bordercolor=t["gold"], lightcolor=t["btn_primary"], darkcolor=t["btn_primary"],
+                    font=fonts["bold"], padding=(16, 3))
+    style.map("Play.TButton",
+              background=[("pressed", t["btn_primary"]), ("active", t["btn_primary_hi"]),
+                          ("disabled", t["panel"])],
+              foreground=[("disabled", t["text_faint"])],
+              bordercolor=[("disabled", t["border_soft"])],
+              lightcolor=[("active", t["btn_primary_hi"])], darkcolor=[("active", t["btn_primary_hi"])])
+
     # Kleine Link-Buttons in der Kopfzeile
     style.configure("Link.TButton", background=t["header"], foreground=t["text_dim"],
                     font=fonts["small"], bordercolor=t["border_soft"], lightcolor=t["header"],
@@ -1285,6 +1309,9 @@ class App(BaseTk):
         header.pack(fill="x")
         self.header = header
         self.link_bar = ttk.Frame(header, style="Header.TFrame")
+        self.play_btn = ttk.Button(self.link_bar, text="▶  Spielen", style="Play.TButton",
+                                   cursor="hand2", command=self.start_wow)
+        self.play_btn.pack(side="left", padx=(0, 10))
         for text, url in HEADER_LINKS:
             ttk.Button(self.link_bar, text=f"{text}  ↗", style="Link.TButton", cursor="hand2",
                        command=lambda u=url: self.open_link(u)).pack(side="left", padx=(6, 0))
@@ -1460,6 +1487,33 @@ class App(BaseTk):
             if folder in s.get("folders", []):
                 return sid, s
         return None, None
+
+    def start_wow(self):
+        if not self.root_path or not self.flavor:
+            messagebox.showwarning(APP_NAME, "Bitte zuerst WoW-Ordner und Version wählen.")
+            return
+        exe = find_wow_exe(self.root_path, self.flavor)
+        if not exe:
+            messagebox.showerror(APP_NAME, f"In {Path(self.root_path) / self.flavor} wurde keine "
+                                           "WoW-.exe gefunden.\n\nIst diese Version vollständig installiert?")
+            return
+        running = running_wow(self.root_path, self.flavor)
+        if running:
+            messagebox.showinfo(APP_NAME, f"WoW läuft bereits ({', '.join(running)}).")
+            return
+        if self.busy:
+            messagebox.showinfo(APP_NAME, "Bitte warten, bis der laufende Vorgang fertig ist.")
+            return
+        try:
+            flags = 0x00000008 | 0x00000200 if sys.platform.startswith("win") else 0  # losgelöst
+            subprocess.Popen([str(exe)], cwd=str(exe.parent), close_fds=True, creationflags=flags)
+        except OSError as e:
+            messagebox.showerror(APP_NAME, f"WoW konnte nicht gestartet werden:\n{e}")
+            return
+        log.info("WoW gestartet: %s", exe)
+        self.set_status(f"{exe.name} gestartet. Falls WoW nach dem Login fragt: Battle.net-App öffnen.")
+        self.play_btn.state(["disabled"])
+        self.after(15000, lambda: self.play_btn.state(["!disabled"]))   # Doppelstarts vermeiden
 
     def open_link(self, url: str):
         try:
