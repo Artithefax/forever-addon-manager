@@ -51,7 +51,7 @@ except Exception:                      # noqa – Paket fehlt oder Tk-Erweiterun
     HAS_DND = False
 
 APP_NAME = "Forever Addon Manager"
-APP_VERSION = "2.4.0"
+APP_VERSION = "2.3.1"
 USER_AGENT = f"ForeverAddonManager/{APP_VERSION}"
 
 # Selbst-Update über GitHub-Releases dieses Repos
