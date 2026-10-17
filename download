@@ -1,0 +1,23 @@
+# Build output
+build/
+dist/
+*.spec
+.build_venv/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Local data – never commit personal config, API keys, backups or exports
+config.json
+*.faddons
+backups/
+*.log
+.env
+
+# OS
+Thumbs.db
+desktop.ini
+.DS_Store
