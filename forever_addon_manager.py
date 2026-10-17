@@ -50,7 +50,7 @@ except Exception:                      # noqa – Paket fehlt oder Tk-Erweiterun
     HAS_DND = False
 
 APP_NAME = "Forever Addon Manager"
-APP_VERSION = "2.2.0"
+APP_VERSION = "2.3.0"
 USER_AGENT = f"ForeverAddonManager/{APP_VERSION}"
 
 # Selbst-Update über GitHub-Releases dieses Repos
@@ -109,6 +109,8 @@ def load_config() -> dict:
     cfg.setdefault("check_on_start", True)
     cfg.setdefault("self_update_check", True)
     cfg.setdefault("skip_manager_version", "")
+    cfg.setdefault("bundles", {})        # flavor -> [[ordner, ...], ...] gemeinsam installiert
+    cfg.setdefault("group_addons", True)
     return cfg
 
 
@@ -642,6 +644,106 @@ def github_install_asset(asset: dict, root: str, flavor: str, token: str = "") -
         tmp_path.unlink(missing_ok=True)
 
 # --------------------------------------------------------------------------- #
+# Gruppierung zusammengehöriger Addon-Ordner
+# --------------------------------------------------------------------------- #
+
+LIB_RE = re.compile(r"^(!|lib|ace\d|ace-|ace_|callbackhandler|taintless)", re.IGNORECASE)
+
+
+def name_key(name: str) -> str:
+    """Präfix vor dem ersten Trenner: Bagnon_Bank -> bagnon, DBM-Core -> dbm."""
+    parts = re.split(r"[_\-]", name, maxsplit=1)
+    return parts[0].lower() if len(parts) > 1 else ""
+
+
+def compute_groups(addons: list, bundles: list[list[str]]) -> list[dict]:
+    """Fasst zusammengehörige Ordner zusammen.
+
+    Hinweise (in dieser Reihenfolge): gemeinsam installiert (ZIP/GitHub-Release),
+    Namens-Präfix (Bagnon_Bank -> Bagnon, QuestieDB -> Questie), gemeinsames Präfix vor
+    einem Trenner (Leatrix_Maps + Leatrix_Plus) und Abhängigkeiten, die nur eine einzige
+    Gruppe benötigt (BagBrother -> Bagnon). Bibliotheken bleiben eigenständig.
+    """
+    names = {a.name.lower(): a for a in addons}
+    parent = {n: n for n in names}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        if a in parent and b in parent:
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[rb] = ra
+
+    is_lib = {n: bool(LIB_RE.match(n)) for n in names}
+    # 1) gemeinsam installiert
+    for bundle in bundles:
+        members = [m.lower() for m in bundle if m.lower() in names]
+        for m in members[1:]:
+            union(members[0], m)
+    # 2) Präfix: questiedb beginnt mit questie, bagnon_bank mit bagnon
+    for a in names:
+        if len(a) < 4 or is_lib[a]:
+            continue
+        for b in names:
+            if b != a and not is_lib[b] and b.startswith(a):
+                union(a, b)
+    # 3) gemeinsames Präfix vor Trenner (mindestens zwei Ordner)
+    keys: dict[str, list[str]] = {}
+    for n in names:
+        k = name_key(n)
+        if len(k) >= 3 and not is_lib[n]:
+            keys.setdefault(k, []).append(n)
+    for members in keys.values():
+        for m in members[1:]:
+            union(members[0], m)
+    # 4) Abhängigkeit, die nur von einer Gruppe gebraucht wird
+    for _ in range(2):
+        users: dict[str, set] = {}
+        for n, a in names.items():
+            for d in a.deps:
+                d = d.lower()
+                if d in names and d != n and not is_lib[d]:
+                    users.setdefault(d, set()).add(find(n))
+        for d, groups in users.items():
+            if len(groups) == 1:
+                union(next(iter(groups)), d)
+
+    clusters: dict[str, list] = {}
+    for n in names:
+        clusters.setdefault(find(n), []).append(names[n])
+
+    result = []
+    for members in clusters.values():
+        members.sort(key=lambda a: a.name.lower())
+        low = [m.name.lower() for m in members]
+        root = None
+        if len(members) > 1:
+            # Hauptordner: der, mit dem die meisten anderen beginnen; sonst der meistgebrauchte
+            best = max(members, key=lambda m: (sum(1 for o in low if o != m.name.lower()
+                                                   and o.startswith(m.name.lower())),
+                                               sum(1 for o in members if m.name.lower()
+                                                   in (d.lower() for d in o.deps)),
+                                               -len(m.name)))
+            if any(o != best.name.lower() and o.startswith(best.name.lower()) for o in low) or \
+                    any(best.name.lower() in (d.lower() for d in o.deps) for o in members):
+                root = best
+        if root:
+            title = root.name
+        elif len(members) > 1:
+            prefix = os.path.commonprefix([m.name for m in members]).rstrip("_- ")
+            title = prefix if len(prefix) >= 3 else members[0].name
+        else:
+            title = members[0].name
+        result.append({"title": title, "root": root, "members": members})
+    return result
+
+
+# --------------------------------------------------------------------------- #
 # Selbst-Update des Managers
 # --------------------------------------------------------------------------- #
 
@@ -806,6 +908,12 @@ def apply_theme(root) -> dict:
                     indicatorbackground=t["bg"], indicatorforeground=t["gold"],
                     indicatorcolor=t["bg"], bordercolor=t["field_line"], focuscolor=t["panel"],
                     upperbordercolor=t["field_line"], lowerbordercolor=t["field_line"])
+    style.configure("Plain.TCheckbutton", background=t["bg"], foreground=t["text_dim"],
+                    focuscolor=t["bg"])
+    style.map("Plain.TCheckbutton", background=[("active", t["bg"])],
+              foreground=[("active", t["gold"])],
+              indicatorcolor=[("selected", t["gold"]), ("pressed", t["active"])],
+              indicatorbackground=[("selected", t["gold"])])
     style.map("TCheckbutton", background=[("active", t["panel"])],
               foreground=[("active", t["gold"])],
               indicatorcolor=[("selected", t["gold"]), ("pressed", t["active"])],
@@ -1265,10 +1373,18 @@ class App(BaseTk):
         self.filter_var.trace_add("write", lambda *a: self.render())
         ttk.Entry(head, textvariable=self.filter_var, width=24).pack(side="right", padx=(0, 14))
         ttk.Label(head, text="Filter").pack(side="right", padx=(0, 8))
+        self.group_var = tk.BooleanVar(value=bool(self.cfg.get("group_addons", True)))
+        ttk.Checkbutton(head, text="Gruppieren", variable=self.group_var, style="Plain.TCheckbutton",
+                        command=self._toggle_grouping).pack(side="right", padx=(0, 18))
 
         body = tk.Frame(content, bg=t["border_soft"], highlightthickness=0)
         body.pack(fill="both", expand=True, pady=(8, 0))
-        self.tree = ttk.Treeview(body, columns=self.COLUMNS, show="headings", selectmode="extended")
+        self.tree = ttk.Treeview(body, columns=self.COLUMNS, show="tree headings", selectmode="extended")
+        self.tree.column("#0", width=30, minwidth=30, stretch=False)
+        self.tree.heading("#0", text="")
+        self.open_groups: set[str] = set()
+        self.tree.bind("<<TreeviewOpen>>", lambda e: self._remember_open(True))
+        self.tree.bind("<<TreeviewClose>>", lambda e: self._remember_open(False))
         widths = {"status": 170, "name": 160, "title": 240, "version": 100,
                   "interface": 115, "source": 200, "update": 110}
         for c in self.COLUMNS:
@@ -1280,11 +1396,13 @@ class App(BaseTk):
         self.tree.pack(side="left", fill="both", expand=True, padx=(1, 0), pady=1)
         vsb.pack(side="right", fill="y", padx=(0, 1), pady=1)
         self.tree.tag_configure("odd", background=t["row_b"])
+        self.tree.tag_configure("group", font=self.fonts["bold"])
+        self.tree.tag_configure("child", foreground=t["text_dim"])
         self.tree.tag_configure("disabled", foreground=t["text_faint"])
         self.tree.tag_configure("warn", foreground=t["warn"])
         self.tree.tag_configure("old", foreground=t["old"])
         self.tree.tag_configure("update", foreground=t["update"])
-        self.tree.bind("<Double-1>", lambda e: self.show_details())
+        self.tree.bind("<Double-1>", self._on_double_click)
         self.tree.bind("<Control-a>", lambda e: (self.select_all(force=True), "break")[1])
         self.tree.bind("<Control-A>", lambda e: (self.select_all(force=True), "break")[1])
 
@@ -1404,8 +1522,45 @@ class App(BaseTk):
         self.after(100, self._poll_jobs)
 
     def selected_addons(self) -> list[Addon]:
-        names = set(self.tree.selection())
+        """Ausgewählte Addons; eine ausgewählte Gruppe zählt mit allen ihren Ordnern."""
+        names = set()
+        for iid in self.tree.selection():
+            if iid.startswith("grp:"):
+                names.update(self.tree.get_children(iid))
+                names.update(self.group_members.get(iid, []))
+            else:
+                names.add(iid)
         return [a for a in self.addons if a.name in names]
+
+    def _remember_open(self, is_open: bool):
+        iid = self.tree.focus()
+        if iid.startswith("grp:"):
+            (self.open_groups.add if is_open else self.open_groups.discard)(iid)
+
+    def _toggle_grouping(self):
+        self.cfg["group_addons"] = bool(self.group_var.get())
+        save_config(self.cfg)
+        self.render()
+
+    def _on_double_click(self, event):
+        iid = self.tree.identify_row(event.y)
+        if iid.startswith("grp:"):
+            return            # Gruppen klappt Treeview selbst auf/zu
+        if iid:
+            self.tree.selection_set(iid)
+            self.show_details()
+
+    def bundles(self) -> list:
+        return self.cfg["bundles"].setdefault(self.flavor, [])
+
+    def remember_bundle(self, folders: list[str]):
+        if len(folders) < 2:
+            return
+        new = set(f.lower() for f in folders)
+        kept = [b for b in self.bundles() if not new & {x.lower() for x in b}]
+        kept.append(sorted(folders))
+        self.cfg["bundles"][self.flavor] = kept
+        save_config(self.cfg)
 
     def remember_source(self, repo: str, info: dict, asset: dict, folders: list[str]):
         self.sources()[repo] = {"type": "github", "tag": info["tag"], "asset": asset["name"],
@@ -1504,20 +1659,86 @@ class App(BaseTk):
             tags.append("update")
         return (status, a.name, a.title, a.version, a.interface, source, upd), tags
 
+    def group_row(self, g: dict, child_rows: list):
+        """Werte und Tags für die Zeile einer Gruppe."""
+        members = g["members"]
+        on = sum(1 for m in members if m.enabled)
+        n = len(members)
+        status = "aktiv" if on == n else ("deaktiviert" if on == 0 else f"{on}/{n} aktiv")
+        child_tags = [t for _, tags, _ in child_rows for t in tags]
+        if "warn" in child_tags:
+            status += "  ·  Hinweis"
+        elif "old" in child_tags:
+            status += "  ·  veraltet"
+        root = g["root"]
+        ref = root or members[0]
+        rvals, _ = self.row_values(ref)
+        same = lambda i: rvals[i] if all(r[0][i] == rvals[i] for r in child_rows) else ""  # noqa
+        title = root.title if root else g["title"]
+        values = (status, f"{g['title']}  ({n})", title,
+                  rvals[3] if root else same(3), rvals[4] if root else same(4),
+                  same(5) or (rvals[5] if root else "gemischt"), same(6) or rvals[6])
+        tags = ["group"]
+        if on == 0:
+            tags.append("disabled")
+        elif "warn" in child_tags:
+            tags.append("warn")
+        elif "old" in child_tags:
+            tags.append("old")
+        if "update" in child_tags:
+            tags.append("update")
+        return values, tags
+
     def render(self):
+        sel_before = set(self.tree.selection())
         self.tree.delete(*self.tree.get_children())
+        self.group_members: dict[str, list[str]] = {}
         q = self.filter_var.get().lower().strip()
-        rows = []
-        for a in self.addons:
-            vals, tags = self.row_values(a)
-            if q and not any(q in str(v).lower() for v in vals):
-                continue
-            rows.append((vals, tags, a))
         idx = self.COLUMNS.index(self.sort_col)
-        rows.sort(key=lambda r: str(r[0][idx]).lower(), reverse=self.sort_rev)
-        for i, (vals, tags, a) in enumerate(rows):
-            self.tree.insert("", "end", iid=a.name, values=vals,
-                             tags=tags + (["odd"] if i % 2 else []))
+        grouping = bool(self.group_var.get())
+
+        def matches(vals):
+            return not q or any(q in str(v).lower() for v in vals)
+
+        if grouping:
+            src_bundles = [s.get("folders", []) for s in self.sources().values()]
+            groups = compute_groups(self.addons, self.bundles() + src_bundles)
+        else:
+            groups = [{"title": a.name, "root": None, "members": [a]} for a in self.addons]
+
+        entries = []   # (sortkey, kind, payload)
+        for g in groups:
+            child_rows = [(*self.row_values(m), m) for m in g["members"]]
+            if len(g["members"]) == 1:
+                vals, tags, a = child_rows[0]
+                if matches(vals):
+                    entries.append((str(vals[idx]).lower(), "single", (vals, tags, a)))
+                continue
+            gvals, gtags = self.group_row(g, child_rows)
+            if not (matches(gvals) or any(matches(r[0]) for r in child_rows)):
+                continue
+            entries.append((str(gvals[idx]).lower(), "group", (g, gvals, gtags, child_rows)))
+        entries.sort(key=lambda e: e[0], reverse=self.sort_rev)
+
+        for i, (_, kind, payload) in enumerate(entries):
+            stripe = ["odd"] if i % 2 else []
+            if kind == "single":
+                vals, tags, a = payload
+                self.tree.insert("", "end", iid=a.name, values=vals, tags=tags + stripe)
+                continue
+            g, gvals, gtags, child_rows = payload
+            gid = f"grp:{g['title'].lower()}"
+            self.group_members[gid] = [m.name for m in g["members"]]
+            self.tree.insert("", "end", iid=gid, values=gvals, tags=gtags + stripe,
+                             open=gid in self.open_groups)
+            for vals, tags, a in child_rows:
+                vals = (vals[0], "   " + vals[1], *vals[2:])
+                self.tree.insert(gid, "end", iid=a.name, values=vals,
+                                 tags=tags + ["child"] + stripe)
+
+        keep = [iid for iid in sel_before if self.tree.exists(iid)]
+        if keep:
+            self.tree.selection_set(keep)
         active = sum(1 for a in self.addons if a.enabled)
         old = sum(1 for a in self.addons if a.enabled and self.is_outdated(a))
         upd = sum(1 for r, tg in self.updates.items()
@@ -1564,12 +1785,12 @@ class App(BaseTk):
         root, flavor = self.root_path, self.flavor
 
         def job():
-            names = []
-            for f in files:
-                names += install_zip(Path(f), root, flavor)
-            return names
+            return [install_zip(Path(f), root, flavor) for f in files]
 
-        def done(names):
+        def done(res):
+            names = [n for part in res for n in part]
+            for part in res:
+                self.remember_bundle(part)
             log.info("ZIP installiert: %s", ", ".join(names))
             self.refresh()
             self.set_status(f"Installiert: {', '.join(names)}")
@@ -1606,6 +1827,7 @@ class App(BaseTk):
 
         def done(folders):
             self.remember_source(info["repo"], info, asset, folders)
+            self.remember_bundle(folders)
             self.updates.pop(info["repo"], None)
             save_config(self.cfg)
             log.info("GitHub installiert: %s %s (%s) -> %s", info["repo"], info["tag"],
@@ -1709,18 +1931,23 @@ class App(BaseTk):
             self.set_status("Auswahl aufgehoben.")
         else:
             self.tree.selection_set(items)
-            self.set_status(f"{len(items)} Addons ausgewählt.")
+            self.set_status(f"{len(self.selected_addons())} Addons ausgewählt.")
         self.tree.focus_set()
 
     def toggle_selected(self):
         sel = self.selected_addons()
         if not sel or not self.ready():
             return
+        # Einheitlich schalten: ist etwas aus, wird alles eingeschaltet – sonst alles aus.
+        # So bleiben Gruppen wie Bagnon immer vollständig an oder aus.
+        target = not all(a.enabled for a in sel)
         errors = []
         for a in sel:
+            if a.enabled == target:
+                continue
             try:
-                set_enabled(a, self.root_path, self.flavor, not a.enabled)
-                log.info("%s: %s", "Deaktiviert" if a.enabled else "Aktiviert", a.name)
+                set_enabled(a, self.root_path, self.flavor, target)
+                log.info("%s: %s", "Aktiviert" if target else "Deaktiviert", a.name)
             except Exception as e:  # noqa
                 errors.append(f"{a.name}: {e}")
         self.refresh()
