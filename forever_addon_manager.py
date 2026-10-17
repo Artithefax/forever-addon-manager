@@ -51,7 +51,7 @@ except Exception:                      # noqa – Paket fehlt oder Tk-Erweiterun
     HAS_DND = False
 
 APP_NAME = "Forever Addon Manager"
-APP_VERSION = "2.3.1"
+APP_VERSION = "2.4.0"
 USER_AGENT = f"ForeverAddonManager/{APP_VERSION}"
 
 # Selbst-Update über GitHub-Releases dieses Repos
@@ -109,9 +109,13 @@ def load_config() -> dict:
     cfg.setdefault("auto_backup", True)
     cfg.setdefault("check_on_start", True)
     cfg.setdefault("self_update_check", True)
+    # Modus für Manager-Updates: auto (still installieren), ask (nachfragen), off
+    if "self_update_mode" not in cfg:
+        cfg["self_update_mode"] = "auto" if cfg.get("self_update_check", True) else "off"
     cfg.setdefault("skip_manager_version", "")
     cfg.setdefault("bundles", {})        # flavor -> [[ordner, ...], ...] gemeinsam installiert
     cfg.setdefault("group_addons", True)
+    cfg.setdefault("layout", "klassisch")   # klassisch | seitenleiste | launcher
     return cfg
 
 
@@ -873,6 +877,7 @@ THEME = {
     "text":        "#f3f0e8",   # Pergament-Weiß
     "text_dim":    "#b4bbb9",
     "text_faint":  "#6b7372",
+    "text_faint2": "#8e9694",   # Nebentexte mit ausreichend Kontrast
     "btn_primary": "#644e2b",   # Bronze-Button
     "btn_primary_hi": "#7a5f34",
     "btn_text":    "#fff7e6",
@@ -911,6 +916,11 @@ def apply_theme(root) -> dict:
         "brand": pick_font(root, serif, 9, "bold"),
         "title": pick_font(root, serif, 22, "bold"),
         "sub":   pick_font(root, serif, 10, "italic"),
+        "page":  pick_font(root, serif, 18, "bold"),
+        "hero":  pick_font(root, serif, 26, "bold"),
+        "play":  pick_font(root, serif, 15, "bold"),
+        "tile":  pick_font(root, serif, 20, "bold"),
+        "card":  pick_font(root, serif, 13, "bold"),
     }
     root.configure(bg=t["bg"])
 
@@ -1012,6 +1022,72 @@ def apply_theme(root) -> dict:
                     font=fonts["label"], bordercolor=t["line"], lightcolor=t["header"],
                     darkcolor=t["header"], relief="flat", padding=(8, 7))
     style.map("Treeview.Heading", background=[("active", t["panel"])])
+
+    # --- Ansicht „Seitenleiste“ ---
+    style.configure("Side.TFrame", background=t["header"])
+    style.configure("Side.TLabel", background=t["header"], foreground=t["text_dim"], font=fonts["small"])
+    style.configure("SideKicker.TLabel", background=t["header"], foreground=t["gold"], font=fonts["label"])
+    style.configure("Nav.TButton", background=t["header"], foreground=t["text"], font=fonts["base"],
+                    bordercolor=t["header"], lightcolor=t["header"], darkcolor=t["header"],
+                    anchor="w", padding=(14, 9), relief="flat")
+    style.map("Nav.TButton", background=[("active", t["panel"])], foreground=[("active", t["gold"])],
+              bordercolor=[("active", t["header"])], lightcolor=[("active", t["panel"])],
+              darkcolor=[("active", t["panel"])])
+    style.configure("NavActive.TButton", background=t["active"], foreground=t["gold"], font=fonts["bold"],
+                    bordercolor=t["gold"], lightcolor=t["active"], darkcolor=t["active"],
+                    anchor="w", padding=(14, 9), relief="flat")
+    style.map("NavActive.TButton", background=[("active", t["active"])])
+    style.configure("Kicker.TLabel", background=t["bg"], foreground=t["gold"], font=fonts["label"])
+    style.configure("PageTitle.TLabel", background=t["bg"], foreground=t["text"], font=fonts["page"])
+    style.configure("Body.TLabel", background=t["bg"], foreground=t["text_dim"])
+    style.configure("Detail.TFrame", background=t["row_a"])
+    style.configure("DetailKey.TLabel", background=t["row_a"], foreground=t["text_faint2"])
+    style.configure("DetailVal.TLabel", background=t["row_a"], foreground=t["text"])
+    style.configure("DetailKicker.TLabel", background=t["row_a"], foreground=t["gold"], font=fonts["label"])
+    style.configure("DetailTitle.TLabel", background=t["row_a"], foreground=t["text"], font=fonts["page"])
+    style.configure("DetailNote.TLabel", background=t["row_a"], foreground=t["text_dim"])
+    style.configure("Danger.TButton", background=t["bg"], foreground=t["warn"], bordercolor="#5a3d1c",
+                    lightcolor=t["bg"], darkcolor=t["bg"])
+    style.map("Danger.TButton", background=[("active", "#21160c")], bordercolor=[("active", t["warn"])])
+
+    # --- Ansicht „Launcher“ ---
+    style.configure("Head.TFrame", background=t["header"])
+    style.configure("HeadKicker.TLabel", background=t["header"], foreground=t["gold"], font=fonts["brand"])
+    style.configure("HeadTitle.TLabel", background=t["header"], foreground=t["gold"], font=fonts["hero"])
+    style.configure("HeadInfo.TLabel", background=t["header"], foreground=t["text_dim"], font=fonts["small"])
+    style.configure("BigPlay.TButton", background=t["btn_primary"], foreground=t["btn_text"],
+                    bordercolor=t["gold"], lightcolor=t["btn_primary"], darkcolor=t["btn_primary"],
+                    font=fonts["play"], padding=(34, 14))
+    style.map("BigPlay.TButton",
+              background=[("pressed", t["btn_primary"]), ("active", t["btn_primary_hi"]),
+                          ("disabled", t["panel"])],
+              foreground=[("disabled", t["text_faint"])],
+              lightcolor=[("active", t["btn_primary_hi"])], darkcolor=[("active", t["btn_primary_hi"])])
+    style.configure("Tile.TFrame", background=t["panel"])
+    style.configure("TileKicker.TLabel", background=t["panel"], foreground=t["gold"], font=fonts["label"])
+    style.configure("TileValue.TLabel", background=t["panel"], foreground=t["text"], font=fonts["tile"])
+    style.configure("TileHint.TLabel", background=t["panel"], foreground=t["text_faint2"], font=fonts["small"])
+    style.configure("Card.TFrame", background=t["row_a"])
+    style.configure("CardTitle.TLabel", background=t["row_a"], foreground=t["text"], font=fonts["card"])
+    style.configure("CardSub.TLabel", background=t["row_a"], foreground=t["text_faint2"], font=fonts["small"])
+    style.configure("CardLink.TButton", background=t["row_a"], foreground=t["gold"], font=fonts["small"],
+                    bordercolor=t["row_a"], lightcolor=t["row_a"], darkcolor=t["row_a"], padding=(0, 2))
+    style.map("CardLink.TButton", foreground=[("active", t["text"])], background=[("active", t["row_a"])],
+              bordercolor=[("active", t["row_a"])])
+    style.configure("ToggleOn.TButton", background=t["btn_primary"], foreground=t["btn_text"],
+                    bordercolor=t["gold"], lightcolor=t["btn_primary"], darkcolor=t["btn_primary"],
+                    font=fonts["label"], padding=(10, 3))
+    style.map("ToggleOn.TButton", background=[("active", t["btn_primary_hi"])])
+    style.configure("ToggleOff.TButton", background=t["pill"], foreground=t["text_dim"],
+                    bordercolor=t["border_soft"], lightcolor=t["pill"], darkcolor=t["pill"],
+                    font=fonts["label"], padding=(10, 3))
+    style.map("ToggleOff.TButton", background=[("active", t["active"])], foreground=[("active", t["gold"])])
+    for name, bg, fg, bc, fnt in (("TMenubutton", t["panel"], t["text"], t["border"], fonts["base"]),
+                                  ("Primary.TMenubutton", t["btn_primary"], t["btn_text"], t["gold"], fonts["bold"])):
+        style.configure(name, background=bg, foreground=fg, bordercolor=bc, lightcolor=bg, darkcolor=bg,
+                        arrowcolor=fg, font=fnt, padding=(12, 5), relief="solid")
+        style.map(name, background=[("active", t["active"] if name == "TMenubutton" else t["btn_primary_hi"])],
+                  foreground=[("active", t["gold"] if name == "TMenubutton" else t["btn_text"])])
 
     style.configure("Vertical.TScrollbar", background=t["panel"], troughcolor=t["bg"],
                     bordercolor=t["bg"], arrowcolor=t["gold"],
@@ -1255,6 +1331,7 @@ SET_ALL_ON = "— Alle aktivieren —"
 
 class App(BaseTk):
     COLUMNS = ("status", "name", "title", "version", "interface", "source", "update")
+    UPDATE_MODES = {"auto": "Automatisch installieren", "ask": "Nur nachfragen", "off": "Aus"}
     HEADINGS = {
         "status": "Status", "name": "Ordner", "title": "Titel", "version": "Version",
         "interface": "Interface", "source": "Quelle", "update": "Update",
@@ -1263,8 +1340,8 @@ class App(BaseTk):
     def __init__(self):
         super().__init__()
         self.title(f"{APP_NAME} {APP_VERSION}")
-        self.geometry("1180x780")
-        self.minsize(900, 520)
+        self.geometry("1280x800")
+        self.minsize(1080, 600)
 
         self.cfg = load_config()
         self.addons: list[Addon] = []
@@ -1289,60 +1366,259 @@ class App(BaseTk):
         if self.cfg.get("check_on_start") and self.sources():
             self.after(700, lambda: self.check_updates(silent=True))
         cleanup_self_update()
-        if self.cfg.get("self_update_check"):
+        if self.cfg.get("self_update_mode") != "off":
             self.after(1500, lambda: self.check_manager_update(silent=True))
         log.info("Gestartet: %s %s, Ordner=%s, Version=%s", APP_NAME, APP_VERSION,
                  self.root_path, self.flavor)
 
     # ----- Aufbau ---------------------------------------------------------- #
+    LAYOUTS = {"klassisch": "Klassisch", "seitenleiste": "Seitenleiste", "launcher": "Launcher"}
+    TREE_COLUMNS = {"klassisch": COLUMNS,
+                    "seitenleiste": ("name", "version", "source", "status")}
+
     def _build_ui(self):
-        t = THEME
         self.fonts = apply_theme(self)
         try:
             self._icon = make_icon(self)
             self.iconphoto(True, self._icon)
         except tk.TclError:
             pass
+        self._init_vars()
+        self._build_layout()
 
-        # Kopfzeile: Wappen + zweizeiliger Schriftzug
-        header = tk.Canvas(self, height=86, bg=t["header"], highlightthickness=0)
+    def _init_vars(self):
+        """Werte, die beim Wechsel der Ansicht erhalten bleiben."""
+        self.root_var = tk.StringVar(value=self.cfg["wow_root"])
+        self.flavor_var = tk.StringVar(value=self.cfg["flavor"])
+        self.set_var = tk.StringVar()
+        self.auto_backup_var = tk.BooleanVar(value=bool(self.cfg.get("auto_backup")))
+        self.check_start_var = tk.BooleanVar(value=bool(self.cfg.get("check_on_start")))
+        self.self_update_var = tk.StringVar(value=self.UPDATE_MODES.get(self.cfg.get("self_update_mode"),
+                                                                         self.UPDATE_MODES["auto"]))
+        self.count_var = tk.StringVar()
+        self.filter_var = tk.StringVar()
+        self.filter_var.trace_add("write", lambda *a: self.render())
+        self.group_var = tk.BooleanVar(value=bool(self.cfg.get("group_addons", True)))
+        self.status_var = tk.StringVar(value="Bereit.")
+        self.game_info_var = tk.StringVar()
+        self.layout_var = tk.StringVar(value=self.LAYOUTS.get(self.cfg.get("layout"), "Klassisch"))
+        self.sort_col, self.sort_rev = "name", False
+        self.open_groups: set[str] = set()
+        self.group_members: dict[str, list[str]] = {}
+
+    @property
+    def layout(self) -> str:
+        key = self.cfg.get("layout", "klassisch")
+        return key if key in self.LAYOUTS else "klassisch"
+
+    def _build_layout(self):
+        self.tree = None
+        self.header = None
+        self.cards_inner = None
+        self.detail = None
+        self.nav_buttons: dict[str, ttk.Button] = {}
+        self.pages: dict[str, ttk.Frame] = {}
+        self.stat_vars: dict[str, tuple] = {}
+        self.ui = ttk.Frame(self)
+        self.ui.pack(fill="both", expand=True)
+        {"seitenleiste": self._layout_sidebar,
+         "launcher": self._layout_launcher}.get(self.layout, self._layout_classic)(self.ui)
+
+    def switch_layout(self, label: str | None = None):
+        key = next((k for k, v in self.LAYOUTS.items() if v == (label or self.layout_var.get())), "klassisch")
+        if key == self.layout:
+            return
+        if self.busy:
+            messagebox.showinfo(APP_NAME, "Bitte warten, bis der laufende Vorgang fertig ist.")
+            self.layout_var.set(self.LAYOUTS[self.layout])
+            return
+        self.cfg["layout"] = key
+        save_config(self.cfg)
+        self.layout_var.set(self.LAYOUTS[key])
+        self.ui.destroy()
+        self._build_layout()
+        self.flavor_cb["values"] = [flavor_label(f) for f in list_flavors(self.root_path)]
+        self.reload_sets()
+        self.update_game_info()
+        self.render()
+        log.info("Ansicht gewechselt: %s", key)
+        self.set_status(f"Ansicht „{self.LAYOUTS[key]}“ aktiv.")
+
+    # ----- Gemeinsame Bausteine ------------------------------------------- #
+    def _w_path(self, parent, frame_style="Panel.TFrame", label_style="Panel.TLabel", with_version=True):
+        row = ttk.Frame(parent, style=frame_style)
+        ttk.Label(row, text="WoW-Ordner", style=label_style).pack(side="left", padx=(0, 8))
+        entry = ttk.Entry(row, textvariable=self.root_var, width=50)
+        entry.pack(side="left", fill="x", expand=True)
+        entry.bind("<Return>", lambda e: self._load_flavors())
+        entry.bind("<FocusOut>", lambda e: self._load_flavors()
+                   if self.root_path != self.cfg.get("wow_root") else None)
+        ttk.Button(row, text="Durchsuchen…", command=self.browse_root).pack(
+            side="left", padx=(8, 18 if with_version else 0))
+        if with_version:
+            ttk.Label(row, text="Version", style=label_style).pack(side="left", padx=(0, 8))
+            self._w_flavor(row).pack(side="left")
+        return row
+
+    def _w_flavor(self, parent, width=24):
+        cb = ttk.Combobox(parent, textvariable=self.flavor_var, state="readonly", width=width)
+        cb.bind("<<ComboboxSelected>>", lambda e: self.on_flavor_change())
+        self.flavor_cb = cb
+        return cb
+
+    def _w_sets(self, parent, frame_style="Panel.TFrame", label_style="Panel.TLabel"):
+        row = ttk.Frame(parent, style=frame_style)
+        ttk.Label(row, text="Addon-Set", style=label_style).pack(side="left", padx=(0, 8))
+        self.set_cb = ttk.Combobox(row, textvariable=self.set_var, state="readonly", width=24)
+        self.set_cb.pack(side="left")
+        ttk.Button(row, text="Anwenden", command=self.apply_set,
+                   style="Primary.TButton").pack(side="left", padx=(8, 6))
+        ttk.Button(row, text="Aktive als Set speichern…", command=self.save_set).pack(side="left", padx=(0, 6))
+        ttk.Button(row, text="Set löschen", command=self.delete_set).pack(side="left")
+        return row
+
+    def _w_check(self, parent, text, var, panel=True):
+        return ttk.Checkbutton(parent, text=text, variable=var, command=self.save_options,
+                               style="TCheckbutton" if panel else "Plain.TCheckbutton")
+
+    def _w_update_mode(self, parent, label_style="Panel.TLabel"):
+        row = ttk.Frame(parent, style="Panel.TFrame" if label_style == "Panel.TLabel" else "TFrame")
+        ttk.Label(row, text="Manager-Updates", style=label_style).pack(side="left", padx=(0, 8))
+        cb = ttk.Combobox(row, textvariable=self.self_update_var, state="readonly", width=22,
+                          values=list(self.UPDATE_MODES.values()))
+        cb.pack(side="left")
+        cb.bind("<<ComboboxSelected>>", lambda e: self.save_options())
+        return row
+
+    def _w_layout_choice(self, parent, label_style="Panel.TLabel", on_change=None):
+        row = ttk.Frame(parent, style="Panel.TFrame" if label_style == "Panel.TLabel" else "TFrame")
+        ttk.Label(row, text="Ansicht", style=label_style).pack(side="left", padx=(0, 8))
+        cb = ttk.Combobox(row, textvariable=self.layout_var, state="readonly", width=14,
+                          values=list(self.LAYOUTS.values()))
+        cb.pack(side="left")
+        cb.bind("<<ComboboxSelected>>", lambda e: (on_change or self.switch_layout)())
+        return row
+
+    def _w_filter(self, parent, width=24):
+        return ttk.Entry(parent, textvariable=self.filter_var, width=width)
+
+    def _w_play(self, parent, style="Play.TButton", text="▶  Spielen"):
+        self.play_btn = ttk.Button(parent, text=text, style=style, cursor="hand2", command=self.start_wow)
+        return self.play_btn
+
+    def _w_links(self, parent, style="Link.TButton"):
+        row = ttk.Frame(parent, style="Header.TFrame")
+        for text, url in HEADER_LINKS:
+            ttk.Button(row, text=f"{text}  ↗", style=style, cursor="hand2",
+                       command=lambda u=url: self.open_link(u)).pack(side="left", padx=(6, 0))
+        return row
+
+    def _w_statusbar(self, parent):
+        t = THEME
+        ttk.Label(parent, textvariable=self.status_var, style="Status.TLabel",
+                  anchor="w").pack(fill="x", side="bottom")
+        tk.Frame(parent, height=1, bg=t["line"]).pack(fill="x", side="bottom")
+
+    def _w_add_menu(self, parent, style="Primary.TMenubutton", text="+  Hinzufügen"):
+        mb = ttk.Menubutton(parent, text=text, style=style, cursor="hand2")
+        mb["menu"] = self._menu(mb, [("ZIP-Datei installieren…", self.install_zip_dialog),
+                                     ("Von GitHub…", self.install_github_dialog),
+                                     ("Addon-Paket importieren…", self.import_pack_dialog)])
+        return mb
+
+    def _menu(self, parent, items) -> tk.Menu:
+        t = THEME
+        m = tk.Menu(parent, tearoff=False, bg=t["panel"], fg=t["text"], activebackground=t["active"],
+                    activeforeground=t["gold"], bd=0, relief="flat", font=self.fonts["base"])
+        for item in items:
+            if item is None:
+                m.add_separator()
+            else:
+                m.add_command(label="  " + item[0] + "  ", command=item[1])
+        return m
+
+    def _w_tree(self, parent, columns):
+        t = THEME
+        body = tk.Frame(parent, bg=t["border_soft"], highlightthickness=0)
+        self.tree = ttk.Treeview(body, columns=self.COLUMNS, displaycolumns=columns,
+                                 show="tree headings", selectmode="extended")
+        self.tree.column("#0", width=30, minwidth=30, stretch=False)
+        self.tree.heading("#0", text="")
+        self.tree.bind("<<TreeviewOpen>>", lambda e: self._remember_open(True))
+        self.tree.bind("<<TreeviewClose>>", lambda e: self._remember_open(False))
+        widths = {"status": 170, "name": 160, "title": 240, "version": 100,
+                  "interface": 115, "source": 200, "update": 110}
+        if self.layout == "seitenleiste":
+            widths.update(name=210, version=90, source=170, status=120)
+        for c in self.COLUMNS:
+            self.tree.heading(c, text=spaced(self.HEADINGS[c]), anchor="w",
+                              command=lambda c=c: self.sort_by(c))
+            self.tree.column(c, width=widths[c], anchor="w",
+                             stretch=c in (("name",) if self.layout == "seitenleiste"
+                                           else ("title", "source")))
+        vsb = ttk.Scrollbar(body, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=vsb.set)
+        self.tree.pack(side="left", fill="both", expand=True, padx=(1, 0), pady=1)
+        vsb.pack(side="right", fill="y", padx=(0, 1), pady=1)
+        self.tree.tag_configure("odd", background=t["row_b"])
+        self.tree.tag_configure("group", font=self.fonts["bold"])
+        self.tree.tag_configure("child", foreground=t["text_dim"])
+        self.tree.tag_configure("disabled", foreground=t["text_faint"])
+        self.tree.tag_configure("warn", foreground=t["warn"])
+        self.tree.tag_configure("old", foreground=t["old"])
+        self.tree.tag_configure("update", foreground=t["update"])
+        self.tree.bind("<Double-1>", self._on_double_click)
+        self.tree.bind("<Control-a>", lambda e: (self.select_all(force=True), "break")[1])
+        self.tree.bind("<Control-A>", lambda e: (self.select_all(force=True), "break")[1])
+        self.tree.bind("<<TreeviewSelect>>", lambda e: self.update_detail())
+        return body
+
+    def _scroll_area(self, parent, bg):
+        """Scrollbarer Bereich (Canvas + Frame) mit Mausrad-Unterstützung."""
+        wrap = tk.Frame(parent, bg=bg)
+        canvas = tk.Canvas(wrap, bg=bg, highlightthickness=0)
+        vsb = ttk.Scrollbar(wrap, orient="vertical", command=canvas.yview)
+        inner = tk.Frame(canvas, bg=bg)
+        win = canvas.create_window(0, 0, window=inner, anchor="nw")
+        inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda e: (canvas.itemconfigure(win, width=e.width), self._relayout_cards()))
+        canvas.configure(yscrollcommand=vsb.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+
+        def wheel(e):
+            delta = -1 if (getattr(e, "delta", 0) > 0 or getattr(e, "num", 0) == 4) else 1
+            canvas.yview_scroll(delta * 2, "units")
+        canvas.bind("<Enter>", lambda e: (canvas.bind_all("<MouseWheel>", wheel),
+                                          canvas.bind_all("<Button-4>", wheel),
+                                          canvas.bind_all("<Button-5>", wheel)))
+        canvas.bind("<Leave>", lambda e: (canvas.unbind_all("<MouseWheel>"),
+                                          canvas.unbind_all("<Button-4>"),
+                                          canvas.unbind_all("<Button-5>")))
+        self.cards_canvas = canvas
+        return wrap, inner
+
+    # ----- Ansicht 1: Klassisch -------------------------------------------- #
+    def _layout_classic(self, root):
+        t = THEME
+        self._w_statusbar(root)
+        header = tk.Canvas(root, height=86, bg=t["header"], highlightthickness=0)
         header.pack(fill="x")
         self.header = header
         self.link_bar = ttk.Frame(header, style="Header.TFrame")
-        self.play_btn = ttk.Button(self.link_bar, text="▶  Spielen", style="Play.TButton",
-                                   cursor="hand2", command=self.start_wow)
-        self.play_btn.pack(side="left", padx=(0, 10))
-        for text, url in HEADER_LINKS:
-            ttk.Button(self.link_bar, text=f"{text}  ↗", style="Link.TButton", cursor="hand2",
-                       command=lambda u=url: self.open_link(u)).pack(side="left", padx=(6, 0))
+        self._w_play(self.link_bar).pack(side="left", padx=(0, 10))
+        self._w_links(self.link_bar).pack(side="left")
         header.bind("<Configure>", lambda e: self.draw_header())
 
-        content = ttk.Frame(self, padding=(20, 14, 20, 8))
+        content = ttk.Frame(root, padding=(20, 14, 20, 8))
         content.pack(fill="both", expand=True)
-
-        # Kasten: Installation + Aktionen
         ttk.Label(content, text=spaced("Installation"), style="Section.TLabel").pack(anchor="w")
         box = tk.Frame(content, bg=t["panel"], highlightthickness=1,
                        highlightbackground=t["border"], highlightcolor=t["border"])
         box.pack(fill="x", pady=(6, 14))
         inner = ttk.Frame(box, style="Panel.TFrame", padding=(14, 12))
         inner.pack(fill="x")
-
-        top = ttk.Frame(inner, style="Panel.TFrame")
-        top.pack(fill="x")
-        ttk.Label(top, text="WoW-Ordner", style="Panel.TLabel").pack(side="left", padx=(0, 8))
-        self.root_var = tk.StringVar(value=self.cfg["wow_root"])
-        root_entry = ttk.Entry(top, textvariable=self.root_var, width=55)
-        root_entry.pack(side="left", fill="x", expand=True)
-        root_entry.bind("<Return>", lambda e: self._load_flavors())
-        root_entry.bind("<FocusOut>", lambda e: self._load_flavors()
-                        if self.root_path != self.cfg.get("wow_root") else None)
-        ttk.Button(top, text="Durchsuchen…", command=self.browse_root).pack(side="left", padx=(8, 18))
-        ttk.Label(top, text="Version", style="Panel.TLabel").pack(side="left", padx=(0, 8))
-        self.flavor_var = tk.StringVar(value=self.cfg["flavor"])
-        self.flavor_cb = ttk.Combobox(top, textvariable=self.flavor_var, state="readonly", width=24)
-        self.flavor_cb.pack(side="left")
-        self.flavor_cb.bind("<<ComboboxSelected>>", lambda e: self.on_flavor_change())
+        self._w_path(inner).pack(fill="x")
 
         P = "Primary.TButton"
         rows = [
@@ -1368,89 +1644,36 @@ class App(BaseTk):
             for text, cmd, st in reversed(right):
                 ttk.Button(bar, text=text, command=cmd, style=st or "TButton").pack(side="right", padx=(6, 0))
 
-        # Sets + Einstellungen
         tk.Frame(inner, height=1, bg=t["line"]).pack(fill="x", pady=(12, 10))
-        sets = ttk.Frame(inner, style="Panel.TFrame")
+        sets = self._w_sets(inner)
         sets.pack(fill="x")
-        ttk.Label(sets, text="Addon-Set", style="Panel.TLabel").pack(side="left", padx=(0, 8))
-        self.set_var = tk.StringVar()
-        self.set_cb = ttk.Combobox(sets, textvariable=self.set_var, state="readonly", width=24)
-        self.set_cb.pack(side="left")
-        ttk.Button(sets, text="Anwenden", command=self.apply_set,
-                   style=P).pack(side="left", padx=(8, 6))
-        ttk.Button(sets, text="Aktive als Set speichern…", command=self.save_set).pack(side="left", padx=(0, 6))
-        ttk.Button(sets, text="Set löschen", command=self.delete_set).pack(side="left")
-
-        ttk.Button(sets, text="Log öffnen", command=lambda: open_in_explorer(LOG_FILE)
-                   if LOG_FILE.exists() else None).pack(side="right")
+        ttk.Button(sets, text="Log öffnen", command=self.open_log).pack(side="right")
+        self._w_layout_choice(sets).pack(side="right", padx=(0, 14))
 
         opts = ttk.Frame(inner, style="Panel.TFrame")
         opts.pack(fill="x", pady=(10, 0))
-        self.auto_backup_var = tk.BooleanVar(value=bool(self.cfg.get("auto_backup")))
-        self.check_start_var = tk.BooleanVar(value=bool(self.cfg.get("check_on_start")))
-        ttk.Checkbutton(opts, text="Beim Start auf Updates prüfen", variable=self.check_start_var,
-                        command=self.save_options).pack(side="left")
-        ttk.Checkbutton(opts, text="Vor Updates automatisch WTF sichern", variable=self.auto_backup_var,
-                        command=self.save_options).pack(side="left", padx=(24, 0))
-        self.self_update_var = tk.BooleanVar(value=bool(self.cfg.get("self_update_check")))
-        ttk.Checkbutton(opts, text="Beim Start nach Manager-Updates suchen", variable=self.self_update_var,
-                        command=self.save_options).pack(side="left", padx=(24, 0))
+        self._w_check(opts, "Beim Start auf Updates prüfen", self.check_start_var).pack(side="left")
+        self._w_check(opts, "Vor Updates automatisch WTF sichern", self.auto_backup_var).pack(
+            side="left", padx=(24, 0))
+        self._w_update_mode(opts).pack(side="left", padx=(24, 0))
         ttk.Button(opts, text="Manager-Update suchen", command=self.check_manager_update).pack(side="right")
 
-        # Liste
         head = ttk.Frame(content)
         head.pack(fill="x")
         ttk.Label(head, text=spaced("Installierte Addons"), style="Section.TLabel").pack(side="left")
         if HAS_DND:
             ttk.Label(head, text="   ZIP- oder .faddons-Dateien einfach ins Fenster ziehen",
                       style="Hint.TLabel").pack(side="left")
-        self.count_var = tk.StringVar()
         ttk.Label(head, textvariable=self.count_var, style="Count.TLabel").pack(side="right")
-        self.filter_var = tk.StringVar()
-        self.filter_var.trace_add("write", lambda *a: self.render())
-        ttk.Entry(head, textvariable=self.filter_var, width=24).pack(side="right", padx=(0, 14))
+        self._w_filter(head).pack(side="right", padx=(0, 14))
         ttk.Label(head, text="Filter").pack(side="right", padx=(0, 8))
-        self.group_var = tk.BooleanVar(value=bool(self.cfg.get("group_addons", True)))
         ttk.Checkbutton(head, text="Gruppieren", variable=self.group_var, style="Plain.TCheckbutton",
                         command=self._toggle_grouping).pack(side="right", padx=(0, 18))
-
-        body = tk.Frame(content, bg=t["border_soft"], highlightthickness=0)
-        body.pack(fill="both", expand=True, pady=(8, 0))
-        self.tree = ttk.Treeview(body, columns=self.COLUMNS, show="tree headings", selectmode="extended")
-        self.tree.column("#0", width=30, minwidth=30, stretch=False)
-        self.tree.heading("#0", text="")
-        self.open_groups: set[str] = set()
-        self.tree.bind("<<TreeviewOpen>>", lambda e: self._remember_open(True))
-        self.tree.bind("<<TreeviewClose>>", lambda e: self._remember_open(False))
-        widths = {"status": 170, "name": 160, "title": 240, "version": 100,
-                  "interface": 115, "source": 200, "update": 110}
-        for c in self.COLUMNS:
-            self.tree.heading(c, text=spaced(self.HEADINGS[c]), anchor="w",
-                              command=lambda c=c: self.sort_by(c))
-            self.tree.column(c, width=widths[c], anchor="w", stretch=c in ("title", "source"))
-        vsb = ttk.Scrollbar(body, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=vsb.set)
-        self.tree.pack(side="left", fill="both", expand=True, padx=(1, 0), pady=1)
-        vsb.pack(side="right", fill="y", padx=(0, 1), pady=1)
-        self.tree.tag_configure("odd", background=t["row_b"])
-        self.tree.tag_configure("group", font=self.fonts["bold"])
-        self.tree.tag_configure("child", foreground=t["text_dim"])
-        self.tree.tag_configure("disabled", foreground=t["text_faint"])
-        self.tree.tag_configure("warn", foreground=t["warn"])
-        self.tree.tag_configure("old", foreground=t["old"])
-        self.tree.tag_configure("update", foreground=t["update"])
-        self.tree.bind("<Double-1>", self._on_double_click)
-        self.tree.bind("<Control-a>", lambda e: (self.select_all(force=True), "break")[1])
-        self.tree.bind("<Control-A>", lambda e: (self.select_all(force=True), "break")[1])
-
-        # Statusleiste
-        self.status_var = tk.StringVar(value="Bereit.")
-        ttk.Label(self, textvariable=self.status_var, style="Status.TLabel",
-                  anchor="w").pack(fill="x", side="bottom", before=content)
-        tk.Frame(self, height=1, bg=t["line"]).pack(fill="x", side="bottom", before=content)
-        self.sort_col, self.sort_rev = "name", False
+        self._w_tree(content, self.TREE_COLUMNS["klassisch"]).pack(fill="both", expand=True, pady=(8, 0))
 
     def draw_header(self):
+        if not self.header or not self.header.winfo_exists():
+            return
         t, h = THEME, self.header
         h.delete("all")
         w = h.winfo_width()
@@ -1464,6 +1687,498 @@ class App(BaseTk):
         h.create_text(w - 20, 26, anchor="e", fill=t["text_dim"], font=self.fonts["small"], text=info)
         h.create_window(w - 20, 58, anchor="e", window=self.link_bar)
         h.create_line(0, 85, w, 85, fill=t["line"])
+
+    def update_game_info(self):
+        text = f"Spielversion {self.game[0]}  ·  Interface {self.game[1]}" if self.game else "Spielversion unbekannt"
+        self.game_info_var.set(text)
+        self.draw_header()
+
+    def open_log(self):
+        if LOG_FILE.exists():
+            open_in_explorer(LOG_FILE)
+
+    # ----- Ansicht 2: Seitenleiste ----------------------------------------- #
+    PAGES = [("addons", "Addons"), ("install", "Installieren"), ("sets", "Addon-Sets"),
+             ("updates", "Updates"), ("backups", "Backups"), ("share", "Teilen"),
+             ("settings", "Einstellungen")]
+
+    def _layout_sidebar(self, root):
+        t = THEME
+        self._w_statusbar(root)
+        side = ttk.Frame(root, style="Side.TFrame", width=238, padding=(14, 18, 14, 16))
+        side.pack(side="left", fill="y")
+        side.pack_propagate(False)
+        tk.Frame(root, width=1, bg=t["line"]).pack(side="left", fill="y")
+
+        brand = tk.Canvas(side, height=64, bg=t["header"], highlightthickness=0)
+        brand.pack(fill="x")
+        draw_emblem(brand, 0, 4, 54)
+        brand.create_text(64, 20, anchor="w", fill=t["gold"], font=self.fonts["label"],
+                          text=spaced("Forever Addon"))
+        brand.create_text(63, 44, anchor="w", fill=t["gold"], font=self.fonts["page"], text="MANAGER")
+
+        ttk.Label(side, text=spaced("Spielversion"), style="SideKicker.TLabel").pack(anchor="w", pady=(18, 6))
+        self._w_flavor(side, width=22).pack(fill="x")
+
+        nav = ttk.Frame(side, style="Side.TFrame")
+        nav.pack(fill="x", pady=(18, 0))
+        for key, label in self.PAGES:
+            b = ttk.Button(nav, text=label, style="Nav.TButton", cursor="hand2",
+                           command=lambda k=key: self.show_page(k))
+            b.pack(fill="x", pady=1)
+            self.nav_buttons[key] = b
+
+        bottom = ttk.Frame(side, style="Side.TFrame")
+        bottom.pack(side="bottom", fill="x")
+        tk.Frame(bottom, height=1, bg=t["line"]).pack(fill="x", pady=(0, 12))
+        self._w_play(bottom, style="BigPlay.TButton", text="▶   SPIELEN").pack(fill="x")
+        ttk.Label(bottom, textvariable=self.game_info_var, style="Side.TLabel", anchor="center",
+                  justify="center", wraplength=200).pack(fill="x", pady=(8, 0))
+        ttk.Label(bottom, text=f"Manager v{APP_VERSION}", style="Side.TLabel",
+                  anchor="center").pack(fill="x")
+
+        main = ttk.Frame(root)
+        main.pack(side="left", fill="both", expand=True)
+        self.page_host = main
+        self._page_addons(main)
+        self._page_install(main)
+        self._page_sets(main)
+        self._page_updates(main)
+        self._page_backups(main)
+        self._page_share(main)
+        self._page_settings(main)
+        self.show_page(self.cfg.get("last_page", "addons"))
+
+    def _page(self, key, kicker, title, text=""):
+        page = ttk.Frame(self.page_host, padding=(26, 22, 26, 14))
+        self.pages[key] = page
+        head = ttk.Frame(page)
+        head.pack(fill="x")
+        left = ttk.Frame(head)
+        left.pack(side="left", fill="x", expand=True)
+        ttk.Label(left, text=spaced(kicker), style="Kicker.TLabel").pack(anchor="w")
+        ttk.Label(left, text=title, style="PageTitle.TLabel").pack(anchor="w", pady=(2, 0))
+        if text:
+            ttk.Label(page, text=text, style="Body.TLabel", wraplength=760, justify="left").pack(
+                anchor="w", pady=(8, 0))
+        return page, head
+
+    def _card_box(self, parent, pady=(16, 0)):
+        t = THEME
+        box = tk.Frame(parent, bg=t["panel"], highlightthickness=1,
+                       highlightbackground=t["border_soft"], highlightcolor=t["border_soft"])
+        box.pack(fill="x", pady=pady)
+        inner = ttk.Frame(box, style="Panel.TFrame", padding=(16, 14))
+        inner.pack(fill="x")
+        return inner
+
+    def show_page(self, key):
+        if key not in self.pages:
+            key = "addons"
+        for k, p in self.pages.items():
+            p.pack_forget()
+            self.nav_buttons[k].configure(style="NavActive.TButton" if k == key else "Nav.TButton")
+        self.pages[key].pack(fill="both", expand=True)
+        self.cfg["last_page"] = key
+        if key == "backups":
+            self.refresh_backup_list()
+        if key == "sets":
+            self.refresh_sets_overview()
+
+    def _page_addons(self, host):
+        t = THEME
+        page, head = self._page("addons", "Addons & UI", "Installierte Addons")
+        right = ttk.Frame(head)
+        right.pack(side="right", anchor="s")
+        self._w_add_menu(right).pack(side="right")
+        ttk.Button(right, text="Updates prüfen", command=self.check_updates).pack(side="right", padx=(0, 8))
+        self._w_filter(right, width=20).pack(side="right", padx=(0, 14), ipady=3)
+        ttk.Label(right, text="Suche").pack(side="right", padx=(0, 8))
+
+        body = ttk.Frame(page)
+        body.pack(fill="both", expand=True, pady=(16, 0))
+        detail = ttk.Frame(body, style="Detail.TFrame", width=300, padding=(18, 16))
+        detail.pack(side="right", fill="y")
+        detail.pack_propagate(False)
+        tk.Frame(body, width=1, bg=t["line"]).pack(side="right", fill="y")
+        self._build_detail(detail)
+
+        left = ttk.Frame(body)
+        left.pack(side="left", fill="both", expand=True, padx=(0, 14))
+        bar = tk.Frame(left, bg=t["panel"], highlightthickness=1, highlightbackground=t["border"])
+        bar.pack(side="bottom", fill="x", pady=(10, 0))
+        barin = ttk.Frame(bar, style="Panel.TFrame", padding=(10, 8))
+        barin.pack(fill="x")
+        for text, cmd in (("Alle auswählen", self.select_all), ("An/Aus", self.toggle_selected),
+                          ("Exportieren…", self.export_pack_dialog)):
+            ttk.Button(barin, text=text, command=cmd).pack(side="left", padx=(0, 6))
+        ttk.Button(barin, text="Entfernen", command=self.remove_selected, style="Danger.TButton").pack(side="left")
+        ttk.Checkbutton(barin, text="Gruppieren", variable=self.group_var,
+                        command=self._toggle_grouping).pack(side="right")
+        self._w_tree(left, self.TREE_COLUMNS["seitenleiste"]).pack(fill="both", expand=True)
+
+    def _build_detail(self, parent):
+        self.detail = {
+            "kicker": ttk.Label(parent, style="DetailKicker.TLabel"),
+            "title": ttk.Label(parent, style="DetailTitle.TLabel", wraplength=260),
+            "note": ttk.Label(parent, style="DetailNote.TLabel", wraplength=260, justify="left"),
+        }
+        self.detail["kicker"].pack(anchor="w")
+        self.detail["title"].pack(anchor="w", pady=(4, 0))
+        self.detail["note"].pack(anchor="w", pady=(6, 0))
+        grid = ttk.Frame(parent, style="Detail.TFrame")
+        grid.pack(fill="x", pady=(16, 0))
+        for i, (key, label) in enumerate((("version", "Version"), ("release", "Release"),
+                                           ("iface", "Interface"), ("folders", "Ordner"),
+                                           ("toc", "Gelesene .toc"), ("deps", "Benötigt"))):
+            ttk.Label(grid, text=label, style="DetailKey.TLabel").grid(row=i, column=0, sticky="nw", pady=4)
+            v = ttk.Label(grid, style="DetailVal.TLabel", wraplength=160, justify="left")
+            v.grid(row=i, column=1, sticky="nw", padx=(12, 0), pady=4)
+            self.detail[key] = v
+        btns = ttk.Frame(parent, style="Detail.TFrame")
+        btns.pack(fill="x", side="bottom")
+        self.detail["page_btn"] = ttk.Button(btns, text="Release-Seite öffnen", command=self._detail_release)
+        self.detail["page_btn"].pack(fill="x", pady=(0, 6))
+        ttk.Button(btns, text="Ordner öffnen", command=self.open_folder).pack(fill="x", pady=(0, 6))
+        ttk.Button(btns, text="Entfernen", command=self.remove_selected, style="Danger.TButton").pack(fill="x")
+        self.update_detail()
+
+    def update_detail(self):
+        if not self.detail:
+            return
+        d = self.detail
+        try:
+            sel = self.selected_addons()
+        except tk.TclError:
+            return
+        if not sel:
+            d["kicker"].configure(text=spaced("Details"))
+            d["title"].configure(text="Kein Addon gewählt")
+            d["note"].configure(text="Wähle links ein Addon oder eine Gruppe aus.")
+            for k in ("version", "release", "iface", "folders", "toc", "deps"):
+                d[k].configure(text="–", foreground=THEME["text"])
+            d["page_btn"].state(["disabled"])
+            return
+        names = {a.name for a in sel}
+        main = next((a for a in sel if any(o.startswith(a.name) for o in names if o != a.name)), sel[0])
+        sid, src = self.folder_source(main.name)
+        d["kicker"].configure(text=spaced(f"GitHub · {sid}") if src else spaced("Manuell installiert"))
+        d["title"].configure(text=main.title if len(sel) == 1 else f"{main.name}  ({len(sel)} Ordner)")
+        d["note"].configure(text=clean_wow_text(main.meta.get("notes", "")) or "Keine Beschreibung in der .toc.")
+        d["version"].configure(text=main.version or "–")
+        if src:
+            new = self.updates.get(sid)
+            if new and new != src.get("tag"):
+                d["release"].configure(text=f"Update: {new}", foreground=THEME["update"])
+            else:
+                d["release"].configure(text=src.get("tag", "–") + ("  · aktuell" if new else ""),
+                                       foreground=THEME["text"])
+            d["page_btn"].state(["!disabled"])
+        else:
+            d["release"].configure(text="manuell – keine Update-Prüfung", foreground=THEME["text_dim"])
+            d["page_btn"].state(["disabled"])
+        if self.is_outdated(main):
+            d["iface"].configure(text=f"{main.interface} · veraltet", foreground=THEME["old"])
+        else:
+            d["iface"].configure(text=(main.interface or "–") + (" · passt" if self.game and main.interfaces else ""),
+                                 foreground=THEME["text"])
+        d["folders"].configure(text=", ".join(sorted(names)), foreground=THEME["text"])
+        d["toc"].configure(text=main.toc_name or "–", foreground=THEME["text"])
+        deps = sorted({x for a in sel for x in a.deps if x not in names})
+        d["deps"].configure(text=", ".join(deps) or "–", foreground=THEME["text"])
+
+    def _detail_release(self):
+        sel = self.selected_addons()
+        if not sel:
+            return
+        sid, src = self.folder_source(sel[0].name)
+        if src:
+            self.open_link(f"https://github.com/{sid}/releases")
+
+    def _page_install(self, host):
+        page, _ = self._page("install", "Installieren", "Addons hinzufügen",
+                             "Wähle zuerst den WoW-Ordner. Danach kannst du Addons aus einer ZIP-Datei, "
+                             "direkt aus einem GitHub-Release oder aus einem Paket eines Freundes installieren.")
+        box = self._card_box(page)
+        self._w_path(box, with_version=False).pack(fill="x")
+        for title, text, cmd in (
+                ("ZIP-Datei installieren", "Für Downloads von CurseForge, Wago oder der Seite des Autors.",
+                 self.install_zip_dialog),
+                ("Von GitHub installieren", "owner/repo oder Link eingeben – Updates kommen danach automatisch.",
+                 self.install_github_dialog),
+                ("Addon-Paket importieren", "Eine .faddons-Datei, die dir jemand mit dem Manager geschickt hat.",
+                 self.import_pack_dialog)):
+            card = self._card_box(page, pady=(12, 0))
+            ttk.Button(card, text=title, style="Primary.TButton", width=26, command=cmd).pack(side="left")
+            ttk.Label(card, text=text, style="Panel.TLabel", wraplength=520).pack(side="left", padx=(16, 0))
+        if HAS_DND:
+            ttk.Label(page, text="Tipp: ZIP- und .faddons-Dateien kannst du auch einfach ins Fenster ziehen.",
+                      style="Hint.TLabel").pack(anchor="w", pady=(14, 0))
+
+    def _page_sets(self, host):
+        page, _ = self._page("sets", "Addon-Sets", "Addon-Gruppen umschalten",
+                             "Ein Set merkt sich, welche Addons aktiv sind. Mit „Anwenden“ schaltest du genau "
+                             "diese ein und alle anderen aus – praktisch etwa für Leveln, Raid oder den "
+                             "Beta-Login ohne Addons.")
+        box = self._card_box(page)
+        self._w_sets(box).pack(fill="x")
+        self.sets_overview = ttk.Label(page, style="Body.TLabel", justify="left", wraplength=760)
+        self.sets_overview.pack(anchor="w", pady=(16, 0))
+
+    def refresh_sets_overview(self):
+        if not getattr(self, "sets_overview", None) or not self.sets_overview.winfo_exists():
+            return
+        sets = self.sets()
+        if not sets:
+            self.sets_overview.configure(text="Noch keine Sets gespeichert.")
+            return
+        lines = [f"{name}:  {', '.join(sorted(members))}" for name, members in sorted(sets.items())]
+        self.sets_overview.configure(text="\n\n".join(lines))
+
+    def _page_updates(self, host):
+        page, _ = self._page("updates", "Updates", "Addons und Manager aktuell halten")
+        box = self._card_box(page)
+        row = ttk.Frame(box, style="Panel.TFrame")
+        row.pack(fill="x")
+        ttk.Button(row, text="Updates prüfen", command=self.check_updates).pack(side="left")
+        ttk.Button(row, text="Alle aktualisieren", style="Primary.TButton",
+                   command=self.update_all).pack(side="left", padx=(8, 0))
+        ttk.Label(row, textvariable=self.count_var, style="Panel.TLabel").pack(side="right")
+        self._w_check(box, "Beim Start auf Addon-Updates prüfen", self.check_start_var).pack(anchor="w", pady=(12, 0))
+        self._w_check(box, "Vor Updates automatisch WTF sichern", self.auto_backup_var).pack(anchor="w", pady=(6, 0))
+        box2 = self._card_box(page, pady=(12, 0))
+        row2 = ttk.Frame(box2, style="Panel.TFrame")
+        row2.pack(fill="x")
+        self._w_update_mode(row2).pack(side="left")
+        ttk.Button(row2, text="Manager-Update suchen", command=self.check_manager_update).pack(side="right")
+
+    def _page_backups(self, host):
+        page, _ = self._page("backups", "Backups", "Einstellungen sichern",
+                             "Gesichert wird der WTF-Ordner mit allen Addon-Einstellungen (SavedVariables).")
+        box = self._card_box(page)
+        row = ttk.Frame(box, style="Panel.TFrame")
+        row.pack(fill="x")
+        ttk.Button(row, text="WTF jetzt sichern", style="Primary.TButton", command=self.backup).pack(side="left")
+        ttk.Button(row, text="Wiederherstellen…", command=self.restore_dialog).pack(side="left", padx=(8, 0))
+        ttk.Button(row, text="Backup-Ordner öffnen",
+                   command=lambda: (BACKUP_DIR.mkdir(parents=True, exist_ok=True),
+                                    open_in_explorer(BACKUP_DIR))).pack(side="right")
+        self._w_check(box, "Vor Updates automatisch WTF sichern", self.auto_backup_var).pack(anchor="w", pady=(12, 0))
+        self.backup_list = ttk.Label(page, style="Body.TLabel", justify="left")
+        self.backup_list.pack(anchor="w", pady=(16, 0))
+
+    def refresh_backup_list(self):
+        if not getattr(self, "backup_list", None) or not self.backup_list.winfo_exists():
+            return
+        backups = list_backups(self.flavor) if self.flavor else []
+        if not backups:
+            self.backup_list.configure(text="Für diese Version gibt es noch keine Backups.")
+            return
+        kinds = BackupDialog.KINDS
+        lines = [f"{b['when']:%d.%m.%Y  %H:%M}     {kinds.get(b['kind'], b['kind'])}" for b in backups[:8]]
+        self.backup_list.configure(text="Letzte Backups:\n\n" + "\n".join(lines))
+
+    def _page_share(self, host):
+        page, _ = self._page("share", "Teilen", "Addons mit Freunden teilen",
+                             "Wähle auf der Seite „Addons“ aus, was du teilen willst, und exportiere es als "
+                             ".faddons-Paket. Dein Freund importiert es mit demselben Manager.")
+        box = self._card_box(page)
+        row = ttk.Frame(box, style="Panel.TFrame")
+        row.pack(fill="x")
+        ttk.Button(row, text="Auswahl exportieren…", style="Primary.TButton",
+                   command=self.export_pack_dialog).pack(side="left")
+        ttk.Button(row, text="Alle exportieren…",
+                   command=lambda: self.export_pack_dialog(list(self.addons))).pack(side="left", padx=(8, 0))
+        ttk.Button(row, text="Paket importieren…", command=self.import_pack_dialog).pack(side="right")
+
+    def _page_settings(self, host):
+        page, _ = self._page("settings", "Einstellungen", "Manager einrichten")
+        box = self._card_box(page)
+        self._w_path(box, with_version=False).pack(fill="x")
+        box2 = self._card_box(page, pady=(12, 0))
+        self._w_layout_choice(box2).pack(anchor="w")
+        row = ttk.Frame(box2, style="Panel.TFrame")
+        row.pack(fill="x", pady=(12, 0))
+        ttk.Button(row, text="Log öffnen", command=self.open_log).pack(side="left")
+        ttk.Button(row, text="Neu laden", command=self.refresh).pack(side="left", padx=(8, 0))
+        links = ttk.Frame(page)
+        links.pack(anchor="w", pady=(16, 0))
+        for text, url in HEADER_LINKS:
+            ttk.Button(links, text=f"{text}  ↗", command=lambda u=url: self.open_link(u)).pack(side="left", padx=(0, 8))
+
+    # ----- Ansicht 3: Launcher --------------------------------------------- #
+    def _layout_launcher(self, root):
+        t = THEME
+        self._w_statusbar(root)
+        head = ttk.Frame(root, style="Head.TFrame", padding=(28, 18, 28, 18))
+        head.pack(fill="x")
+        crest = tk.Canvas(head, width=62, height=70, bg=t["header"], highlightthickness=0)
+        crest.pack(side="left")
+        draw_emblem(crest, 0, 2, 64)
+        brand = ttk.Frame(head, style="Head.TFrame")
+        brand.pack(side="left", padx=(16, 0))
+        ttk.Label(brand, text="–  " + spaced("Forever Addon") + "  –", style="HeadKicker.TLabel").pack(anchor="w")
+        ttk.Label(brand, text="MANAGER", style="HeadTitle.TLabel").pack(anchor="w")
+        self._w_play(head, style="BigPlay.TButton", text="▶   SPIELEN").pack(side="right")
+        info = ttk.Frame(head, style="Head.TFrame")
+        info.pack(side="right", padx=(0, 22))
+        row = ttk.Frame(info, style="Head.TFrame")
+        row.pack(anchor="e")
+        ttk.Label(row, text="Spielversion", style="HeadInfo.TLabel").pack(side="left", padx=(0, 8))
+        self._w_flavor(row, width=26).pack(side="left")
+        ttk.Label(info, textvariable=self.game_info_var, style="HeadInfo.TLabel").pack(anchor="e", pady=(6, 0))
+        tk.Frame(root, height=1, bg=t["line"]).pack(fill="x")
+
+        body = ttk.Frame(root, padding=(28, 18, 28, 10))
+        body.pack(fill="both", expand=True)
+        tiles = ttk.Frame(body)
+        tiles.pack(fill="x")
+        for i, (key, label) in enumerate((("active", "Addons aktiv"), ("updates", "Updates"),
+                                          ("old", "Veraltet"), ("backup", "Letztes Backup"))):
+            tiles.columnconfigure(i, weight=1, uniform="tile")
+            frame = tk.Frame(tiles, bg=t["panel"], highlightthickness=1, highlightbackground=t["border_soft"])
+            frame.grid(row=0, column=i, sticky="nsew", padx=(0 if i == 0 else 14, 0))
+            tin = ttk.Frame(frame, style="Tile.TFrame", padding=(16, 12))
+            tin.pack(fill="both", expand=True)
+            value, hint = tk.StringVar(value="–"), tk.StringVar()
+            ttk.Label(tin, text=spaced(label), style="TileKicker.TLabel").pack(anchor="w")
+            ttk.Label(tin, textvariable=value, style="TileValue.TLabel").pack(anchor="w", pady=(4, 0))
+            ttk.Label(tin, textvariable=hint, style="TileHint.TLabel").pack(anchor="w")
+            self.stat_vars[key] = (value, hint)
+
+        cmd = ttk.Frame(body)
+        cmd.pack(fill="x", pady=(18, 12))
+        self._w_add_menu(cmd).pack(side="left")
+        ttk.Button(cmd, text="Alle aktualisieren", command=self.update_all).pack(side="left", padx=(8, 0))
+        ttk.Button(cmd, text="Prüfen", command=self.check_updates).pack(side="left", padx=(8, 0))
+        tk.Frame(cmd, width=1, height=26, bg=t["line"]).pack(side="left", padx=14)
+        ttk.Label(cmd, text="Set").pack(side="left", padx=(0, 8))
+        self.set_cb = ttk.Combobox(cmd, textvariable=self.set_var, state="readonly", width=13)
+        self.set_cb.pack(side="left")
+        ttk.Button(cmd, text="Anwenden", command=self.apply_set).pack(side="left", padx=(8, 0))
+        more = ttk.Menubutton(cmd, text="Mehr", cursor="hand2", width=6)
+        more["menu"] = self._menu(more, [
+            ("Aktive als Set speichern…", self.save_set), ("Set löschen", self.delete_set), None,
+            ("Alle Addons exportieren…", lambda: self.export_pack_dialog(list(self.addons))),
+            ("Paket importieren…", self.import_pack_dialog), None,
+            ("WTF sichern", self.backup), ("Backup wiederherstellen…", self.restore_dialog), None,
+            ("Einstellungen…", self.settings_dialog), ("Manager-Update suchen", self.check_manager_update),
+            ("Log öffnen", self.open_log), ("Addon-Ordner öffnen", lambda: self.open_folder([])),
+            ("Neu laden", self.refresh), None,
+            *[(f"{text} öffnen ↗", (lambda u=url: self.open_link(u))) for text, url in HEADER_LINKS]])
+        more.pack(side="right")
+        self._w_filter(cmd, width=18).pack(side="right", padx=(0, 10), ipady=3)
+        ttk.Label(cmd, text="Suche").pack(side="right", padx=(14, 8))
+
+        wrap, inner = self._scroll_area(body, t["bg"])
+        wrap.pack(fill="both", expand=True)
+        self.cards_inner = inner
+
+    def settings_dialog(self):
+        dlg = Dialog(self, APP_NAME, "Einstellungen", 640, 330)
+        box = ttk.Frame(dlg.body)
+        box.pack(fill="x")
+        self._w_path(box, frame_style="TFrame", label_style="TLabel", with_version=False).pack(fill="x")
+        ttk.Frame(dlg.body, height=14).pack()
+        self._w_check(dlg.body, "Beim Start auf Addon-Updates prüfen", self.check_start_var,
+                      panel=False).pack(anchor="w")
+        self._w_check(dlg.body, "Vor Updates automatisch WTF sichern", self.auto_backup_var,
+                      panel=False).pack(anchor="w", pady=(6, 0))
+        self._w_update_mode(dlg.body, label_style="TLabel").pack(anchor="w", pady=(12, 0))
+        self._w_layout_choice(dlg.body, label_style="TLabel",
+                              on_change=lambda: (dlg.destroy(), self.after(50, self.switch_layout))
+                              ).pack(anchor="w", pady=(12, 0))
+        dlg.add_button("Schließen", dlg.cancel, primary=True)
+        dlg.show()
+
+    def _relayout_cards(self):
+        if self.cards_inner is not None and getattr(self, "_card_widgets", None):
+            self._place_cards()
+
+    def render_cards(self, entries):
+        """Zeichnet die Addon-Karten der Launcher-Ansicht."""
+        t = THEME
+        for w in self.cards_inner.winfo_children():
+            w.destroy()
+        self._card_widgets = []
+        if not entries:
+            ttk.Label(self.cards_inner, text="Keine Addons gefunden.", style="Body.TLabel").grid(
+                row=0, column=0, sticky="w", pady=20)
+            return
+        for title, members, vals, tags in entries:
+            outer = tk.Frame(self.cards_inner, bg=t["border_soft"])
+            card = ttk.Frame(outer, style="Card.TFrame", padding=(16, 12))
+            card.pack(fill="both", expand=True, padx=1, pady=1)
+            top = ttk.Frame(card, style="Card.TFrame")
+            top.pack(fill="x")
+            on = all(m.enabled for m in members)
+            ttk.Button(top, text="AN" if on else "AUS", style="ToggleOn.TButton" if on else "ToggleOff.TButton",
+                       cursor="hand2", command=lambda ms=members: self.toggle_selected(ms)).pack(side="right")
+            ttk.Label(top, text=title, style="CardTitle.TLabel").pack(side="left")
+            folders = f"{len(members)} Ordner" if len(members) > 1 else "1 Ordner"
+            if len(members) > 1:
+                rest = [m.name for m in members if m.name != title][:3]
+                folders += " · " + ", ".join(rest) + (" …" if len(members) - 1 > 3 else "")
+            ttk.Label(card, text=folders, style="CardSub.TLabel").pack(anchor="w", pady=(2, 8))
+            chips = tk.Frame(card, bg=t["row_a"])
+            chips.pack(fill="x")
+            status_color = (t["text_faint"] if "disabled" in tags else t["warn"] if "warn" in tags
+                            else t["old"] if "old" in tags else t["update"])
+            for text, fg, bg in ((f"v{vals[3]}" if vals[3] else "ohne Version", t["text"], t["pill"]),
+                                 ("GitHub" if vals[5].startswith("GitHub") else vals[5] or "manuell",
+                                  t["text_dim"], t["pill"]),
+                                 (vals[6] if "update" in tags else vals[0], t["update"] if "update" in tags
+                                  else status_color, "#18261a" if "update" in tags else t["pill"])):
+                tk.Label(chips, text=text, fg=fg, bg=bg, font=self.fonts["small"], padx=9, pady=2).pack(
+                    side="left", padx=(0, 6))
+            tk.Frame(card, height=1, bg=t["line"]).pack(fill="x", pady=(10, 4))
+            links = ttk.Frame(card, style="Card.TFrame")
+            links.pack(fill="x")
+            for text, cb in (("Details", lambda ms=members: self.show_details(ms[0] if len(ms) == 1 else
+                                                                                 self._group_main(ms))),
+                             ("Ordner", lambda ms=members: self.open_folder(ms)),
+                             ("Exportieren", lambda ms=members: self.export_pack_dialog(list(ms))),
+                             ("Entfernen", lambda ms=members: self.remove_selected(list(ms)))):
+                ttk.Button(links, text=text, style="CardLink.TButton", cursor="hand2", width=len(text),
+                           command=cb).pack(side="left", padx=(0, 8))
+            self._card_widgets.append(outer)
+        self._place_cards()
+
+    def _group_main(self, members):
+        names = {m.name for m in members}
+        return next((a for a in members if any(o.startswith(a.name) for o in names if o != a.name)), members[0])
+
+    def _place_cards(self):
+        width = max(self.cards_canvas.winfo_width(), 600)
+        cols = max(1, min(4, width // 330))
+        for c in range(4):
+            self.cards_inner.columnconfigure(c, weight=1 if c < cols else 0, uniform="card" if c < cols else "")
+        for i, w in enumerate(self._card_widgets):
+            w.grid(row=i // cols, column=i % cols, sticky="nsew",
+                   padx=(0 if i % cols == 0 else 12, 0), pady=(0, 12))
+
+    def update_stats(self):
+        if not self.stat_vars:
+            return
+        active = sum(1 for a in self.addons if a.enabled)
+        old = sum(1 for a in self.addons if a.enabled and self.is_outdated(a))
+        upd = sum(1 for r, tg in self.updates.items()
+                  if r in self.sources() and tg != self.sources()[r].get("tag"))
+        self.stat_vars["active"][0].set(f"{active} / {len(self.addons)}")
+        self.stat_vars["active"][1].set(f"in {len(self.addons)} Ordnern")
+        self.stat_vars["updates"][0].set(str(upd))
+        self.stat_vars["updates"][1].set("bereit zum Aktualisieren" if upd else
+                                         ("alle GitHub-Addons aktuell" if self.updates else "noch nicht geprüft"))
+        self.stat_vars["old"][0].set(str(old))
+        self.stat_vars["old"][1].set(f"passen nicht zu Interface {self.game[1]}" if old and self.game
+                                     else (f"alle passen zu {self.game[1]}" if self.game else "Spielversion unbekannt"))
+        backups = list_backups(self.flavor) if self.flavor else []
+        if backups:
+            self.stat_vars["backup"][0].set(f"{backups[0]['when']:%d.%m. %H:%M}")
+            self.stat_vars["backup"][1].set(f"{len(backups)} Backup{'s' if len(backups) != 1 else ''} gespeichert")
+        else:
+            self.stat_vars["backup"][0].set("keins")
+            self.stat_vars["backup"][1].set("„Mehr“ → WTF sichern")
 
     # ----- Hilfen ---------------------------------------------------------- #
     @property
@@ -1512,8 +2227,15 @@ class App(BaseTk):
             return
         log.info("WoW gestartet: %s", exe)
         self.set_status(f"{exe.name} gestartet. Falls WoW nach dem Login fragt: Battle.net-App öffnen.")
-        self.play_btn.state(["disabled"])
-        self.after(15000, lambda: self.play_btn.state(["!disabled"]))   # Doppelstarts vermeiden
+        btn = self.play_btn
+        btn.state(["disabled"])
+
+        def enable():
+            try:
+                btn.state(["!disabled"])
+            except tk.TclError:
+                pass          # Ansicht inzwischen gewechselt
+        self.after(15000, enable)   # Doppelstarts vermeiden
 
     def open_link(self, url: str):
         try:
@@ -1528,7 +2250,10 @@ class App(BaseTk):
     def save_options(self):
         self.cfg["auto_backup"] = bool(self.auto_backup_var.get())
         self.cfg["check_on_start"] = bool(self.check_start_var.get())
-        self.cfg["self_update_check"] = bool(self.self_update_var.get())
+        label = self.self_update_var.get()
+        mode = next((k for k, v in self.UPDATE_MODES.items() if v == label), "auto")
+        self.cfg["self_update_mode"] = mode
+        self.cfg["self_update_check"] = mode != "off"
         save_config(self.cfg)
 
     def ready(self, modifies: bool = True, quiet: bool = False) -> bool:
@@ -1588,6 +2313,8 @@ class App(BaseTk):
 
     def selected_addons(self) -> list[Addon]:
         """Ausgewählte Addons; eine ausgewählte Gruppe zählt mit allen ihren Ordnern."""
+        if self.tree is None or not self.tree.winfo_exists():
+            return []
         names = set()
         for iid in self.tree.selection():
             if iid.startswith("grp:"):
@@ -1668,7 +2395,7 @@ class App(BaseTk):
         self.updates.clear()
         self.update_info.clear()
         self.game = read_game_version(self.root_path, self.flavor) if self.flavor else None
-        self.draw_header()
+        self.update_game_info()
         self.reload_sets()
         self.refresh()
 
@@ -1755,8 +2482,12 @@ class App(BaseTk):
         return values, tags
 
     def render(self):
-        sel_before = set(self.tree.selection())
-        self.tree.delete(*self.tree.get_children())
+        if not hasattr(self, "ui"):
+            return
+        has_tree = self.tree is not None and self.tree.winfo_exists()
+        sel_before = set(self.tree.selection()) if has_tree else set()
+        if has_tree:
+            self.tree.delete(*self.tree.get_children())
         self.group_members: dict[str, list[str]] = {}
         q = self.filter_var.get().lower().strip()
         idx = self.COLUMNS.index(self.sort_col)
@@ -1785,7 +2516,7 @@ class App(BaseTk):
             entries.append((str(gvals[idx]).lower(), "group", (g, gvals, gtags, child_rows)))
         entries.sort(key=lambda e: e[0], reverse=self.sort_rev)
 
-        for i, (_, kind, payload) in enumerate(entries):
+        for i, (_, kind, payload) in enumerate(entries if has_tree else []):
             stripe = ["odd"] if i % 2 else []
             if kind == "single":
                 vals, tags, a = payload
@@ -1801,9 +2532,20 @@ class App(BaseTk):
                 self.tree.insert(gid, "end", iid=a.name, values=vals,
                                  tags=tags + ["child"] + stripe)
 
-        keep = [iid for iid in sel_before if self.tree.exists(iid)]
-        if keep:
-            self.tree.selection_set(keep)
+        if has_tree:
+            keep = [iid for iid in sel_before if self.tree.exists(iid)]
+            if keep:
+                self.tree.selection_set(keep)
+        if self.cards_inner is not None and self.cards_inner.winfo_exists():
+            cards = []
+            for _, kind, payload in entries:
+                if kind == "single":
+                    vals, tags, a = payload
+                    cards.append((a.title if a.title and len(a.title) < 32 else a.name, [a], vals, tags))
+                else:
+                    g, gvals, gtags, _ = payload
+                    cards.append((g["title"], g["members"], gvals, gtags))
+            self.render_cards(cards)
         active = sum(1 for a in self.addons if a.enabled)
         old = sum(1 for a in self.addons if a.enabled and self.is_outdated(a))
         upd = sum(1 for r, tg in self.updates.items()
@@ -1814,14 +2556,19 @@ class App(BaseTk):
         if upd:
             parts.append(f"{upd} Update(s)")
         self.count_var.set("  ·  ".join(parts))
+        if self.nav_buttons:
+            self.nav_buttons["addons"].configure(text=f"Addons   ({len(self.addons)})")
+            self.nav_buttons["updates"].configure(text=f"Updates   ({upd})" if upd else "Updates")
+        self.update_detail()
+        self.update_stats()
 
     def sort_by(self, col):
         self.sort_rev = not self.sort_rev if self.sort_col == col else False
         self.sort_col = col
         self.render()
 
-    def show_details(self):
-        sel = self.selected_addons()
+    def show_details(self, addon=None):
+        sel = [addon] if addon is not None else self.selected_addons()
         if not sel:
             return
         a = sel[0]
@@ -1990,6 +2737,8 @@ class App(BaseTk):
     # ----- Auswahl / Verwalten -------------------------------------------- #
     def select_all(self, force: bool = False):
         """Wählt alle sichtbaren Addons aus; ein zweiter Klick hebt die Auswahl auf."""
+        if self.tree is None:
+            return
         items = self.tree.get_children()
         if not force and items and set(self.tree.selection()) == set(items):
             self.tree.selection_remove(*items)
@@ -1999,8 +2748,8 @@ class App(BaseTk):
             self.set_status(f"{len(self.selected_addons())} Addons ausgewählt.")
         self.tree.focus_set()
 
-    def toggle_selected(self):
-        sel = self.selected_addons()
+    def toggle_selected(self, addons=None):
+        sel = list(addons) if addons is not None else self.selected_addons()
         if not sel or not self.ready():
             return
         # Einheitlich schalten: ist etwas aus, wird alles eingeschaltet – sonst alles aus.
@@ -2019,8 +2768,8 @@ class App(BaseTk):
         if errors:
             messagebox.showerror(APP_NAME, "\n".join(errors))
 
-    def remove_selected(self):
-        sel = self.selected_addons()
+    def remove_selected(self, addons=None):
+        sel = list(addons) if addons is not None else self.selected_addons()
         if not sel or not self.ready():
             return
         names = ", ".join(a.name for a in sel)
@@ -2032,10 +2781,13 @@ class App(BaseTk):
         self.refresh()
         self.set_status(f"Entfernt: {names}")
 
-    def open_folder(self):
+    def open_folder(self, addons=None):
+        """Öffnet den Ordner des gewählten Addons; mit addons=[] den AddOns-Ordner selbst."""
         if not self.root_path or not self.flavor:
             return
-        sel = self.selected_addons()
+        sel = list(addons) if addons is not None else self.selected_addons()
+        if len(sel) > 1:
+            sel = [self._group_main(sel)]
         path = sel[0].folder if sel else addons_dir(self.root_path, self.flavor)
         path.mkdir(parents=True, exist_ok=True)
         open_in_explorer(path)
@@ -2043,6 +2795,8 @@ class App(BaseTk):
     # ----- Sets ------------------------------------------------------------ #
     def reload_sets(self, select: str = ""):
         names = [SET_ALL_OFF, SET_ALL_ON] + sorted(self.sets(), key=str.lower)
+        if not getattr(self, "set_cb", None) or not self.set_cb.winfo_exists():
+            return
         self.set_cb["values"] = names
         if select:
             self.set_var.set(select)
@@ -2071,6 +2825,7 @@ class App(BaseTk):
         save_config(self.cfg)
         log.info("Set gespeichert: %s (%d Addons)", name, len(active))
         self.reload_sets(name)
+        self.refresh_sets_overview()
         self.set_status(f"Set „{name}“ mit {len(active)} Addons gespeichert.")
 
     def delete_set(self):
@@ -2082,6 +2837,7 @@ class App(BaseTk):
             save_config(self.cfg)
             log.info("Set gelöscht: %s", name)
             self.reload_sets()
+            self.refresh_sets_overview()
 
     def apply_set(self):
         name = self.set_var.get()
@@ -2114,13 +2870,14 @@ class App(BaseTk):
             messagebox.showerror(APP_NAME, "\n".join(errors))
 
     # ----- Teilen ---------------------------------------------------------- #
-    def export_pack_dialog(self):
+    def export_pack_dialog(self, addons=None):
         if not self.ready(modifies=False):
             return
-        sel = self.selected_addons()
+        sel = list(addons) if addons is not None else self.selected_addons()
         if not sel:
-            messagebox.showinfo(APP_NAME, "Bitte zuerst die Addons auswählen, die du teilen willst.\n"
-                                          "(Tipp: „Alle auswählen“ oder Strg+Klick)")
+            hint = ("(Tipp: „Alle auswählen“ oder Strg+Klick)" if self.tree is not None
+                    else "(Tipp: „Exportieren“ auf einer Karte oder „Mehr“ → „Alle Addons exportieren…“)")
+            messagebox.showinfo(APP_NAME, "Bitte zuerst die Addons auswählen, die du teilen willst.\n" + hint)
             return
         by_name = {a.name.lower(): a for a in self.addons}
         chosen = {a.name.lower() for a in sel}
@@ -2214,6 +2971,8 @@ class App(BaseTk):
 
         def done(path):
             log.info("Backup erstellt: %s", path)
+            self.refresh_backup_list()
+            self.update_stats()
             self.set_status(f"Backup erstellt: {path}")
             if messagebox.askyesno(APP_NAME, f"Backup erstellt:\n{path}\n\nOrdner öffnen?"):
                 open_in_explorer(path.parent)
@@ -2235,6 +2994,8 @@ class App(BaseTk):
 
         def done(safety):
             log.info("Backup wiederhergestellt: %s (vorher gesichert: %s)", chosen["path"], safety)
+            self.refresh_backup_list()
+            self.update_stats()
             self.set_status(f"Stand vom {chosen['when']:%d.%m.%Y %H:%M} wiederhergestellt.")
             messagebox.showinfo(APP_NAME, f"Der Stand vom {chosen['when']:%d.%m.%Y %H:%M} ist "
                                           "wiederhergestellt.\n\nDein vorheriger Stand wurde als "
@@ -2258,6 +3019,15 @@ class App(BaseTk):
                 self.set_status(f"Der Manager ist aktuell (v{APP_VERSION}).")
                 if not silent:
                     messagebox.showinfo(APP_NAME, f"Du nutzt bereits die neueste Version (v{APP_VERSION}).")
+                return
+            auto = silent and self.cfg.get("self_update_mode") == "auto"
+            if auto and is_frozen() and self_update_asset(info):
+                self.install_manager_update(info, automatic=True)
+                return
+            if auto:
+                # Python-Version oder .exe noch nicht gebaut: nur dezent melden
+                self.set_status(f"Manager-Update {info['tag']} verfügbar – "
+                                "„Manager-Update suchen“ für Details.")
                 return
             if silent and info["tag"] == self.cfg.get("skip_manager_version"):
                 self.set_status(f"Manager-Update {info['tag']} verfügbar (übersprungen).")
@@ -2309,10 +3079,21 @@ class App(BaseTk):
         if not (frozen and has_exe):
             self.open_link(info.get("page") or f"https://github.com/{UPDATE_REPO}/releases")
             return
+        self.install_manager_update(info)
+
+    def install_manager_update(self, info: dict, automatic: bool = False):
+        """Lädt die neue .exe, beendet den Manager und lässt sie per Skript einsetzen."""
+        if self.busy:                         # laufende Vorgänge nie unterbrechen
+            self.after(2000, lambda: self.install_manager_update(info, automatic))
+            return
         token = self.cfg.get("github_token", "")
 
         def done(new_exe):
-            log.info("Manager-Update %s geladen, starte neu.", info["tag"])
+            log.info("Manager-Update %s geladen (%s), starte neu.", info["tag"],
+                     "automatisch" if automatic else "manuell")
+            if automatic and self.busy:
+                self.after(2000, lambda: done(new_exe))
+                return
             try:
                 launch_replacer(new_exe)
             except Exception as e:  # noqa
@@ -2322,11 +3103,16 @@ class App(BaseTk):
 
         def failed(err):
             log.error("Manager-Update fehlgeschlagen: %s", err)
+            if automatic:
+                self.set_status("Automatisches Manager-Update fehlgeschlagen – siehe Log.")
+                return
             if messagebox.askyesno(APP_NAME, f"Das Update ist fehlgeschlagen:\n{err}\n\n"
                                              "Release-Seite im Browser öffnen?"):
                 self.open_link(info.get("page") or f"https://github.com/{UPDATE_REPO}/releases")
 
-        self.run_bg(f"Lade Manager {info['tag']}", lambda: download_self_update(info, token), done, failed)
+        label = (f"Neue Version {info['tag']} gefunden – wird installiert, der Manager startet gleich neu"
+                 if automatic else f"Lade Manager {info['tag']}")
+        self.run_bg(label, lambda: download_self_update(info, token), done, failed)
 
     # ----- Drag & Drop ----------------------------------------------------- #
     def on_drop(self, event):
