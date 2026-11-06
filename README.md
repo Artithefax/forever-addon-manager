@@ -19,16 +19,17 @@ A lightweight, personal addon manager for **World of Warcraft: Forever** (and ot
 - Log file of all changes
 - Self-update from GitHub releases
 
-## CurseForge integration (planned)
+## CurseForge integration
 
-CurseForge support is being added through the official CurseForge API and is designed to respect addon authors:
+Addons can be installed from CurseForge by pasting the project link (**Add → From CurseForge…**), and they are included in the normal update check. It uses the official CurseForge API and is designed to respect addon authors:
 
 - **No redistribution.** CurseForge files are never rehosted, mirrored or bundled. Every download is fetched directly from CurseForge by the user's own client.
 - **Shared packages contain references only.** For CurseForge projects, a `.faddons` package stores the project and file ID, never the files themselves. The recipient's client downloads the file from CurseForge or opens the project page.
 - **`allowModDistribution` is respected.** If an author disables third-party distribution, the tool only links to the CurseForge project page.
-- **Attribution.** The project name, author and a link back to the CurseForge page are always shown, plus the author's donation link where available.
-- **Own API key per user.** The key is entered locally in the settings and stored only in the user's config. It is never embedded in the source code or the built executable.
-- **Minimal traffic.** Update checks run on app start or on manual request only.
+- **Attribution.** The project name, author and a link back to the CurseForge project page (where the author's donation options live) are shown in the details and after each install.
+- **Own API key per user.** Get a free key at <https://console.curseforge.com/> and paste it into the settings. It is stored only in the user's local config (`%APPDATA%\ForeverAddonManager\config.json`), never embedded in the source code or the built executable, and only ever sent to `api.curseforge.com`.
+- **Verified downloads.** Files are only fetched from CurseForge's CDN over HTTPS and checked against the SHA-1 hash published by the API.
+- **Minimal traffic.** Update checks run on app start or on manual request only (one request per installed CurseForge addon).
 
 ## Requirements
 

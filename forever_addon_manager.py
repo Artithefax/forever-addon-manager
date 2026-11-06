@@ -8,7 +8,8 @@ Funktionen:
   - Installierte Addons auflisten (.toc: Titel, Version, Interface, Abhängigkeiten)
   - Interface-Version gegen die installierte Spielversion prüfen (.build.info)
   - Addons aus ZIP-Dateien oder GitHub-Releases installieren (mit Dateiauswahl)
-  - GitHub-Addons auf Updates prüfen (auch beim Start), Release-Notes anzeigen
+  - GitHub- und CurseForge-Addons auf Updates prüfen (auch beim Start), Changelogs anzeigen
+  - Addons von CurseForge installieren und aktualisieren (eigener API-Key, nur lokal gespeichert)
   - Addon-Sets: Gruppen von Addons speichern und mit einem Klick umschalten
   - Addons deaktivieren/aktivieren (Verschieben nach Interface/AddOns_Disabled)
   - Addon-Pakete (.faddons) exportieren und importieren, um Addons zu teilen
@@ -20,6 +21,7 @@ Arbeitet ausschließlich mit Dateien im Addon-/WTF-Ordner – kein Eingriff in d
 """
 
 import hashlib
+import html
 import json
 import logging
 import logging.handlers
@@ -32,6 +34,7 @@ import sys
 import tempfile
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 import webbrowser
 import zipfile
@@ -51,7 +54,7 @@ except Exception:                      # noqa – Paket fehlt oder Tk-Erweiterun
     HAS_DND = False
 
 APP_NAME = "Forever Addon Manager"
-APP_VERSION = "2.4.0"
+APP_VERSION = "2.5.0"
 USER_AGENT = f"ForeverAddonManager/{APP_VERSION}"
 
 # Selbst-Update über GitHub-Releases dieses Repos
@@ -105,6 +108,7 @@ def load_config() -> dict:
     cfg.setdefault("flavor", "")
     cfg.setdefault("sources", {})   # flavor -> {source_id: {...}}
     cfg.setdefault("github_token", "")
+    cfg.setdefault("curseforge_key", "")   # eigener API-Key – bleibt nur in dieser Datei
     cfg.setdefault("sets", {})      # flavor -> {setname: [ordner, ...]}
     cfg.setdefault("auto_backup", True)
     cfg.setdefault("check_on_start", True)
@@ -491,10 +495,19 @@ def export_pack(addons: list, sources: dict, flavor: str, dest: Path) -> Path:
         entry = {"folder": a.name, "title": a.title, "version": a.version, "source": None}
         for repo, s in sources.items():
             if a.name in s.get("folders", []):
-                entry["source"] = {"type": "github", "repo": repo, "tag": s.get("tag", ""),
-                                   "folders": s.get("folders", [])}
+                if s.get("type") == "curseforge":
+                    # Dateien von CurseForge werden nicht weitergegeben – nur der Verweis
+                    entry["source"] = {"type": "curseforge", "mod_id": s.get("mod_id"),
+                                       "file_id": s.get("file_id"), "slug": s.get("slug", ""),
+                                       "name": s.get("name", ""), "page": s.get("page", ""),
+                                       "tag": s.get("tag", ""), "folders": s.get("folders", [])}
+                    entry["files"] = False
+                else:
+                    entry["source"] = {"type": "github", "repo": repo, "tag": s.get("tag", ""),
+                                       "folders": s.get("folders", [])}
                 break
         entries.append(entry)
+    skip = {e["folder"] for e in entries if e.get("files") is False}
     manifest = {
         "format": PACK_FORMAT,
         "app": f"{APP_NAME} {APP_VERSION}",
@@ -506,6 +519,8 @@ def export_pack(addons: list, sources: dict, flavor: str, dest: Path) -> Path:
     with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("manifest.json", json.dumps(manifest, indent=2, ensure_ascii=False))
         for a in addons:
+            if a.name in skip:
+                continue
             for f in sorted(a.folder.rglob("*")):
                 if f.is_file():
                     rel = f.relative_to(a.folder).as_posix()
@@ -660,6 +675,230 @@ def github_install_asset(asset: dict, root: str, flavor: str, token: str = "") -
         return install_zip(tmp_path, root, flavor)
     finally:
         tmp_path.unlink(missing_ok=True)
+
+# --------------------------------------------------------------------------- #
+# CurseForge (eigener API-Key des Nutzers, wird nie im Programm mitgeliefert)
+# --------------------------------------------------------------------------- #
+
+CF_API = "https://api.curseforge.com/v1"
+CF_GAME_ID = 1                                   # World of Warcraft
+CF_PREFIX = "cf:"                                # Quellen-ID: cf:<Projekt-ID>
+CF_KEY_URL = "https://console.curseforge.com/"
+CF_DL_HOSTS = ("forgecdn.net", "curseforge.com")  # nur von hier wird heruntergeladen
+CF_RELEASE_NAMES = {1: "Release", 2: "Beta", 3: "Alpha"}
+
+
+class CFError(Exception):
+    def __init__(self, msg: str, code: int = 0):
+        super().__init__(msg)
+        self.code = code
+
+
+class ManualDownload(Exception):
+    """Der Autor erlaubt keinen Download über Drittprogramme – Seite im Browser öffnen."""
+
+    def __init__(self, page: str, reason: str):
+        super().__init__(reason)
+        self.page = page
+        self.reason = reason
+
+
+def cf_request(path: str, key: str, params: dict | None = None) -> dict:
+    key = (key or "").strip()
+    if not key:
+        raise CFError("Kein CurseForge-API-Key hinterlegt (Einstellungen).")
+    url = CF_API + path + ("?" + urllib.parse.urlencode(params) if params else "")
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json",
+                                               "x-api-key": key})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        msgs = {401: "CurseForge lehnt den API-Key ab. Bitte den Key in den Einstellungen prüfen.",
+                403: "CurseForge verweigert den Zugriff (API-Key ungültig oder Download nicht erlaubt).",
+                404: "Bei CurseForge nicht gefunden.",
+                429: "Zu viele Anfragen an CurseForge – bitte in ein paar Minuten erneut versuchen."}
+        raise CFError(msgs.get(e.code, f"CurseForge-Fehler HTTP {e.code}."), e.code) from None
+    except urllib.error.URLError as e:
+        raise CFError(f"CurseForge nicht erreichbar: {e.reason}") from None
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        raise CFError("Unerwartete Antwort von CurseForge.") from None
+
+
+def parse_cf_ref(text: str):
+    """Link, Projekt-ID oder Slug -> Slug (str) oder Projekt-ID (int)."""
+    t = text.strip().rstrip("/")
+    m = re.search(r"curseforge\.com/wow/addons/([\w-]+)", t, re.IGNORECASE)
+    if m:
+        return m.group(1).lower()
+    m = re.search(r"curseforge\.com/projects/(\d+)", t, re.IGNORECASE)
+    if m:
+        return int(m.group(1))
+    if re.fullmatch(r"\d+", t):
+        return int(t)
+    if re.fullmatch(r"[a-z0-9][a-z0-9-]*", t, re.IGNORECASE):
+        return t.lower()
+    raise ValueError("Bitte den CurseForge-Link (…/wow/addons/name) oder den Namen des Addons angeben.")
+
+
+def cf_get_mod(ref, key: str) -> dict:
+    if isinstance(ref, int):
+        mod = cf_request(f"/mods/{ref}", key).get("data") or {}
+    else:
+        found = cf_request("/mods/search", key, {"gameId": CF_GAME_ID, "slug": ref}).get("data") or []
+        mod = next((m for m in found if str(m.get("slug", "")).lower() == ref), {})
+    if not mod or mod.get("gameId", CF_GAME_ID) != CF_GAME_ID:
+        raise CFError(f"Kein WoW-Addon „{ref}“ bei CurseForge gefunden.")
+    return mod
+
+
+def cf_files(mod_id: int, key: str) -> list[dict]:
+    data = cf_request(f"/mods/{mod_id}/files", key, {"pageSize": 50}).get("data") or []
+    data = [f for f in data if f.get("isAvailable", True) and str(f.get("fileName", "")).lower().endswith(".zip")]
+    return sorted(data, key=lambda f: f.get("fileDate", ""), reverse=True)
+
+
+def cf_asset(f: dict) -> dict:
+    name = f.get("displayName") or f.get("fileName") or str(f.get("id"))
+    versions = [str(v) for v in f.get("gameVersions", [])]
+    rtype = f.get("releaseType", 1)
+    sha1 = next((h.get("value", "") for h in f.get("hashes", []) if h.get("algo") == 1), "")
+    parts = [name]
+    if versions:
+        parts.append("/".join(versions[:4]))
+    if rtype != 1:
+        parts.append(CF_RELEASE_NAMES.get(rtype, "?"))
+    parts.append(str(f.get("fileDate", ""))[:10])
+    return {"name": name, "label": "  ·  ".join(p for p in parts if p), "file_name": f.get("fileName", ""),
+            "url": f.get("downloadUrl"), "size": f.get("fileLength", 0), "file_id": f.get("id"),
+            "mod_id": f.get("modId"), "game_versions": versions, "release_type": rtype,
+            "date": str(f.get("fileDate", "")), "sha1": sha1}
+
+
+def cf_rank(a: dict, flavor: str, game_ver: str) -> int:
+    fl = flavor.lower()
+    forever = "classic_beta" in fl or "forever" in fl
+    hay = " ".join([a["name"], a["file_name"], *a["game_versions"]]).lower()
+    if "nolib" in hay or "source" in hay:
+        return 9
+    if forever and "forever" in hay:
+        return 0
+    mm = ".".join(game_ver.split(".")[:2]) if game_ver else ""
+    if mm and any(v == mm or v.startswith(mm + ".") for v in a["game_versions"]):
+        return 1
+    if (forever or "classic" in fl) and ("classic" in hay or "vanilla" in hay) \
+            and not any(x in hay for x in ("wrath", "cata", "mists", "tbc", "bcc", "wotlk")):
+        return 2
+    if "retail" in fl and ("retail" in hay or "mainline" in hay):
+        return 1
+    return 5
+
+
+def cf_pick(assets: list[dict], flavor: str, game_ver: str, stored: dict | None = None) -> dict | None:
+    """Wählt die Datei: bei Updates dieselbe Variante wie zuvor, sonst die beste Schätzung."""
+    if not assets:
+        return None
+    newest = sorted(assets, key=lambda a: a["date"], reverse=True)
+    if stored:
+        key = stored.get("asset_key", "")
+        gv = set(stored.get("game_versions") or [])
+        rt = stored.get("release_type", 1)
+        for use_key in (True, False):
+            cands = [a for a in newest
+                     if a["release_type"] <= rt
+                     and (not use_key or not key or asset_key(a["name"]) == key)
+                     and (not gv or gv & set(a["game_versions"]))]
+            if cands:
+                return cands[0]
+    return sorted(newest, key=lambda a: (cf_rank(a, flavor, game_ver), a["release_type"]))[0]
+
+
+def cf_info(mod: dict, files: list[dict], flavor: str, game_ver: str, stored: dict | None = None) -> dict:
+    assets = [cf_asset(f) for f in files]
+    ranked = sorted(sorted(assets, key=lambda a: a["date"], reverse=True),
+                    key=lambda a: (cf_rank(a, flavor, game_ver), a["release_type"]))
+    best = cf_pick(assets, flavor, game_ver, stored)
+    slug = mod.get("slug", "")
+    page = (mod.get("links") or {}).get("websiteUrl") or f"https://www.curseforge.com/wow/addons/{slug}"
+    return {"repo": mod.get("name", slug), "tag": best["name"] if best else "", "assets": ranked,
+            "best": best, "notes": "", "page": page, "published": best["date"][:10] if best else "",
+            "mod_id": mod.get("id"), "slug": slug, "author": ", ".join(
+                a.get("name", "") for a in mod.get("authors", []) if a.get("name")),
+            "allow_dl": mod.get("allowModDistribution") is not False}
+
+
+def cf_mod_from_source(src: dict) -> dict:
+    return {"id": src.get("mod_id"), "name": src.get("name", ""), "slug": src.get("slug", ""),
+            "links": {"websiteUrl": src.get("page", "")}, "authors": [{"name": src.get("author", "")}],
+            "allowModDistribution": src.get("allow_dl", True)}
+
+
+def html_to_text(s: str) -> str:
+    s = re.sub(r"(?i)<br\s*/?>|</p>|</div>|</h\d>|</ul>", "\n", s)
+    s = re.sub(r"(?i)<li[^>]*>", "• ", s)
+    s = re.sub(r"(?i)</li>", "\n", s)
+    s = html.unescape(re.sub(r"<[^>]+>", "", s))
+    return re.sub(r"\n{3,}", "\n\n", s).strip()
+
+
+def cf_changelog(mod_id: int, file_id: int, key: str) -> str:
+    try:
+        return html_to_text(cf_request(f"/mods/{mod_id}/files/{file_id}/changelog", key).get("data") or "")
+    except CFError:
+        return ""
+
+
+def cf_check(src: dict, key: str, flavor: str, game_ver: str) -> dict:
+    """Prüft ein installiertes CurseForge-Addon auf eine neuere Datei (1 Anfrage, +1 bei Update)."""
+    files = cf_files(src["mod_id"], key)
+    info = cf_info(cf_mod_from_source(src), files, flavor, game_ver, src)
+    if not info["best"]:
+        raise CFError("keine passende Datei gefunden")
+    if info["tag"] != src.get("tag"):
+        info["notes"] = cf_changelog(src["mod_id"], info["best"]["file_id"], key)
+    return info
+
+
+def cf_install_asset(asset: dict, info: dict, root: str, flavor: str, key: str) -> list[str]:
+    page = info.get("page", "").rstrip("/") + "/files"
+    if not info.get("allow_dl", True):
+        raise ManualDownload(page, "Der Autor erlaubt keinen Download über Programme wie diesen.")
+    url = asset.get("url")
+    if not url:
+        try:
+            url = cf_request(f"/mods/{asset['mod_id']}/files/{asset['file_id']}/download-url", key).get("data")
+        except CFError as e:
+            if e.code in (403, 404):
+                raise ManualDownload(page, "Für diese Datei ist kein direkter Download freigegeben.") from None
+            raise
+    if not isinstance(url, str) or not url:
+        raise ManualDownload(page, "Für diese Datei ist kein direkter Download freigegeben.")
+    host = urllib.parse.urlparse(url).hostname or ""
+    if not url.startswith("https://") or not any(host == h or host.endswith("." + h) for h in CF_DL_HOSTS):
+        raise CFError(f"Unerwartete Download-Adresse ({host or '?'}) – Abbruch.")
+    blob = http_get(url, "", accept="application/octet-stream")     # niemals den API-Key ans CDN senden
+    if asset.get("sha1") and hashlib.sha1(blob).hexdigest().lower() != asset["sha1"].lower():
+        raise CFError("Prüfsumme der heruntergeladenen Datei stimmt nicht – Abbruch.")
+    with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+        tmp.write(blob)
+        tmp_path = Path(tmp.name)
+    try:
+        return install_zip(tmp_path, root, flavor)
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+def cf_pack_item(src: dict, key: str, flavor: str, game_ver: str) -> dict:
+    """Für den Paket-Import: die im Paket genannte Datei (oder die beste verfügbare) bestimmen."""
+    mod = cf_request(f"/mods/{src['mod_id']}", key).get("data") or {}
+    files = cf_files(src["mod_id"], key)
+    info = cf_info(mod, files, flavor, game_ver)
+    exact = next((a for a in info["assets"] if a["file_id"] == src.get("file_id")), None)
+    if exact:
+        info["best"], info["tag"] = exact, exact["name"]
+    if not info["best"]:
+        raise CFError("keine passende Datei gefunden")
+    return info
 
 # --------------------------------------------------------------------------- #
 # Gruppierung zusammengehöriger Addon-Ordner
@@ -1234,12 +1473,13 @@ class AssetDialog(Dialog):
 
     def __init__(self, parent, info: dict, preselect: dict | None):
         super().__init__(parent, APP_NAME, "Datei auswählen", 560, 400)
-        ttk.Label(self.body, text=f"{info['repo']}  ·  {info['tag']} bietet mehrere Dateien an. "
-                                  "Welche passt zu deiner Spielversion?",
+        ttk.Label(self.body, text=info.get("dialog_text") or
+                  f"{info['repo']}  ·  {info['tag']} bietet mehrere Dateien an. "
+                  "Welche passt zu deiner Spielversion?",
                   wraplength=500, padding=(0, 0, 0, 10)).pack(anchor="w")
         self.assets = info["assets"]
-        lines = [f"{a['name']}   ({a['size'] / 1024 / 1024:.1f} MB)" if a.get("size") else a["name"]
-                 for a in self.assets]
+        lines = [f"{a.get('label', a['name'])}   ({a['size'] / 1024 / 1024:.1f} MB)" if a.get("size")
+                 else a.get("label", a["name"]) for a in self.assets]
         self.lb = self.listbox(lines)
         idx = self.assets.index(preselect) if preselect in self.assets else 0
         self.lb.selection_set(idx)
@@ -1523,6 +1763,7 @@ class App(BaseTk):
         mb = ttk.Menubutton(parent, text=text, style=style, cursor="hand2")
         mb["menu"] = self._menu(mb, [("ZIP-Datei installieren…", self.install_zip_dialog),
                                      ("Von GitHub…", self.install_github_dialog),
+                                     ("Von CurseForge…", self.install_curseforge_dialog),
                                      ("Addon-Paket importieren…", self.import_pack_dialog)])
         return mb
 
@@ -1624,6 +1865,7 @@ class App(BaseTk):
         rows = [
             ([("ZIP installieren", self.install_zip_dialog, P),
               ("Von GitHub…", self.install_github_dialog, P),
+              ("Von CurseForge…", self.install_curseforge_dialog, P),
               ("Paket importieren…", self.import_pack_dialog, P),
               ("Updates prüfen", self.check_updates, None),
               ("Alle aktualisieren", self.update_all, None)],
@@ -1634,7 +1876,8 @@ class App(BaseTk):
               ("Auswahl exportieren…", self.export_pack_dialog, None)],
              [("WTF sichern", self.backup, None),
               ("Wiederherstellen…", self.restore_dialog, None),
-              ("Ordner öffnen", self.open_folder, None)]),
+              ("Ordner öffnen", self.open_folder, None),
+              ("CurseForge-Key…", self.settings_dialog, None)]),
         ]
         for i, (left, right) in enumerate(rows):
             bar = ttk.Frame(inner, style="Panel.TFrame")
@@ -1862,7 +2105,8 @@ class App(BaseTk):
         names = {a.name for a in sel}
         main = next((a for a in sel if any(o.startswith(a.name) for o in names if o != a.name)), sel[0])
         sid, src = self.folder_source(main.name)
-        d["kicker"].configure(text=spaced(f"GitHub · {sid}") if src else spaced("Manuell installiert"))
+        d["kicker"].configure(text=spaced(self.source_label(sid, src).replace(": ", " · "))
+                              if src else spaced("Manuell installiert"))
         d["title"].configure(text=main.title if len(sel) == 1 else f"{main.name}  ({len(sel)} Ordner)")
         d["note"].configure(text=clean_wow_text(main.meta.get("notes", "")) or "Keine Beschreibung in der .toc.")
         d["version"].configure(text=main.version or "–")
@@ -1893,12 +2137,12 @@ class App(BaseTk):
             return
         sid, src = self.folder_source(sel[0].name)
         if src:
-            self.open_link(f"https://github.com/{sid}/releases")
+            self.open_link(self.source_page(sid, src))
 
     def _page_install(self, host):
         page, _ = self._page("install", "Installieren", "Addons hinzufügen",
                              "Wähle zuerst den WoW-Ordner. Danach kannst du Addons aus einer ZIP-Datei, "
-                             "direkt aus einem GitHub-Release oder aus einem Paket eines Freundes installieren.")
+                             "aus einem GitHub-Release, von CurseForge oder aus einem Paket eines Freundes installieren.")
         box = self._card_box(page)
         self._w_path(box, with_version=False).pack(fill="x")
         for title, text, cmd in (
@@ -1906,6 +2150,9 @@ class App(BaseTk):
                  self.install_zip_dialog),
                 ("Von GitHub installieren", "owner/repo oder Link eingeben – Updates kommen danach automatisch.",
                  self.install_github_dialog),
+                ("Von CurseForge installieren", "CurseForge-Link einfügen – Download und Updates laufen "
+                 "automatisch (braucht deinen eigenen API-Key in den Einstellungen).",
+                 self.install_curseforge_dialog),
                 ("Addon-Paket importieren", "Eine .faddons-Datei, die dir jemand mit dem Manager geschickt hat.",
                  self.import_pack_dialog)):
             card = self._card_box(page, pady=(12, 0))
@@ -1997,6 +2244,7 @@ class App(BaseTk):
         self._w_path(box, with_version=False).pack(fill="x")
         box2 = self._card_box(page, pady=(12, 0))
         self._w_layout_choice(box2).pack(anchor="w")
+        self._w_cf_key(box2, panel=True).pack(fill="x", pady=(12, 0))
         row = ttk.Frame(box2, style="Panel.TFrame")
         row.pack(fill="x", pady=(12, 0))
         ttk.Button(row, text="Log öffnen", command=self.open_log).pack(side="left")
@@ -2074,8 +2322,47 @@ class App(BaseTk):
         wrap.pack(fill="both", expand=True)
         self.cards_inner = inner
 
+    def _w_cf_key(self, parent, panel: bool = False):
+        """Eingabe des eigenen CurseForge-API-Keys (nur lokal gespeichert) mit Verbindungstest."""
+        fs, ls = ("Panel.TFrame", "Panel.TLabel") if panel else ("TFrame", "TLabel")
+        f = ttk.Frame(parent, style=fs)
+        ttk.Label(f, text="CurseForge-API-Key (bleibt nur auf diesem Rechner):", style=ls).pack(anchor="w")
+        row = ttk.Frame(f, style=fs)
+        row.pack(fill="x", pady=(4, 0))
+        var = tk.StringVar(value=self.cfg.get("curseforge_key", ""))
+        status = tk.StringVar(value="")
+
+        def store(*_):
+            self.cfg["curseforge_key"] = var.get().strip()
+            save_config(self.cfg)
+        var.trace_add("write", store)
+        ttk.Entry(row, textvariable=var, show="•", width=34).pack(side="left", fill="x", expand=True)
+
+        def test():
+            key = var.get().strip()
+            if not key:
+                status.set("Bitte zuerst den Key einfügen.")
+                return
+            status.set("Teste …")
+
+            def work():
+                try:
+                    cf_request(f"/games/{CF_GAME_ID}", key)
+                    msg = "Verbindung steht – der Key funktioniert."
+                except Exception as e:  # noqa
+                    msg = str(e)
+                try:
+                    f.after(0, lambda: status.set(msg))
+                except (tk.TclError, RuntimeError):
+                    pass
+            threading.Thread(target=work, daemon=True).start()
+        ttk.Button(row, text="Testen", command=test).pack(side="left", padx=(8, 0))
+        ttk.Button(row, text="Key holen  ↗", command=lambda: self.open_link(CF_KEY_URL)).pack(side="left", padx=(8, 0))
+        ttk.Label(f, textvariable=status, style=ls, wraplength=520).pack(anchor="w", pady=(4, 0))
+        return f
+
     def settings_dialog(self):
-        dlg = Dialog(self, APP_NAME, "Einstellungen", 640, 330)
+        dlg = Dialog(self, APP_NAME, "Einstellungen", 720, 460)
         box = ttk.Frame(dlg.body)
         box.pack(fill="x")
         self._w_path(box, frame_style="TFrame", label_style="TLabel", with_version=False).pack(fill="x")
@@ -2085,6 +2372,7 @@ class App(BaseTk):
         self._w_check(dlg.body, "Vor Updates automatisch WTF sichern", self.auto_backup_var,
                       panel=False).pack(anchor="w", pady=(6, 0))
         self._w_update_mode(dlg.body, label_style="TLabel").pack(anchor="w", pady=(12, 0))
+        self._w_cf_key(dlg.body).pack(fill="x", pady=(14, 0))
         self._w_layout_choice(dlg.body, label_style="TLabel",
                               on_change=lambda: (dlg.destroy(), self.after(50, self.switch_layout))
                               ).pack(anchor="w", pady=(12, 0))
@@ -2125,7 +2413,7 @@ class App(BaseTk):
             status_color = (t["text_faint"] if "disabled" in tags else t["warn"] if "warn" in tags
                             else t["old"] if "old" in tags else t["update"])
             for text, fg, bg in ((f"v{vals[3]}" if vals[3] else "ohne Version", t["text"], t["pill"]),
-                                 ("GitHub" if vals[5].startswith("GitHub") else vals[5] or "manuell",
+                                 (vals[5].split(":")[0] or "manuell",
                                   t["text_dim"], t["pill"]),
                                  (vals[6] if "update" in tags else vals[0], t["update"] if "update" in tags
                                   else status_color, "#18261a" if "update" in tags else t["pill"])):
@@ -2168,7 +2456,7 @@ class App(BaseTk):
         self.stat_vars["active"][1].set(f"in {len(self.addons)} Ordnern")
         self.stat_vars["updates"][0].set(str(upd))
         self.stat_vars["updates"][1].set("bereit zum Aktualisieren" if upd else
-                                         ("alle GitHub-Addons aktuell" if self.updates else "noch nicht geprüft"))
+                                         ("alle Addons aktuell" if self.updates else "noch nicht geprüft"))
         self.stat_vars["old"][0].set(str(old))
         self.stat_vars["old"][1].set(f"passen nicht zu Interface {self.game[1]}" if old and self.game
                                      else (f"alle passen zu {self.game[1]}" if self.game else "Spielversion unbekannt"))
@@ -2196,6 +2484,23 @@ class App(BaseTk):
 
     def sets(self) -> dict:
         return self.cfg["sets"].setdefault(self.flavor, {})
+
+    def source_label(self, sid: str, src: dict) -> str:
+        if src.get("type") == "curseforge":
+            return f"CurseForge: {src.get('name') or sid}"
+        return f"GitHub: {sid}"
+
+    def source_name(self, sid: str) -> str:
+        src = self.sources().get(sid, {})
+        return src.get("name") or sid
+
+    def source_page(self, sid: str, src: dict) -> str:
+        if src.get("type") == "curseforge":
+            return src.get("page") or f"https://www.curseforge.com/wow/addons/{src.get('slug', '')}"
+        return f"https://github.com/{sid}/releases"
+
+    def cf_key(self) -> str:
+        return (self.cfg.get("curseforge_key") or "").strip()
 
     def folder_source(self, folder: str) -> tuple[str, dict] | tuple[None, None]:
         for sid, s in self.sources().items():
@@ -2354,10 +2659,30 @@ class App(BaseTk):
         self.cfg["bundles"][self.flavor] = kept
         save_config(self.cfg)
 
+    def _claim_folders(self, sid: str, folders: list[str]):
+        """Ein Ordner gehört immer genau einer Quelle (z. B. nach Wechsel GitHub -> CurseForge)."""
+        for other, s in self.sources().items():
+            if other != sid:
+                s["folders"] = [f for f in s.get("folders", []) if f not in folders]
+
     def remember_source(self, repo: str, info: dict, asset: dict, folders: list[str]):
+        if repo.startswith(CF_PREFIX):
+            self.remember_cf_source(info, asset, folders)
+            return
+        self._claim_folders(repo, folders)
         self.sources()[repo] = {"type": "github", "tag": info["tag"], "asset": asset["name"],
                                 "asset_key": asset_key(asset["name"]) if asset["name"] != "zipball" else "",
                                 "folders": folders}
+
+    def remember_cf_source(self, info: dict, asset: dict, folders: list[str]):
+        sid = CF_PREFIX + str(info["mod_id"])
+        self._claim_folders(sid, folders)
+        self.sources()[sid] = {
+            "type": "curseforge", "tag": asset["name"], "asset": asset["name"],
+            "asset_key": asset_key(asset["name"]), "mod_id": info["mod_id"], "file_id": asset["file_id"],
+            "slug": info["slug"], "name": info["repo"], "author": info["author"], "page": info["page"],
+            "allow_dl": info["allow_dl"], "game_versions": asset["game_versions"],
+            "release_type": asset["release_type"], "folders": folders}
 
     # ----- Pfade / Versionen ----------------------------------------------- #
     def browse_root(self):
@@ -2435,7 +2760,7 @@ class App(BaseTk):
         else:
             status = "aktiv"
         sid, src = self.folder_source(a.name)
-        source = f"GitHub: {sid}" if src else "manuell"
+        source = self.source_label(sid, src) if src else "manuell"
         upd = ""
         has_update = bool(src and self.updates.get(sid) and self.updates[sid] != src.get("tag"))
         if src:
@@ -2580,6 +2905,13 @@ class App(BaseTk):
             lines.append(f"\nDas Addon ist für Interface {a.interface} gebaut, das Spiel nutzt "
                          f"{self.game[1]}. WoW lädt es nur mit der Option "
                          "„Veraltete AddOns laden“.")
+        sid, src = self.folder_source(a.name)
+        if src:
+            if src.get("type") == "curseforge":
+                lines.append(f"Quelle: CurseForge – {src.get('name', '')}"
+                             f"  (Autor: {src.get('author') or '–'})\n{self.source_page(sid, src)}")
+            else:
+                lines.append(f"Quelle: GitHub – {sid}")
         notes = clean_wow_text(a.meta.get("notes", ""))
         if notes:
             lines.append(f"\n{notes}")
@@ -2624,6 +2956,81 @@ class App(BaseTk):
         self.run_bg(f"Lese Release von {repo}", lambda: github_latest(repo, token),
                     lambda info: self._pick_and_install(info))
 
+    def need_cf_key(self) -> str:
+        if not self.cf_key():
+            if messagebox.askyesno(APP_NAME, "Für CurseForge brauchst du deinen eigenen (kostenlosen) "
+                                             "API-Key.\n\nJetzt in den Einstellungen eintragen?"):
+                self.settings_dialog()
+        return self.cf_key()
+
+    def manual_cf(self, page: str, name: str, reason: str):
+        if messagebox.askyesno(APP_NAME, f"{name}: {reason}\n\nDie CurseForge-Seite öffnen? Dort die ZIP "
+                                         "laden und danach ins Manager-Fenster ziehen (oder „ZIP installieren“)."):
+            self.open_link(page)
+
+    def install_curseforge_dialog(self):
+        if not self.ready():
+            return
+        key = self.need_cf_key()
+        if not key:
+            return
+        text = simpledialog.askstring(APP_NAME, "CurseForge-Addon (Link oder Name, z. B. leatrix-plus):",
+                                      parent=self)
+        if not text:
+            return
+        try:
+            ref = parse_cf_ref(text)
+        except ValueError as e:
+            messagebox.showerror(APP_NAME, str(e))
+            return
+        flavor, gv = self.flavor, (self.game[0] if self.game else "")
+
+        def job():
+            mod = cf_get_mod(ref, key)
+            files = cf_files(mod["id"], key)
+            if not files:
+                raise CFError(f"{mod.get('name', ref)}: keine ZIP-Dateien bei CurseForge gefunden.")
+            return cf_info(mod, files, flavor, gv)
+
+        self.run_bg("Suche auf CurseForge", job, self._pick_and_install_cf)
+
+    def _pick_and_install_cf(self, info: dict):
+        best = info["best"] or info["assets"][0]
+        if not info["allow_dl"]:
+            self.manual_cf(info["page"].rstrip("/") + "/files", info["repo"],
+                           "Der Autor erlaubt keinen Download über Programme wie diesen.")
+            return
+        asset = best
+        if len(info["assets"]) > 1:
+            info["dialog_text"] = (f"{info['repo']} von {info['author'] or 'unbekannt'} (CurseForge). "
+                                   "Welche Datei passt zu deiner Spielversion?")
+            asset = AssetDialog(self, info, best).show()
+            if not asset:
+                self.set_status("Abgebrochen.")
+                return
+        root, flavor, key = self.root_path, self.flavor, self.cf_key()
+
+        def done(folders):
+            self.remember_cf_source(info, asset, folders)
+            self.remember_bundle(folders)
+            self.updates.pop(CF_PREFIX + str(info["mod_id"]), None)
+            save_config(self.cfg)
+            log.info("CurseForge installiert: %s (%s) -> %s", info["repo"], asset["name"], ", ".join(folders))
+            self.refresh()
+            self.set_status(f"{info['repo']} von {info['author'] or '?'} installiert: {', '.join(folders)}  "
+                            f"·  Quelle: {info['page']}")
+
+        def failed(err):
+            if isinstance(err, ManualDownload):
+                self.set_status("Manueller Download nötig.")
+                self.manual_cf(err.page, info["repo"], err.reason)
+            else:
+                self.set_status(f"Fehler: {err}")
+                messagebox.showerror(APP_NAME, str(err))
+
+        self.run_bg(f"Lade {asset['name']}", lambda: cf_install_asset(asset, info, root, flavor, key),
+                    done, failed)
+
     def _pick_and_install(self, info: dict):
         best = choose_asset(info, self.flavor)
         if not best:
@@ -2657,17 +3064,28 @@ class App(BaseTk):
         repos = list(self.sources().keys())
         if not repos:
             if not silent:
-                messagebox.showinfo(APP_NAME, "Keine GitHub-Addons in dieser Version installiert.")
+                messagebox.showinfo(APP_NAME, "Keine Addons mit Update-Quelle (GitHub/CurseForge) "
+                                              "in dieser Version installiert.")
             return
-        token = self.cfg.get("github_token", "")
+        token, cf_key = self.cfg.get("github_token", ""), self.cf_key()
+        srcs = {r: dict(self.sources()[r]) for r in repos}
+        flavor, gv = self.flavor, (self.game[0] if self.game else "")
 
         def job():
             res, errors = {}, []
             for r in repos:
+                s = srcs[r]
                 try:
-                    res[r] = github_latest(r, token)
+                    if s.get("type") == "curseforge":
+                        if not cf_key:
+                            if not silent:
+                                errors.append(f"{s.get('name', r)}: CurseForge-API-Key fehlt (Einstellungen).")
+                            continue
+                        res[r] = cf_check(s, cf_key, flavor, gv)
+                    else:
+                        res[r] = github_latest(r, token)
                 except Exception as e:  # noqa
-                    errors.append(f"{r}: {e}")
+                    errors.append(f"{s.get('name', r)}: {e}")
             return res, errors
 
         def done(out):
@@ -2677,7 +3095,7 @@ class App(BaseTk):
                 self.update_info[r] = info
             self.render()
             n = sum(1 for r, info in res.items() if info["tag"] != self.sources()[r].get("tag"))
-            msg = f"{n} Update(s) verfügbar." if n else "Alle GitHub-Addons sind aktuell."
+            msg = f"{n} Update(s) verfügbar." if n else "Alle Addons sind aktuell."
             if errors:
                 msg += f"  ({len(errors)} Fehler)"
                 log.warning("Update-Prüfung: %s", "; ".join(errors))
@@ -2700,16 +3118,20 @@ class App(BaseTk):
             return
         if not self.ready():
             return
-        items = [{"repo": r, "old": self.sources()[r].get("tag"), "new": self.updates[r],
+        items = [{"repo": self.source_name(r), "old": self.sources()[r].get("tag"), "new": self.updates[r],
                   "notes": self.update_info.get(r, {}).get("notes", ""),
                   "published": self.update_info.get(r, {}).get("published", "")} for r in pending]
         if not UpdateDialog(self, items, bool(self.cfg.get("auto_backup"))).show():
             return
         root, flavor, token = self.root_path, self.flavor, self.cfg.get("github_token", "")
+        cf_key = self.cf_key()
         plan = []
         for r in pending:
             info = self.update_info[r]
-            asset = choose_asset(info, flavor, self.sources()[r].get("asset_key", ""))
+            if r.startswith(CF_PREFIX):
+                asset = info.get("best")
+            else:
+                asset = choose_asset(info, flavor, self.sources()[r].get("asset_key", ""))
             if asset:
                 plan.append((r, info, asset))
 
@@ -2721,16 +3143,41 @@ class App(BaseTk):
                     log.info("Auto-Backup: %s", backup_wtf(root, flavor, "auto"))
                 except FileNotFoundError:
                     pass
-            return [(r, info, asset, github_install_asset(asset, root, flavor, token))
-                    for r, info, asset in plan]
+            ok, manual, errors = [], [], []
+            for r, info, asset in plan:
+                try:
+                    if r.startswith(CF_PREFIX):
+                        folders = cf_install_asset(asset, info, root, flavor, cf_key)
+                    else:
+                        folders = github_install_asset(asset, root, flavor, token)
+                    ok.append((r, info, asset, folders))
+                except ManualDownload as m:
+                    manual.append((info.get("repo", r), m))
+                except Exception as e:  # noqa
+                    log.error("Update %s: %s", r, e)
+                    errors.append(f"{info.get('repo', r)}: {e}")
+            return ok, manual, errors
 
-        def done(results):
+        def done(out):
+            results, manual, errors = out
             for repo, info, asset, folders in results:
                 self.remember_source(repo, info, asset, folders)
                 log.info("Aktualisiert: %s -> %s (%s)", repo, info["tag"], asset["name"])
             save_config(self.cfg)
             self.refresh()
-            self.set_status(f"{len(results)} Addon(s) aktualisiert.")
+            msg = f"{len(results)} Addon(s) aktualisiert."
+            if manual or errors:
+                msg += f"  ({len(manual) + len(errors)} nicht automatisch)"
+            self.set_status(msg)
+            if manual:
+                names = "\n".join(f"• {n}: {m.reason}" for n, m in manual)
+                if messagebox.askyesno(APP_NAME, "Diese Addons lassen sich nicht automatisch laden:\n\n"
+                                                 f"{names}\n\nDie CurseForge-Seiten öffnen? Dort ZIP laden "
+                                                 "und ins Manager-Fenster ziehen."):
+                    for _, m in manual:
+                        self.open_link(m.page)
+            if errors:
+                messagebox.showwarning(APP_NAME, "Nicht aktualisiert:\n\n" + "\n".join(errors))
 
         self.run_bg("Aktualisiere", job, done)
 
@@ -2897,12 +3344,17 @@ class App(BaseTk):
             return
         sources, flavor = dict(self.sources()), self.flavor
 
+        n_cf = sum(1 for a in sel if any(a.name in v.get("folders", []) and v.get("type") == "curseforge"
+                                         for v in sources.values()))
+
         def done(path):
             size = path.stat().st_size / 1024 / 1024
             log.info("Paket exportiert: %s (%d Addons)", path, len(sel))
             self.set_status(f"{len(sel)} Addons exportiert ({size:.1f} MB): {path}")
+            extra = (f"\n\n{n_cf} CurseForge-Addon(s) sind nur als Verweis enthalten – dein Freund lädt sie "
+                     "mit seinem eigenen API-Key." if n_cf else "")
             if messagebox.askyesno(APP_NAME, f"Paket mit {len(sel)} Addons erstellt "
-                                             f"({size:.1f} MB).\n\n{path}\n\nOrdner öffnen?"):
+                                             f"({size:.1f} MB).{extra}\n\n{path}\n\nOrdner öffnen?"):
                 open_in_explorer(path.parent)
 
         self.run_bg("Exportiere Paket", lambda: export_pack(sel, sources, flavor, Path(dest)), done)
@@ -2929,6 +3381,8 @@ class App(BaseTk):
             old = present.get(e["folder"].lower())
             ver = e.get("version") or "?"
             note = f"ersetzt deine Version {old.version or '?'}" if old else "neu"
+            if (e.get("source") or {}).get("type") == "curseforge":
+                note += ", wird von CurseForge geladen"
             lines.append(f"• {e.get('title') or e['folder']}  ({ver}) – {note}")
         text = (f"Paket vom {manifest.get('created', '?')[:10]} "
                 f"({manifest.get('flavor', '?')}), {len(entries)} Addons:\n\n"
@@ -2941,9 +3395,42 @@ class App(BaseTk):
             return
 
         root, flavor = self.root_path, self.flavor
-        folders = [e["folder"] for e in entries]
+        gv = self.game[0] if self.game else ""
+        cf_entries = [e for e in entries if (e.get("source") or {}).get("type") == "curseforge"]
+        folders = [e["folder"] for e in entries if e not in cf_entries]
+        cf_todo, seen = [], set()
+        for e in cf_entries:
+            src = e["source"]
+            if isinstance(src.get("mod_id"), int) and src["mod_id"] not in seen:
+                seen.add(src["mod_id"])
+                cf_todo.append(src)
+        cf_key = self.cf_key()
+        if cf_todo and not cf_key:
+            names = "\n".join(f"• {c.get('name') or c.get('slug') or c['mod_id']}" for c in cf_todo)
+            if messagebox.askyesno(APP_NAME, "Diese Addons kommen von CurseForge und brauchen deinen eigenen "
+                                             f"API-Key:\n\n{names}\n\nJetzt in den Einstellungen eintragen?"):
+                self.settings_dialog()
+                cf_key = self.cf_key()
+            if not cf_key:
+                cf_todo = []
 
-        def done(installed):
+        def job():
+            installed = import_pack(Path(path), root, flavor, folders) if folders else []
+            cf_ok, manual, errors = [], [], []
+            for src in cf_todo:
+                label = src.get("name") or src.get("slug") or str(src["mod_id"])
+                try:
+                    info = cf_pack_item(src, cf_key, flavor, gv)
+                    got = cf_install_asset(info["best"], info, root, flavor, cf_key)
+                    cf_ok.append((info, info["best"], got))
+                except ManualDownload as m:
+                    manual.append((label, m))
+                except Exception as e:  # noqa
+                    errors.append(f"{label}: {e}")
+            return installed, cf_ok, manual, errors
+
+        def done(out):
+            installed, cf_ok, manual, errors = out
             for e in entries:
                 src = e.get("source")
                 if src and src.get("type") == "github" and e["folder"] in installed:
@@ -2956,12 +3443,22 @@ class App(BaseTk):
                                "asset": "", "asset_key": "", "folders": []})
                     if e["folder"] not in entry["folders"]:
                         entry["folders"].append(e["folder"])
+            for info, asset, got in cf_ok:
+                self.remember_cf_source(info, asset, got)
+                installed += got
             save_config(self.cfg)
             log.info("Paket importiert: %s -> %s", path, ", ".join(installed))
             self.refresh()
             self.set_status(f"{len(installed)} Addons aus Paket installiert.")
+            if manual:
+                names = "\n".join(f"• {n}: {m.reason}" for n, m in manual)
+                if messagebox.askyesno(APP_NAME, f"Manuell nachladen:\n\n{names}\n\nCurseForge-Seiten öffnen?"):
+                    for _, m in manual:
+                        self.open_link(m.page)
+            if errors:
+                messagebox.showwarning(APP_NAME, "Nicht installiert:\n\n" + "\n".join(errors))
 
-        self.run_bg("Importiere Paket", lambda: import_pack(Path(path), root, flavor, folders), done)
+        self.run_bg("Importiere Paket", job, done)
 
     # ----- Backups --------------------------------------------------------- #
     def backup(self):
