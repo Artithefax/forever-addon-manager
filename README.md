@@ -4,17 +4,30 @@ A lightweight, personal addon manager for **World of Warcraft** – Forever, Cla
 
 > Hobby project – non-commercial, no ads, no telemetry. Not affiliated with Blizzard Entertainment or CurseForge.
 
+## The interface
+
+One window, no pop-ups. A sidebar with the game version, the pages and a big **Play** button; questions, confirmations and messages appear as a bar at the top of the window instead of separate dialogs.
+
+| Page | What you do there |
+|---|---|
+| **Meine Addons** | All installed addons as a list or as tiles, with search, grouping and a detail panel (update, open source, link with CurseForge, open folder, remove). Addons with an update are yellow with a ⬇ marker. |
+| **Entdecken** | Install directly from a CurseForge link, a GitHub repository or a ZIP from your download folder – and search CurseForge (WoW addons only) with file choice. |
+| **Updates** | Check and update all or single addons, read the changes, see which blocked downloads Leeroyzan is waiting for, link manual addons, and keep Leeroyzan itself up to date. |
+| **Teilen** | Create a download-list code for Discord/SMS or a `.lzpack` package – and paste a code you received to install it. |
+| **Sets & Backups** | Addon sets (switch groups of addons on/off) and WTF backups with restore. |
+| **Einstellungen** | WoW folder, CurseForge API key, download folder, update options, log. |
+
 ## Features
 
 - Detects the WoW installation and game versions (`_forever_`, `_classic_beta_`, `_retail_`, …)
 - Lists installed addons from their `.toc` files (title, version, interface, dependencies)
 - Checks each addon's interface version against the installed game build (`.build.info`)
 - Installs addons from ZIP files or GitHub releases, with a file picker when a release ships several variants (e.g. a `-forever` build)
-- Update checks (optionally on start) with release notes shown before updating
+- Update checks (optionally on start) with release notes, update all or single addons
 - Addon sets: save groups of addons and switch between them with one click
 - Enable/disable addons, warn when WoW is running
 - WTF backups (manual and automatic before updates) with restore
-- Share addon selections with friends as `.lzpack` packages
+- Share addon selections with friends as `.lzpack` packages (saved straight to your download folder)
 - Share **download lists** (`.lzlist` file or a plain-text code that fits into Discord/SMS messages)
 - Drag & drop for ZIP, `.lzpack` and `.lzlist` files (optional, via `tkinterdnd2`)
 - Log file of all changes
@@ -32,7 +45,7 @@ Addons can be found and installed from CurseForge right inside the manager (**Vo
 - **Verified downloads.** Files are only fetched from CurseForge's CDN over HTTPS and checked against the SHA-1 hash published by the API.
 - **Blocked downloads stay blocked.** If an author disables third-party downloads, the manager does not work around it: it opens the normal CurseForge download page in your browser, you click download, and the manager installs the file from your download folder once it appears.
 - Addons with an available update are highlighted in **yellow with a ⬇ marker** in every view.
-- **Direct download link for updates.** When a CurseForge update is available, the manager offers a shortcut to that file's download page on CurseForge: right-click an addon, double-click its *Update* column, the button in the details panel (sidebar view), the link on the addon card (launcher view) or the link in the update dialog. Once the ZIP lands in your download folder, the manager installs it automatically – also when you download an available update from the CurseForge website yourself. The file is matched by name and verified against the SHA-1 hash published by CurseForge before it is installed.
+- **Direct download link for updates.** When a CurseForge update is available, the manager offers a shortcut to that file's download page on CurseForge: right-click an addon, double-click its *Update* column, the button in the detail panel, or *Im Browser laden* on the Updates page. Once the ZIP lands in your download folder, the manager installs it automatically – also when you download an available update from the CurseForge website yourself. The file is matched by name and verified against the SHA-1 hash published by CurseForge before it is installed.
 - **Manually installed addons** can be linked to their CurseForge project (automatically via the `X-Curse-Project-ID` in the `.toc`, or by pasting the project link). Afterwards they are included in update checks like any other addon.
 - **Minimal traffic.** Update checks run on app start or on manual request only (one request per installed CurseForge addon).
 
@@ -40,10 +53,10 @@ Addons can be found and installed from CurseForge right inside the manager (**Vo
 
 A download list is the lightweight way to share many addons: it contains **only references** (CurseForge project/file IDs and GitHub `owner/repo` names) – no addon files, no paths, no personal data.
 
-- **Share:** select addons (or none for all) and click **Liste teilen…** (Teilen page, Add menu or the *Mehr* menu). You get a text code that can be split into messages of a chosen size – *Discord/Chat* (1800 characters), *Kurznachricht* (500) or *SMS* (150) – or saved as a small `.lzlist` file. A *readable list* with links can be copied as well. Optionally the exact CurseForge file versions and your addon sets are included.
-- **Import:** **Liste importieren…** accepts the pasted code (all parts, in any order; surrounding chat text and code-block backticks are ignored) or a `.lzlist` file, also via drag & drop. The manager shows what will be installed, skips addons you already have, and downloads the rest with *your own* CurseForge key. Downloads blocked by the author use the same browser-download flow as everywhere else.
+- **Share:** on the **Teilen** page choose *selected* or *all* addons (or click *Teilen …* under the addon list). You get a text code that can be split into messages of a chosen size – *Discord/Chat* (1800 characters), *Kurznachricht* (500) or *SMS* (150) – or saved as a small `.lzlist` file. A *readable list* with links can be copied as well. Optionally the exact CurseForge file versions and your addon sets are included.
+- **Import:** paste the code into *Empfangen* on the **Teilen** page – it accepts (all parts, in any order; surrounding chat text and code-block backticks are ignored) or a `.lzlist` file, also via drag & drop. The manager shows what will be installed, skips addons you already have, and downloads the rest with *your own* CurseForge key. Downloads blocked by the author use the same browser-download flow as everywhere else.
 - **Safe by design:** the code is `LZ1:<part>/<total>:<data>` (compressed JSON, Base32 so it survives chat apps). Imported lists are strictly validated; only known CurseForge IDs and valid GitHub repo names are accepted, and the size is capped.
-- Addons without a download source (installed manually and not linked to CurseForge) cannot be listed – the dialog tells you which ones; use *Mit CurseForge verknüpfen* or a `.lzpack` package for those.
+- Addons without a download source (installed manually and not linked to CurseForge) cannot be listed – the Teilen page tells you which ones; use *Mit CurseForge verknüpfen* or a `.lzpack` package for those.
 
 ## Requirements
 
