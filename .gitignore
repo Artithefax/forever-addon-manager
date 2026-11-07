@@ -3,6 +3,7 @@ build/
 dist/
 *.spec
 .build_venv/
+.build_tools/
 
 # Python
 __pycache__/

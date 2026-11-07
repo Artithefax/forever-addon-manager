@@ -1,6 +1,7 @@
-# Baut Leeroyzan.exe, sobald auf GitHub ein Release veröffentlicht wird,
-# und hängt die .exe samt SHA-256-Prüfsumme an das Release an.
-# Der Auto-Updater im Manager lädt genau diese beiden Dateien.
+# Baut Leeroyzan.exe, Leeroyzan-Portable.zip und Leeroyzan-Setup.exe, sobald auf GitHub ein Release
+# veröffentlicht wird, und hängt alles (plus SHA-256-Prüfsumme der .exe) an das Release an.
+# Python steckt in der .exe – wer Leeroyzan nutzt, braucht kein Python.
+# Der Auto-Updater im Manager lädt Leeroyzan.exe und Leeroyzan.exe.sha256.
 
 name: Build release exe
 
@@ -67,3 +68,29 @@ jobs:
         shell: pwsh
         run: |
           gh release upload $env:TAG dist\Leeroyzan.exe dist\Leeroyzan.exe.sha256 --clobber
+
+      # Portable Version: dieselbe .exe plus Ordner „Leeroyzan-Data“ – dann bleiben alle Daten daneben.
+      - name: Portable-ZIP bauen und anhängen
+        shell: pwsh
+        run: |
+          $stage = "dist\portable\Leeroyzan"
+          New-Item -ItemType Directory -Force "$stage\Leeroyzan-Data" | Out-Null
+          Copy-Item dist\Leeroyzan.exe $stage
+          Copy-Item portable-readme.txt "$stage\Leeroyzan-Data\README.txt"
+          Compress-Archive -Path $stage -DestinationPath dist\Leeroyzan-Portable.zip -Force
+          gh release upload $env:TAG dist\Leeroyzan-Portable.zip --clobber
+
+      # Das Setup kommt nach der .exe: Schlägt es fehl, hängt die .exe trotzdem schon am Release.
+      - name: Setup bauen (Inno Setup)
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup --no-progress -y }
+          $version = $env:TAG -replace '^v', ''
+          & $iscc "/DAppVersion=$version" installer.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Setup anhängen
+        shell: pwsh
+        run: |
+          gh release upload $env:TAG dist\Leeroyzan-Setup.exe --clobber
