@@ -58,7 +58,7 @@ except Exception:                      # noqa – Paket fehlt oder Tk-Erweiterun
     HAS_DND = False
 
 APP_NAME = "Leeroyzan"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.1"
 USER_AGENT = f"Leeroyzan/{APP_VERSION}"
 
 # Selbst-Update über GitHub-Releases dieses Repos
@@ -1909,10 +1909,18 @@ class UpdateDialog(Dialog):
                  ok_text: str = "Jetzt aktualisieren", cancel_text: str = "Abbrechen", hint: str = ""):
         super().__init__(parent, APP_NAME, heading or f"{len(items)} Update(s) verfügbar", 680, 520)
         txt = self.text_box("")
-        for it in items:
+        for i, it in enumerate(items):
             txt.insert("end", f"{it['repo']}   {it['old'] or '?'} → {it['new']}\n", "head")
             if it.get("published"):
                 txt.insert("end", f"veröffentlicht am {it['published']}\n", "dim")
+            if it.get("link"):
+                tag = f"link{i}"
+                txt.tag_configure(tag, foreground=THEME["gold"], underline=True)
+                txt.tag_bind(tag, "<Button-1>", lambda e, u=it["link"]: parent.open_link(u))
+                txt.tag_bind(tag, "<Enter>", lambda e: txt.configure(cursor="hand2"))
+                txt.tag_bind(tag, "<Leave>", lambda e: txt.configure(cursor=""))
+                txt.insert("end", "Download bei CurseForge öffnen ↗", tag)
+                txt.insert("end", "\n")
             notes = it.get("notes") or "Keine Release-Notes angegeben."
             if len(notes) > 3000:
                 notes = notes[:3000] + "\n… (gekürzt, vollständig auf GitHub)"
@@ -2215,9 +2223,10 @@ class App(BaseTk):
         self.tree.tag_configure("old", foreground=t["old"])
         self.tree.tag_configure("update", foreground=t["update"])
         self.tree.bind("<Double-1>", self._on_double_click)
+        self.tree.bind("<Button-3>", self._on_right_click)
         self.tree.bind("<Control-a>", lambda e: (self.select_all(force=True), "break")[1])
         self.tree.bind("<Control-A>", lambda e: (self.select_all(force=True), "break")[1])
-        self.tree.bind("<<TreeviewSelect>>", lambda e: self.update_detail())
+        self.tree.bind("<<TreeviewSelect>>", lambda e: (self.update_detail(), self._hint_update_link()))
         return body
 
     def _scroll_area(self, parent, bg):
@@ -2489,6 +2498,8 @@ class App(BaseTk):
             self.detail[key] = v
         btns = ttk.Frame(parent, style="Detail.TFrame")
         btns.pack(fill="x", side="bottom")
+        self.detail["dl_btn"] = ttk.Button(btns, text="Update bei CurseForge ↗", style="Primary.TButton",
+                                           command=self.open_cf_update)
         self.detail["page_btn"] = ttk.Button(btns, text="Release-Seite öffnen", command=self._detail_release)
         self.detail["page_btn"].pack(fill="x", pady=(0, 6))
         ttk.Button(btns, text="Ordner öffnen", command=self.open_folder).pack(fill="x", pady=(0, 6))
@@ -2510,7 +2521,12 @@ class App(BaseTk):
             for k in ("version", "release", "iface", "folders", "toc", "deps"):
                 d[k].configure(text="–", foreground=THEME["text"])
             d["page_btn"].state(["disabled"])
+            d["dl_btn"].pack_forget()
             return
+        if self.cf_update_link(sel)[1]:
+            d["dl_btn"].pack(fill="x", pady=(0, 6), before=d["page_btn"])
+        else:
+            d["dl_btn"].pack_forget()
         names = {a.name for a in sel}
         main = next((a for a in sel if any(o.startswith(a.name) for o in names if o != a.name)), sel[0])
         sid, src = self.folder_source(main.name)
@@ -2866,6 +2882,10 @@ class App(BaseTk):
                                   else status_color, "#18261a" if "update" in tags else t["pill"])):
                 tk.Label(chips, text=text, fg=fg, bg=bg, font=self.fonts["small"], padx=9, pady=2).pack(
                     side="left", padx=(0, 6))
+            if "update" in tags and self.cf_update_link(members)[1]:
+                ttk.Button(card, text="Update bei CurseForge herunterladen ↗", style="CardLink.TButton",
+                           cursor="hand2", command=lambda ms=members: self.open_cf_update(ms)).pack(
+                    anchor="w", pady=(8, 0))
             tk.Frame(card, height=1, bg=t["line"]).pack(fill="x", pady=(10, 4))
             links = ttk.Frame(card, style="Card.TFrame")
             links.pack(fill="x")
@@ -3090,8 +3110,84 @@ class App(BaseTk):
         save_config(self.cfg)
         self.render()
 
+    def _column_at(self, col_id: str) -> str:
+        """Spaltenname zur Treeview-Spalten-ID (#1, #2 …) der aktuellen Ansicht."""
+        if not col_id or col_id == "#0":
+            return ""
+        shown = tuple(self.tree["displaycolumns"])
+        if not shown or shown[0] == "#all":
+            shown = self.COLUMNS
+        i = int(col_id[1:]) - 1
+        return shown[i] if 0 <= i < len(shown) else ""
+
+    def cf_update_link(self, addons) -> tuple[str, str]:
+        """(Name, Download-Adresse) eines verfügbaren CurseForge-Updates dieser Addons – sonst ("", "")."""
+        for a in addons:
+            sid, src = self.folder_source(a.name)
+            if not src or src.get("type") != "curseforge":
+                continue
+            new, info = self.updates.get(sid), self.update_info.get(sid) or {}
+            if new and new != src.get("tag") and info.get("best"):
+                return src.get("name") or sid, cf_download_url(info, info["best"])
+        return "", ""
+
+    def open_cf_update(self, addons=None):
+        sel = list(addons) if addons is not None else self.selected_addons()
+        name, url = self.cf_update_link(sel)
+        if not url:
+            return
+        self.open_link(url)
+        self.set_status(f"CurseForge-Download für {name} geöffnet. Die ZIP danach mit „ZIP installieren“ "
+                        "einspielen (oder ins Fenster ziehen) – oder einfach „Alle aktualisieren“.")
+
+    def _hint_update_link(self):
+        try:
+            sel = self.selected_addons()
+        except tk.TclError:
+            return
+        if sel and len(self.tree.selection()) == 1:
+            name, url = self.cf_update_link(sel)
+            if url:
+                self.set_status(f"Update für {name} verfügbar – Rechtsklick → „Update bei CurseForge herunterladen“.")
+
+    def _on_right_click(self, event):
+        iid = self.tree.identify_row(event.y)
+        if not iid:
+            return
+        if iid not in self.tree.selection():
+            self.tree.selection_set(iid)
+        self.tree.focus(iid)
+        sel = self.selected_addons()
+        if not sel:
+            return
+        main = self._group_main(sel)
+        items = []
+        _, url = self.cf_update_link(sel)
+        if url:
+            items.append(("Update bei CurseForge herunterladen ↗", lambda: self.open_cf_update(sel)))
+        sid, src = self.folder_source(main.name)
+        if src:
+            label = "CurseForge-Seite öffnen ↗" if src.get("type") == "curseforge" else "Release-Seite öffnen ↗"
+            items.append((label, lambda: self.open_link(self.source_page(sid, src))))
+        if items:
+            items.append(None)
+        items += [("Details", lambda: self.show_details(main)),
+                  ("Aktivieren / Deaktivieren", lambda: self.toggle_selected(sel)),
+                  ("Ordner öffnen", lambda: self.open_folder(sel))]
+        menu = self._menu(self.tree, items)
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+        return "break"
+
     def _on_double_click(self, event):
         iid = self.tree.identify_row(event.y)
+        if iid and self._column_at(self.tree.identify_column(event.x)) == "update":
+            self.tree.selection_set(iid)
+            if self.cf_update_link(self.selected_addons())[1]:
+                self.open_cf_update()
+                return "break"
         if iid.startswith("grp:"):
             return            # Gruppen klappt Treeview selbst auf/zu
         if iid:
@@ -3717,7 +3813,10 @@ class App(BaseTk):
                 "installiert die Datei, sobald du sie im Browser lädst.\n\n")
         items = [{"repo": self.source_name(r), "old": self.sources()[r].get("tag"), "new": self.updates[r],
                   "notes": (warn if r in blocked else "") + (self.update_info.get(r, {}).get("notes") or ""),
-                  "published": self.update_info.get(r, {}).get("published", "")} for r in pending]
+                  "published": self.update_info.get(r, {}).get("published", ""),
+                  "link": (cf_download_url(self.update_info[r], self.update_info[r]["best"])
+                           if r.startswith(CF_PREFIX) and self.update_info.get(r, {}).get("best") else "")}
+                 for r in pending]
         hint = ("Vor dem Update wird automatisch ein WTF-Backup angelegt." if self.cfg.get("auto_backup") else "")
         if blocked:
             hint = (hint + "  " if hint else "") + f"{len(blocked)} Addon(s) laufen über den Browser-Download."
