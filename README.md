@@ -22,7 +22,7 @@ A lightweight, personal addon manager for **World of Warcraft** – Forever, Cla
 
 ## CurseForge integration
 
-Addons can be installed from CurseForge by pasting the project link (**Add → From CurseForge…**), and they are included in the normal update check. It uses the official CurseForge API and is designed to respect addon authors:
+Addons can be found and installed from CurseForge right inside the manager (**Von CurseForge…**): a search that only covers World of Warcraft addons, sorted by popularity, downloads, last update or name, with a filter for your game version (Classic, TBC, WotLK, Cata, MoP or Retail), paging, and multi-select install. Pasting a project link or ID still works. Installed addons are included in the normal update check. It uses the official CurseForge API and is designed to respect addon authors:
 
 - **No redistribution.** CurseForge files are never rehosted, mirrored or bundled. Every download is fetched directly from CurseForge by the user's own client.
 - **Shared packages contain references only.** For CurseForge projects, a `.lzpack` package stores the project and file ID, never the files themselves. The recipient's client downloads the file from CurseForge or opens the project page.

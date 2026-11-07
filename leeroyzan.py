@@ -14,6 +14,7 @@ Funktionen:
   - Addons deaktivieren/aktivieren (Verschieben nach Interface/AddOns_Disabled)
   - Addon-Pakete (.lzpack) exportieren und importieren, um Addons zu teilen
   - Download-Listen (.lzlist oder Textcode für Discord/SMS) teilen: nur Verweise, keine Dateien
+  - CurseForge direkt im Manager durchsuchen (nur WoW-Addons) und installieren
   - WTF-Ordner sichern und wiederherstellen, automatisches Backup vor Updates
   - Warnung, wenn WoW läuft; Drag & Drop (mit tkinterdnd2); Logdatei
 
@@ -58,7 +59,7 @@ except Exception:                      # noqa – Paket fehlt oder Tk-Erweiterun
     HAS_DND = False
 
 APP_NAME = "Leeroyzan"
-APP_VERSION = "1.0.4"
+APP_VERSION = "1.0.5"
 USER_AGENT = f"Leeroyzan/{APP_VERSION}"
 
 # Selbst-Update über GitHub-Releases dieses Repos
@@ -765,6 +766,56 @@ def cf_get_mod(ref, key: str) -> dict:
     if not mod or mod.get("gameId", CF_GAME_ID) != CF_GAME_ID:
         raise CFError(f"Kein WoW-Addon „{ref}“ bei CurseForge gefunden.")
     return mod
+
+
+CF_SORTS = {"Beliebtheit": (2, "desc"), "Downloads": (6, "desc"),
+            "Zuletzt aktualisiert": (3, "desc"), "Name": (4, "asc")}
+CF_PAGE_SIZE = 50
+WOW_FAMILIES = {1: "Classic", 2: "TBC", 3: "WotLK", 4: "Cata", 5: "MoP"}
+FAMILY_ORDER = ["Retail", "MoP", "Cata", "WotLK", "TBC", "Classic"]
+
+
+def wow_family(version: str) -> str:
+    """Spielversion -> Spielreihe (1.x Classic, 2.x TBC … ab 6.x Retail)."""
+    m = re.match(r"\s*(\d+)", str(version or ""))
+    if not m:
+        return ""
+    major = int(m.group(1))
+    return WOW_FAMILIES.get(major, "Retail" if major >= 6 else "")
+
+
+def cf_mod_families(mod: dict) -> list[str]:
+    fams = {wow_family(i.get("gameVersion", "")) for i in mod.get("latestFilesIndexes") or []}
+    return [f for f in FAMILY_ORDER if f in fams]
+
+
+def fmt_count(n) -> str:
+    try:
+        n = int(n)
+    except (TypeError, ValueError):
+        return ""
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f} Mio".replace(".", ",")
+    if n >= 1_000:
+        return f"{n // 1_000} Tsd"
+    return str(n)
+
+
+def cf_search(text: str, key: str, sort: str = "Beliebtheit", index: int = 0) -> tuple[list[dict], int]:
+    """Durchsucht CurseForge – ausschließlich World-of-Warcraft-Addons (gameId 1).
+    Ein eingefügter Link oder eine Projekt-ID findet genau dieses Addon."""
+    text = (text or "").strip()
+    if "curseforge.com" in text.lower() or text.isdigit():
+        return [cf_get_mod(parse_cf_ref(text), key)], 1
+    field, order = CF_SORTS.get(sort, CF_SORTS["Beliebtheit"])
+    params = {"gameId": CF_GAME_ID, "sortField": field, "sortOrder": order,
+              "index": index, "pageSize": CF_PAGE_SIZE}
+    if text:
+        params["searchFilter"] = text[:100]
+    res = cf_request("/mods/search", key, params)
+    mods = [m for m in res.get("data") or [] if isinstance(m, dict) and m.get("gameId", CF_GAME_ID) == CF_GAME_ID]
+    total = (res.get("pagination") or {}).get("totalCount", len(mods))
+    return mods, min(int(total or 0), 10_000)          # CurseForge liefert höchstens 10 000 Treffer
 
 
 def cf_get_mods(ids: list[int], key: str) -> list[dict]:
@@ -1779,6 +1830,199 @@ class Dialog(tk.Toplevel):
         self.destroy()
 
 
+class CurseForgeSearchDialog(Dialog):
+    """Die CurseForge-Suche im Manager – nur World-of-Warcraft-Addons."""
+
+    COLS = (("name", "Addon", 230), ("author", "Autor", 130), ("downloads", "Downloads", 110),
+            ("updated", "Aktualisiert", 100), ("versions", "Spielversionen", 170), ("state", "", 110))
+
+    def __init__(self, parent, key: str, state: dict):
+        super().__init__(parent, APP_NAME, "CurseForge durchsuchen  ·  World of Warcraft", 980, 680)
+        t = THEME
+        self.key, self.state = key, state
+        self.mods: list[dict] = list(state.get("mods", []))
+        self.total = state.get("total", 0)
+        self.req = 0
+        self._debounce = None
+        self.direct = False          # Link/ID eingefügt: genau dieses Addon zeigen, ohne Versionsfilter
+        self.family = wow_family(parent.game[0]) if parent.game else ""
+        self.installed = {int(sid[len(CF_PREFIX):]) for sid, src in parent.sources().items()
+                          if sid.startswith(CF_PREFIX) and sid[len(CF_PREFIX):].isdigit()}
+
+        top = ttk.Frame(self.body)
+        top.pack(fill="x", pady=(0, 10))
+        self.q = tk.StringVar(value=state.get("q", ""))
+        entry = ttk.Entry(top, textvariable=self.q, width=40)
+        entry.pack(side="left", fill="x", expand=True)
+        entry.bind("<Return>", lambda e: self.search())
+        entry.focus_set()
+        ttk.Button(top, text="Suchen", style="Primary.TButton", command=self.search).pack(side="left", padx=(8, 0))
+        self.sort = tk.StringVar(value=state.get("sort", "Beliebtheit"))
+        cb = ttk.Combobox(top, textvariable=self.sort, values=list(CF_SORTS), state="readonly", width=20)
+        cb.pack(side="right")
+        cb.bind("<<ComboboxSelected>>", lambda e: self.search())
+        ttk.Label(top, text="Sortierung").pack(side="right", padx=(16, 8))
+
+        opts = ttk.Frame(self.body)
+        opts.pack(fill="x", pady=(0, 8))
+        self.fit = tk.BooleanVar(value=bool(self.family) and state.get("fit", True))
+        chk = ttk.Checkbutton(opts, variable=self.fit, style="Plain.TCheckbutton", command=self.show_rows,
+                              text=f"Nur Addons für meine Spielversion ({self.family})" if self.family
+                              else "Nur Addons für meine Spielversion (unbekannt)")
+        chk.pack(side="left")
+        if not self.family:
+            chk.state(["disabled"])
+        ttk.Label(opts, text="Tipp: Auch ein CurseForge-Link oder eine Projekt-ID funktioniert.",
+                  foreground=t["text_dim"]).pack(side="right")
+
+        frame = tk.Frame(self.body, bg=t["border_soft"])
+        frame.pack(fill="both", expand=True)
+        self.tree = ttk.Treeview(frame, columns=[c[0] for c in self.COLS], show="headings",
+                                 selectmode="extended", height=14)
+        for cid, label, width in self.COLS:
+            self.tree.heading(cid, text=label.upper() if label else "", anchor="w")
+            self.tree.column(cid, width=width, anchor="e" if cid == "downloads" else "w",
+                             stretch=cid in ("name", "versions"))
+        self.tree.tag_configure("inst", foreground=t["text_faint"])
+        self.tree.tag_configure("other", foreground=t["text_dim"])
+        sb = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=sb.set)
+        self.tree.pack(side="left", fill="both", expand=True, padx=1, pady=1)
+        sb.pack(side="right", fill="y", padx=(0, 1), pady=1)
+        self.tree.bind("<<TreeviewSelect>>", lambda e: self.show_details())
+        self.tree.bind("<Double-1>", lambda e: self.open_page())
+
+        info = ttk.Frame(self.body)
+        info.pack(fill="x", pady=(8, 0))
+        self.count = tk.StringVar(value="")
+        self.more_btn = ttk.Button(info, text="Mehr laden", command=self.load_more)
+        self.more_btn.pack(side="right")
+        ttk.Label(info, textvariable=self.count, foreground=t["text_dim"]).pack(side="left")
+        self.detail = tk.StringVar(value="")
+        ttk.Label(self.body, textvariable=self.detail, wraplength=920, justify="left",
+                  padding=(0, 6, 0, 0)).pack(anchor="w", fill="x")
+        self.add_button("Schließen", self.cancel)
+        self.add_button("Auf CurseForge ansehen ↗", self.open_page)
+        self.add_button("Auswahl installieren", self.ok, primary=True)
+
+        self.q.trace_add("write", lambda *a: self._typed())
+        if self.mods:
+            self.show_rows()
+        else:
+            self.search()
+
+    # --- Suche --------------------------------------------------------------------- #
+    def _typed(self):
+        if self._debounce:
+            self.after_cancel(self._debounce)
+        text = self.q.get().strip()
+        if len(text) >= 3 or not text:
+            self._debounce = self.after(700, self.search)
+
+    def search(self, more: bool = False):
+        if self._debounce:
+            self.after_cancel(self._debounce)
+            self._debounce = None
+        self.req += 1
+        req, text, sort = self.req, self.q.get().strip(), self.sort.get()
+        index = len(self.mods) if more else 0
+        self.count.set("Suche bei CurseForge …")
+        self.more_btn.state(["disabled"])
+
+        def done(res, err):
+            if req != self.req or not self.winfo_exists():
+                return                                   # veraltete Antwort
+            if err:
+                self.count.set(f"Fehler: {err}")
+                return
+            mods, total = res
+            self.direct = "curseforge.com" in text.lower() or text.isdigit()
+            known = {m["id"] for m in self.mods} if more else set()
+            self.mods = (self.mods if more else []) + [m for m in mods if m.get("id") not in known]
+            self.total = total
+            self.state.update(q=text, sort=sort, mods=self.mods, total=total)
+            self.show_rows()
+
+        self.parent.run_quiet(lambda: cf_search(text, self.key, sort, index), done)
+
+    def load_more(self):
+        self.search(more=True)
+
+    # --- Anzeige ------------------------------------------------------------------- #
+    def fits(self, mod: dict) -> bool:
+        fams = cf_mod_families(mod)
+        return not self.family or not fams or self.family in fams
+
+    def show_rows(self):
+        self.state["fit"] = self.fit.get()
+        self.tree.delete(*self.tree.get_children())
+        shown = 0
+        for m in self.mods:
+            fits = self.fits(m)
+            if self.fit.get() and not fits and not self.direct:
+                continue
+            inst = m.get("id") in self.installed
+            authors = ", ".join(a.get("name", "") for a in m.get("authors") or [] if a.get("name"))
+            self.tree.insert("", "end", iid=str(m["id"]), tags=("inst",) if inst else () if fits else ("other",),
+                             values=(m.get("name", ""), authors, fmt_count(m.get("downloadCount")),
+                                     str(m.get("dateModified", ""))[:10], ", ".join(cf_mod_families(m)) or "–",
+                                     "✓ installiert" if inst else ""))
+            shown += 1
+        hidden = len(self.mods) - shown
+        text = f"{shown} angezeigt"
+        if hidden:
+            text += f" · {hidden} für andere Spielversionen ausgeblendet"
+        text += f" · {self.total:,} Treffer".replace(",", ".")
+        self.count.set(text)
+        if len(self.mods) < self.total and len(self.mods) + CF_PAGE_SIZE <= 10_000:
+            self.more_btn.state(["!disabled"])
+        else:
+            self.more_btn.state(["disabled"])
+        if not shown and self.mods and self.fit.get():
+            self.detail.set("Keine passenden Addons auf dieser Seite – „Mehr laden“ oder den Haken bei "
+                            "„Nur Addons für meine Spielversion“ entfernen.")
+        elif not self.mods:
+            self.detail.set("Nichts gefunden.")
+        else:
+            self.detail.set("")
+
+    def _selected(self) -> list[dict]:
+        ids = set(self.tree.selection())
+        return [m for m in self.mods if str(m.get("id")) in ids]
+
+    def show_details(self):
+        sel = self._selected()
+        if len(sel) != 1:
+            self.detail.set(f"{len(sel)} Addons ausgewählt." if sel else "")
+            return
+        m = sel[0]
+        cats = ", ".join(c.get("name", "") for c in m.get("categories") or [] if c.get("name"))
+        extra = []
+        if m.get("allowModDistribution") is False:
+            extra.append("Download über den Browser (der Autor erlaubt keine Programm-Downloads)")
+        if m.get("id") in self.installed:
+            extra.append("bereits installiert")
+        self.detail.set(f"{m.get('name', '')}: {m.get('summary', '').strip()}"
+                        + (f"\nKategorien: {cats}" if cats else "")
+                        + (f"\n{' · '.join(extra)}" if extra else ""))
+
+    def open_page(self):
+        sel = self._selected()
+        if sel:
+            m = sel[0]
+            self.parent.open_link((m.get("links") or {}).get("websiteUrl")
+                                  or f"https://www.curseforge.com/wow/addons/{m.get('slug', '')}")
+
+    def ok(self):
+        sel = [m for m in self._selected() if m.get("id") not in self.installed]
+        if not sel:
+            self.detail.set("Bitte ein oder mehrere (noch nicht installierte) Addons auswählen – "
+                            "mit Strg oder Umschalt auch mehrere.")
+            return
+        self.result = sel
+        self.destroy()
+
+
 class AssetDialog(Dialog):
     """Auswahl der Release-Datei, wenn ein Autor mehrere Varianten hochlädt."""
 
@@ -2123,6 +2367,7 @@ class App(BaseTk):
         self.quiet_jobs: queue.Queue = queue.Queue()
         self.watching_build = ""
         self._watch_manual = False
+        self._cf_search_state: dict = {}
         self.dl_watch: dict[str, dict] = {}     # CurseForge-Updates, deren ZIP im Download-Ordner erwartet wird
         self._dl_job = None
         self._dl_seen: dict[str, tuple] = {}     # Pfad -> (Größe, Änderungszeit) beim letzten Blick
@@ -2702,8 +2947,8 @@ class App(BaseTk):
                  self.install_zip_dialog),
                 ("Von GitHub installieren", "owner/repo oder Link eingeben – Updates kommen danach automatisch.",
                  self.install_github_dialog),
-                ("Von CurseForge installieren", "CurseForge-Link einfügen – Download und Updates laufen "
-                 "automatisch (braucht deinen eigenen API-Key in den Einstellungen).",
+                ("Von CurseForge installieren", "CurseForge nach WoW-Addons durchsuchen (oder Link einfügen) – "
+                 "Download und Updates laufen automatisch (braucht deinen eigenen API-Key).",
                  self.install_curseforge_dialog),
                 ("Addon-Paket importieren", "Eine .lzpack-Datei, die dir jemand mit dem Manager geschickt hat.",
                  self.import_pack_dialog),
@@ -3914,25 +4159,23 @@ class App(BaseTk):
         key = self.need_cf_key()
         if not key:
             return
-        text = simpledialog.askstring(APP_NAME, "CurseForge-Addon (Link oder Name, z. B. leatrix-plus):",
-                                      parent=self)
-        if not text:
+        mods = CurseForgeSearchDialog(self, key, self._cf_search_state).show()
+        if not mods:
             return
-        try:
-            ref = parse_cf_ref(text)
-        except ValueError as e:
-            messagebox.showerror(APP_NAME, str(e))
+        if len(mods) > 1:                    # mehrere: passende Datei jeweils automatisch wählen
+            self._run_list_import([{"t": "c", "i": m["id"], "n": m.get("name", ""), "s": m.get("slug", "")}
+                                   for m in mods], {}, what="von CurseForge")
             return
+        mod = mods[0]
         flavor, gv = self.flavor, (self.game[0] if self.game else "")
 
         def job():
-            mod = cf_get_mod(ref, key)
             files = cf_files(mod["id"], key)
             if not files:
-                raise CFError(f"{mod.get('name', ref)}: keine ZIP-Dateien bei CurseForge gefunden.")
+                raise CFError(f"{mod.get('name', '?')}: keine ZIP-Dateien bei CurseForge gefunden.")
             return cf_info(mod, files, flavor, gv)
 
-        self.run_bg("Suche auf CurseForge", job, self._pick_and_install_cf)
+        self.run_bg(f"Lade Dateiliste von {mod.get('name', 'CurseForge')}", job, self._pick_and_install_cf)
 
     def _pick_and_install_cf(self, info: dict):
         best = info["best"] or info["assets"][0]
@@ -4369,7 +4612,7 @@ class App(BaseTk):
             return
         self._run_list_import(todo, data["s"])
 
-    def _run_list_import(self, todo: list[dict], sets: dict):
+    def _run_list_import(self, todo: list[dict], sets: dict, what: str = "aus der Liste"):
         root, flavor = self.root_path, self.flavor
         gv = self.game[0] if self.game else ""
         token, key = self.cfg.get("github_token", ""), self.cf_key()
@@ -4428,7 +4671,7 @@ class App(BaseTk):
             self.refresh()
             self.reload_sets()
             self.refresh_sets_overview()
-            msg = f"{len(ok)} Addon(s) aus der Liste installiert."
+            msg = f"{len(ok)} Addon(s) {what} installiert."
             if sets:
                 msg += f"  {len(sets)} Set(s) übernommen."
             self.set_status(msg)
@@ -4438,7 +4681,7 @@ class App(BaseTk):
                 self.run_download_queue([cf_queue_item(i, a) for i, a, _ in manual],
                                         "Diese Addons dürfen nicht direkt geladen werden:")
 
-        self.run_bg("Lade Addons aus der Liste", job, done)
+        self.run_bg(f"Lade Addons {what}", job, done)
 
     def import_pack_dialog(self, path=None):
         if not self.ready():
