@@ -1,22 +1,23 @@
 # Leeroyzan
 
-A lightweight, personal addon manager for **World of Warcraft** – Forever, Classic and Retail – written in Python with a Tkinter GUI for Windows. Because updating addons should take one click, not a raid plan.
+A lightweight, **portable** addon manager for **World of Warcraft** – Forever, Classic and Retail – written in Python with a Tkinter GUI for Windows. No installation: unzip, start, done. Because updating addons should take one click, not a raid plan.
 
 > Hobby project – non-commercial, no ads, no telemetry. Not affiliated with Blizzard Entertainment or CurseForge.
 
 ## Download
 
-Get the latest version from the [Releases page](https://github.com/Artithefax/leeroyzan/releases/latest) – **no Python needed**, everything is bundled:
+Get **`Leeroyzan-Portable.zip`** from the [Releases page](https://github.com/Artithefax/leeroyzan/releases/latest), unzip it anywhere – a folder in *Documents*, a USB stick – and start `Leeroyzan.exe`. **No installation, no Python, no admin rights.**
 
-- **`Leeroyzan-Setup.exe`** – installs Leeroyzan for your user (no admin rights) to `%LOCALAPPDATA%\Programs\Leeroyzan`, with a Start-menu entry, an optional desktop shortcut and an uninstaller. The setup asks for your language (Deutsch or English).
-- **`Leeroyzan-Portable.zip`** – the portable version: unzip it anywhere (e.g. a USB stick) and start `Leeroyzan.exe`. No installation; settings, logs and backups stay in the `Leeroyzan-Data` folder next to the `.exe` instead of `%APPDATA%`.
-- **`Leeroyzan.exe`** – the bare program file (used by the auto-update); also runs on its own from any folder.
-
-All of them update themselves from then on. Windows SmartScreen may warn the first time because the file is not code-signed – click *More info → Run anyway*.
+- Everything Leeroyzan stores (settings, CurseForge key, sets, logs, backups) lives in the **`Leeroyzan-Data`** folder next to the `.exe`. Copy the whole folder and you have taken everything with you.
+- **Don't pass on your own `Leeroyzan-Data` folder** – it contains your CurseForge API key. To share Leeroyzan, share the release ZIP; to share addons, use a download list or a package.
+- Coming from version 1.1 or older? On first start, your settings (and backups up to 500 MB) are copied over from `%APPDATA%\Leeroyzan` – the old folder is left untouched.
+- The bare `Leeroyzan.exe` on the release page is used by the auto-update; started on its own it creates `Leeroyzan-Data` next to itself.
+- Leeroyzan updates itself from then on. Windows SmartScreen may warn the first time because the file is not code-signed – click *More info → Run anyway*.
+- If the folder of the `.exe` is not writable (e.g. *Program Files*), Leeroyzan falls back to `%APPDATA%\Leeroyzan` – better put it somewhere writable.
 
 ## Languages
 
-Leeroyzan speaks **Deutsch and English**. On first start it uses the language chosen in the setup, otherwise your Windows display language (German for a German Windows, English for everything else). Switch any time under **Settings → General → Language** – the window changes immediately, no restart needed.
+Leeroyzan speaks **Deutsch and English**. On first start it uses your Windows display language (German for a German Windows, English for everything else). Switch any time under **Settings → General → Language** – the window changes immediately, no restart needed.
 
 ## The interface
 
@@ -24,12 +25,12 @@ One window, no pop-ups. A sidebar with the game version, the pages and a big **P
 
 | Page | What you do there |
 |---|---|
-| **My addons** | All installed addons as a list or as tiles, with search, grouping and a detail panel (update, open source, link with CurseForge, open folder, remove). Addons with an update are yellow with a ⬇ marker. |
+| **My addons** | All installed addons as a list or as tiles, with search, grouping and a detail panel (update, undo an update, hold, open source, link with CurseForge, open folder, remove). Addons with an update are yellow with a ⬇ marker. |
 | **Discover** | Install directly from a CurseForge link, a GitHub repository or a ZIP from your download folder – and search CurseForge (WoW addons only) with file choice. |
 | **Updates** | Check and update all or single addons, read the changes, see which blocked downloads Leeroyzan is waiting for, link manual addons, and keep Leeroyzan itself up to date. |
 | **Share** | Create a download-list code for Discord/SMS or a `.lzpack` package – and paste a code you received to install it. |
 | **Sets & backups** | Addon sets (switch groups of addons on/off) and WTF backups with restore. |
-| **Settings** | WoW folder, CurseForge API key, download folder, language, update options, log. |
+| **Settings** | WoW folder, CurseForge API key, download folder, language, update options, log and data folder. |
 
 ## Features
 
@@ -38,6 +39,9 @@ One window, no pop-ups. A sidebar with the game version, the pages and a big **P
 - Checks each addon's interface version against the installed game build (`.build.info`)
 - Installs addons from ZIP files or GitHub releases, with a file picker when a release ships several variants (e.g. a `-forever` build)
 - Update checks (optionally on start) with release notes, update all or single addons
+- **Undo an update:** before an addon is updated, its current version is kept. If the new one breaks something, *↶ Back to …* in the detail panel (or right-click) restores it with one click – the addon is then held so it is not updated again right away
+- **Hold addons:** a held addon gets no updates (e.g. when a new version does not work on Forever) until you allow them again; it stays visible as *held* with the newer version shown
+- **Required addons are installed automatically:** when a CurseForge addon needs other addons (required dependencies according to CurseForge), Leeroyzan installs the missing ones as well – also their own requirements; optional ones are left out
 - Addon sets: save groups of addons and switch between them with one click
 - Enable/disable addons, warn when WoW is running
 - WTF backups (manual and automatic before updates) with restore
@@ -45,6 +49,7 @@ One window, no pop-ups. A sidebar with the game version, the pages and a big **P
 - Share **download lists** (`.lzlist` file or a plain-text code that fits into Discord/SMS messages)
 - Drag & drop for ZIP, `.lzpack` and `.lzlist` files (optional, via `tkinterdnd2`)
 - Log file of all changes
+- Remembers window size and position; keyboard shortcuts: **Ctrl+F** search, **F5** rescan (on *Updates*: check for updates), **Del** remove the selected addons (with confirmation)
 - Self-update from GitHub releases
 
 ## CurseForge integration
@@ -55,7 +60,7 @@ Addons can be found and installed from CurseForge right inside the manager (**Di
 - **Shared packages contain references only.** For CurseForge projects, a `.lzpack` package stores the project and file ID, never the files themselves. The recipient's client downloads the file from CurseForge or opens the project page.
 - **`allowModDistribution` is respected.** If an author disables third-party distribution, the tool only links to the CurseForge project page.
 - **Attribution.** The project name, author and a link back to the CurseForge project page (where the author's donation options live) are shown in the details and after each install.
-- **Own API key per user.** Get a free key at <https://console.curseforge.com/> and paste it into the settings. It is stored only in the user's local config (`%APPDATA%\Leeroyzan\config.json`), never embedded in the source code or the built executable, and only ever sent to `api.curseforge.com`.
+- **Own API key per user.** Get a free key at <https://console.curseforge.com/> and paste it into the settings. It is stored only in the user's local config (`Leeroyzan-Data\config.json`), never embedded in the source code or the built executable, and only ever sent to `api.curseforge.com`.
 - **Verified downloads.** Files are only fetched from CurseForge's CDN over HTTPS and checked against the SHA-1 hash published by the API.
 - **Blocked downloads stay blocked.** If an author disables third-party downloads, the manager does not work around it: it opens the normal CurseForge download page in your browser, you click download, and the manager installs the file from your download folder once it appears.
 - Addons with an available update are highlighted in **yellow with a ⬇ marker** in every view.
@@ -82,17 +87,19 @@ A download list is the lightweight way to share many addons: it contains **only 
 python leeroyzan.py
 ```
 
+From source, data goes to `%APPDATA%\Leeroyzan` – unless a `Leeroyzan-Data` folder exists next to `leeroyzan.py` (it is git-ignored).
+
 ## Building the executable
 
-Every GitHub release builds `Leeroyzan.exe`, `Leeroyzan-Portable.zip` and `Leeroyzan-Setup.exe` automatically (see below), so you normally never build by hand.
+Every GitHub release builds `Leeroyzan.exe` and `Leeroyzan-Portable.zip` automatically (see below), so you normally never build by hand.
 
-To build and install from the source, double-click **`setup.bat`**. It asks for your language, then:
+To build the portable version from the source, double-click **`setup.bat`**. It asks for the language of its messages, then:
 
 1. builds `dist\Leeroyzan.exe` in an isolated environment (PyInstaller, `tkinterdnd2` for drag & drop),
-2. creates `dist\Leeroyzan-Portable.zip`,
-3. installs Leeroyzan to `%LOCALAPPDATA%\Programs\Leeroyzan` with Start-menu and desktop shortcuts (no admin rights; same place as the setup).
+2. updates the ready-to-use folder `dist\Leeroyzan-Portable\` (the `.exe` plus `Leeroyzan-Data`; data you already have in there is kept),
+3. creates `dist\Leeroyzan-Portable.zip` for sharing – always from a clean folder, so your own settings and API key never end up in it.
 
-**Python does not have to be installed:** if none is found, the script downloads the standalone tool [uv](https://github.com/astral-sh/uv) into `.build_tools`, which fetches a portable Python into its cache – nothing is installed system-wide. With Python 3.10+ present, that one is used. The `Leeroyzan-Setup.exe` installer is built from `installer.iss` with [Inno Setup](https://jrsoftware.org/isinfo.php).
+Nothing is installed. **Python does not have to be installed either:** if none is found, the script downloads the standalone tool [uv](https://github.com/astral-sh/uv) into `.build_tools`, which fetches a portable Python into its cache – nothing is installed system-wide. With Python 3.10+ present, that one is used.
 
 ## Releases and auto-update
 
@@ -100,13 +107,13 @@ The manager checks this repository's latest GitHub release on start. With *Leero
 
 Publishing a new version:
 
-1. Set `APP_VERSION` in `leeroyzan.py` (e.g. `1.0.3`) and commit.
-2. Create a release with the tag `v1.0.3` (Releases → Draft a new release → Publish).
-3. The *Build release exe* workflow builds the `.exe` on a Windows runner and attaches it plus its SHA-256 checksum, `Leeroyzan-Portable.zip` and `Leeroyzan-Setup.exe` to the release (takes a few minutes).
+1. Set `APP_VERSION` in `leeroyzan.py` (e.g. `1.2.0`) and commit.
+2. Create a release with the tag `v1.2.0` (Releases → Draft a new release → Publish).
+3. The *Build release exe* workflow builds the `.exe` on a Windows runner and attaches it plus its SHA-256 checksum and `Leeroyzan-Portable.zip` to the release (takes a few minutes).
 
 ## Where data is stored
 
-Configuration, backups and the log file are stored in `%APPDATA%\Leeroyzan` – or, in the portable version, in the `Leeroyzan-Data` folder next to `Leeroyzan.exe` (Leeroyzan switches to portable mode whenever that folder exists). The manager only reads and writes files inside the WoW `Interface\AddOns`, `Interface\AddOns_Disabled` and `WTF` folders – it never modifies the game client.
+Configuration, backups, kept previous addon versions (for *undo*) and the log file are stored in the `Leeroyzan-Data` folder next to `Leeroyzan.exe` (*Settings → Help → Open data folder*). The manager only reads and writes files inside the WoW `Interface\AddOns`, `Interface\AddOns_Disabled` and `WTF` folders – it never modifies the game client.
 
 ## License
 

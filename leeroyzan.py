@@ -59,7 +59,7 @@ except Exception:                      # noqa – Paket fehlt oder Tk-Erweiterun
     HAS_DND = False
 
 APP_NAME = "Leeroyzan"
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.2.0"
 USER_AGENT = f"Leeroyzan/{APP_VERSION}"
 
 # Selbst-Update über GitHub-Releases dieses Repos
@@ -99,24 +99,9 @@ def set_language(code: str) -> None:
     LANG = code if code in LANGUAGES else "en"
 
 
-def setup_language() -> str:
-    """Die im Setup (Leeroyzan-Setup.exe oder setup.bat) gewählte Sprache – steht in setup.ini."""
-    try:
-        ini = config_dir() / "setup.ini"
-        if ini.exists():
-            m = re.search(r"^\s*Language\s*=\s*(\w+)", ini.read_text(encoding="utf-8-sig", errors="replace"), re.M)
-            if m and m.group(1).lower() in LANGUAGES:
-                return m.group(1).lower()
-    except OSError:
-        pass
-    return ""
-
-
 def detect_language() -> str:
-    """Sprache beim ersten Start: Auswahl im Setup, sonst die Windows-Anzeigesprache, sonst Englisch."""
-    code = setup_language()
-    if code:
-        return code
+    """Sprache beim ersten Start: die Windows-Anzeigesprache (Deutsch oder Englisch), sonst Englisch."""
+    code = ""
     if os.name == "nt":
         try:
             import ctypes
@@ -136,23 +121,54 @@ def detect_language() -> str:
 # --------------------------------------------------------------------------- #
 
 PORTABLE_DIR_NAME = "Leeroyzan-Data"
+LEGACY_COPY_LIMIT = 500 * 1024 * 1024     # alte Backups nur bis zu dieser Größe mitnehmen
+
+
+def app_dir() -> Path:
+    """Ordner, in dem Leeroyzan.exe (bzw. leeroyzan.py) liegt."""
+    return (Path(sys.executable) if getattr(sys, "frozen", False) else Path(__file__)).resolve().parent
+
+
+def legacy_dir() -> Path:
+    """Datenordner früherer Versionen (bis 1.1): %APPDATA%\\Leeroyzan."""
+    return Path(os.environ.get("APPDATA") or str(Path.home() / ".config")) / "Leeroyzan"
+
+
+def _adopt_legacy_data(dest: Path) -> None:
+    """Erster Start der portablen Version: Einstellungen (und, wenn nicht zu groß, Backups) aus
+    %APPDATA% übernehmen. Es wird nur kopiert – der alte Ordner bleibt unverändert."""
+    old = legacy_dir()
+    try:
+        if not (old / "config.json").is_file() or (dest / "config.json").exists():
+            return
+        shutil.copy2(old / "config.json", dest / "config.json")
+        backups = old / "backups"
+        if backups.is_dir():
+            size = sum(f.stat().st_size for f in backups.rglob("*") if f.is_file())
+            if size <= LEGACY_COPY_LIMIT:
+                shutil.copytree(backups, dest / "backups", dirs_exist_ok=True)
+    except OSError:
+        pass
 
 
 def portable_dir() -> Path | None:
-    """Portable Version: Liegt neben der .exe ein Ordner „Leeroyzan-Data“, bleiben alle Daten
-    (Einstellungen, Logs, Backups) dort – nichts landet in %APPDATA%."""
+    """Leeroyzan ist portabel: Alle Daten (Einstellungen, Logs, Backups) liegen im Ordner
+    „Leeroyzan-Data“ neben der .exe. Als Python-Skript nur, wenn dieser Ordner schon existiert."""
     try:
-        here = (Path(sys.executable) if getattr(sys, "frozen", False) else Path(__file__)).resolve().parent
-        d = here / PORTABLE_DIR_NAME
-        return d if d.is_dir() else None
+        d = app_dir() / PORTABLE_DIR_NAME
+        if d.is_dir():
+            return d
+        if getattr(sys, "frozen", False):
+            d.mkdir()
+            _adopt_legacy_data(d)
+            return d
     except OSError:
-        return None
+        pass        # Ordner der .exe nicht beschreibbar (z. B. „Programme“) – dann %APPDATA%
+    return None
 
 
 def config_dir() -> Path:
-    d = portable_dir()
-    if d is None:
-        d = Path(os.environ.get("APPDATA") or str(Path.home() / ".config")) / "Leeroyzan"
+    d = portable_dir() or legacy_dir()
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -198,6 +214,8 @@ def load_config() -> dict:
     cfg.setdefault("skip_manager_version", "")
     cfg.setdefault("bundles", {})        # flavor -> [[ordner, ...], ...] gemeinsam installiert
     cfg.setdefault("group_addons", True)
+    cfg.setdefault("held", {})           # flavor -> [Quellen-IDs], die keine Updates bekommen
+    cfg.setdefault("window", "")         # letzte Fenstergröße/-position
     cfg.setdefault("layout", "klassisch")   # klassisch | seitenleiste | launcher
     return cfg
 
@@ -561,6 +579,76 @@ PACK_EXT = ".lzpack"
 PACK_FORMAT = 1
 PACK_MAX_BYTES = 1024 ** 3          # Schutz gegen übergroße/manipulierte Pakete (1 GB entpackt)
 SAFE_NAME_RE = re.compile(r"^[\w .+\-!()&'\[\]]+$")
+
+
+# --------------------------------------------------------------------------- #
+# Rückgängig nach Update: die vorherige Version eines Addons wird aufbewahrt
+# --------------------------------------------------------------------------- #
+
+def rollback_dir(flavor: str, sid: str) -> Path:
+    return config_dir() / "rollback" / (flavor.strip("_") or "wow") / re.sub(r"[^\w.-]", "_", sid)
+
+
+def save_rollback(root: str, flavor: str, sid: str, src: dict) -> bool:
+    """Kopiert die installierten Ordner einer Quelle vor einem Update weg (je Addon nur die letzte Version)."""
+    found = []
+    for name in src.get("folders", []):
+        if not valid_addon_name(name):
+            continue
+        for base, on in ((addons_dir(root, flavor), True), (disabled_dir(root, flavor), False)):
+            if (base / name).is_dir():
+                found.append((base / name, on))
+                break
+    if not found:
+        return False
+    dest = rollback_dir(flavor, sid)
+    tmp = dest.with_name(dest.name + ".tmp")
+    shutil.rmtree(tmp, ignore_errors=True)
+    (tmp / "AddOns").mkdir(parents=True)
+    for path, _ in found:
+        shutil.copytree(path, tmp / "AddOns" / path.name)
+    meta = {"sid": sid, "source": src, "saved": datetime.now().isoformat(timespec="seconds"),
+            "enabled": {path.name: on for path, on in found}}
+    (tmp / "rollback.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
+    shutil.rmtree(dest, ignore_errors=True)
+    tmp.rename(dest)
+    return True
+
+
+def read_rollback(flavor: str, sid: str) -> dict | None:
+    try:
+        meta = json.loads((rollback_dir(flavor, sid) / "rollback.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return meta if isinstance(meta, dict) and isinstance(meta.get("source"), dict) else None
+
+
+def restore_rollback(root: str, flavor: str, sid: str, current: list[str]) -> dict:
+    """Ersetzt die installierte Version durch die gesicherte und gibt deren Daten zurück."""
+    d = rollback_dir(flavor, sid)
+    meta = read_rollback(flavor, sid)
+    saved = [p for p in (d / "AddOns").iterdir() if p.is_dir() and valid_addon_name(p.name)] \
+        if meta and (d / "AddOns").is_dir() else []
+    if not saved:
+        raise FileNotFoundError(tr("Für dieses Addon ist keine vorherige Version gespeichert."))
+    for name in {*current, *(p.name for p in saved)}:
+        if not valid_addon_name(name):
+            continue
+        for base in (addons_dir(root, flavor), disabled_dir(root, flavor)):
+            if (base / name).is_dir():
+                shutil.rmtree(base / name)
+    enabled = meta.get("enabled") or {}
+    for p in saved:
+        base = addons_dir(root, flavor) if enabled.get(p.name, True) else disabled_dir(root, flavor)
+        base.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(p, base / p.name)
+    shutil.rmtree(d, ignore_errors=True)
+    return meta
+
+
+def plain_key(name: str) -> str:
+    """Vergleichsschlüssel für Addon-Namen: LibDBIcon-1.0 -> libdbicon10."""
+    return re.sub(r"[^a-z0-9]", "", clean_wow_text(name).lower())
 
 
 def valid_addon_name(name: str) -> bool:
@@ -993,10 +1081,12 @@ def cf_asset(f: dict) -> dict:
     if rtype != 1:
         parts.append(CF_RELEASE_NAMES.get(rtype, "?"))
     parts.append(str(f.get("fileDate", ""))[:10])
+    deps = sorted({d.get("modId") for d in f.get("dependencies") or []           # relationType 3 = benötigt
+                   if isinstance(d, dict) and d.get("relationType") == 3 and isinstance(d.get("modId"), int)})
     return {"name": name, "label": "  ·  ".join(p for p in parts if p), "file_name": f.get("fileName", ""),
             "url": f.get("downloadUrl"), "size": f.get("fileLength", 0), "file_id": f.get("id"),
             "mod_id": f.get("modId"), "game_versions": versions, "release_type": rtype,
-            "date": str(f.get("fileDate", "")), "sha1": sha1}
+            "date": str(f.get("fileDate", "")), "sha1": sha1, "deps": deps}
 
 
 def cf_rank(a: dict, flavor: str, game_ver: str) -> int:
@@ -1530,30 +1620,12 @@ start "" "{old_exe}"
                      creationflags=0x08000000 | 0x00000008)   # ohne Fenster, losgelöst
 
 
-INSTALLER_APP_ID = "{8F3C6A52-6B1E-4C59-9C3E-6E2B1C4D9A77}"     # muss zu installer.iss passen
-
-
 def cleanup_self_update() -> None:
     """Räumt ein liegengebliebenes .new.exe nach einem abgebrochenen Update weg."""
     if is_frozen():
         new_exe_path().unlink(missing_ok=True)
-        sync_installed_version()
     else:
         Path(__file__).resolve().with_suffix(".new.py").unlink(missing_ok=True)
-
-
-def sync_installed_version() -> None:
-    """Mit dem Setup installiert: Versionsnummer unter „Apps & Features“ nach einem Selbst-Update nachziehen."""
-    if os.name != "nt" or portable_dir() is not None:
-        return
-    try:
-        import winreg
-        path = rf"Software\Microsoft\Windows\CurrentVersion\Uninstall\{INSTALLER_APP_ID}_is1"
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, path, 0, winreg.KEY_READ | winreg.KEY_SET_VALUE) as k:
-            if winreg.QueryValueEx(k, "DisplayVersion")[0] != APP_VERSION:
-                winreg.SetValueEx(k, "DisplayVersion", 0, winreg.REG_SZ, APP_VERSION)
-    except OSError:
-        pass                     # portable .exe oder kein Setup – nichts zu tun
 
 
 # --------------------------------------------------------------------------- #
@@ -1900,6 +1972,7 @@ class App(BaseTk):
         self.minsize(1080, 600)
 
         self.cfg = load_config()
+        self._restore_geometry()
         self.addons: list[Addon] = []
         self.updates: dict[str, str] = {}       # repo -> neuester Tag
         self.update_info: dict[str, dict] = {}  # repo -> Release-Infos
@@ -1918,12 +1991,7 @@ class App(BaseTk):
 
         if not self.cfg["wow_root"]:
             self.cfg["wow_root"] = find_wow_root()
-        chosen = setup_language()
-        if chosen and chosen != self.cfg.get("setup_language"):
-            # Neu im Setup gewählt: einmal übernehmen, danach gilt wieder die Wahl in den Einstellungen.
-            self.cfg["language"] = self.cfg["setup_language"] = chosen
-            save_config(self.cfg)
-        elif self.cfg.get("language") not in LANGUAGES:
+        if self.cfg.get("language") not in LANGUAGES:
             self.cfg["language"] = detect_language()
             save_config(self.cfg)
         set_language(self.cfg["language"])
@@ -1943,8 +2011,74 @@ class App(BaseTk):
         self.after(900, self._report_self_update)
         if self.cfg.get("self_update_mode") != "off":
             self.after(1500, lambda: self.check_manager_update(silent=True))
-        log.info("Gestartet: %s %s, Ordner=%s, Version=%s", APP_NAME, APP_VERSION,
-                 self.root_path, self.flavor)
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
+        for seq, fn in (("<Control-f>", self._key_search), ("<Control-F>", self._key_search),
+                        ("<F5>", self._key_refresh), ("<Delete>", self._key_delete)):
+            self.bind(seq, fn)
+        log.info("Gestartet: %s %s, Ordner=%s, Version=%s, Daten=%s", APP_NAME, APP_VERSION,
+                 self.root_path, self.flavor, config_dir())
+
+    # ----- Fenster und Tastatur ---------------------------------------------- #
+    def _restore_geometry(self):
+        """Letzte Fenstergröße und -position – nur, wenn das Fenster damit sichtbar bleibt."""
+        m = re.fullmatch(r"(\d+)x(\d+)\+(-?\d+)\+(-?\d+)", str(self.cfg.get("window") or ""))
+        if m:
+            w, h, x, y = (int(v) for v in m.groups())
+            sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+            w, h = max(1080, min(w, sw)), max(600, min(h, sh))
+            if not (-50 <= x <= sw - 200 and 0 <= y <= sh - 120):
+                x, y = max(0, (sw - w) // 2), max(0, (sh - h) // 3)
+            self.geometry(f"{w}x{h}+{x}+{y}")
+        if self.cfg.get("window_zoomed"):
+            try:
+                self.state("zoomed")
+            except tk.TclError:
+                pass
+
+    def on_close(self):
+        try:
+            zoomed = self.state() == "zoomed"
+            self.cfg["window_zoomed"] = zoomed
+            if not zoomed:
+                self.cfg["window"] = self.geometry()
+            save_config(self.cfg)
+        except tk.TclError:
+            pass
+        self.destroy()
+
+    def _typing(self) -> bool:
+        try:
+            w = self.focus_get()
+        except (KeyError, tk.TclError):
+            return False
+        return isinstance(w, (tk.Entry, ttk.Entry, tk.Text))
+
+    def _key_search(self, event=None):
+        """Strg+F: Suchfeld der aktuellen Seite (auf „Entdecken“ die CurseForge-Suche)."""
+        if self.current_page != "discover":
+            self.show_page("addons")
+        entry = getattr(self, "cf_entry" if self.current_page == "discover" else "filter_entry", None)
+        if entry is not None and entry.winfo_exists():
+            entry.focus_set()
+            entry.select_range(0, "end")
+        return "break"
+
+    def _key_refresh(self, event=None):
+        """F5: auf „Updates“ nach Updates suchen, sonst die Addon-Liste neu einlesen."""
+        if self.asking or self.busy:
+            return "break"
+        if self.current_page == "updates":
+            self.check_updates()
+        else:
+            self.refresh()
+        return "break"
+
+    def _key_delete(self, event=None):
+        """Entf: gewählte Addons entfernen (mit Rückfrage) – nicht beim Tippen in einem Feld."""
+        if self.current_page == "addons" and not self._typing() and not self.asking:
+            self.remove_selected()
+            return "break"
+        return None
 
     # ----- Aufbau ---------------------------------------------------------- #
     PAGES = [("addons", "Meine Addons"), ("discover", "Entdecken"), ("updates", "Updates"),
@@ -2041,8 +2175,7 @@ class App(BaseTk):
         self._w_play(bottom, style="BigPlay.TButton", text=tr("▶   SPIELEN")).pack(fill="x")
         ttk.Label(bottom, textvariable=self.game_info_var, style="Side.TLabel", anchor="center",
                   justify="center", wraplength=200).pack(fill="x", pady=(8, 0))
-        ttk.Label(bottom, text=tr("Leeroyzan v{0}", APP_VERSION) + (" · portable" if portable_dir() else ""),
-                  style="Side.TLabel",
+        ttk.Label(bottom, text=tr("Leeroyzan v{0}", APP_VERSION), style="Side.TLabel",
                   anchor="center").pack(fill="x")
 
         main = ttk.Frame(root)
@@ -2465,7 +2598,8 @@ class App(BaseTk):
             self.view_btns[key] = b
         ttk.Checkbutton(right, text=tr("Gruppieren"), variable=self.group_var, style="Plain.TCheckbutton",
                         command=self._toggle_grouping).pack(side="right", padx=(0, 16))
-        self._w_filter(right, width=22).pack(side="right", padx=(0, 16), ipady=3)
+        self.filter_entry = self._w_filter(right, width=22)
+        self.filter_entry.pack(side="right", padx=(0, 16), ipady=3)
         ttk.Label(right, text=tr("Suche")).pack(side="right", padx=(0, 8))
 
         ttk.Label(page, textvariable=self.count_var, style="Body.TLabel").pack(anchor="w", pady=(6, 0))
@@ -2529,15 +2663,20 @@ class App(BaseTk):
             self.detail[key] = v
         btns = ttk.Frame(parent, style="Detail.TFrame")
         btns.pack(fill="x", side="bottom")
+        btns.columnconfigure((0, 1), weight=1, uniform="detail")
         d = self.detail
         d["upd_btn"] = ttk.Button(btns, text=tr("{0}  Jetzt aktualisieren", UPD_MARK), style="Primary.TButton",
                                   command=self.update_selected)
         d["dl_btn"] = ttk.Button(btns, text=tr("Bei CurseForge herunterladen ↗"), command=self.open_cf_update)
+        d["rb_btn"] = ttk.Button(btns, text="", command=self.rollback_selected)
         d["link_btn"] = ttk.Button(btns, text=tr("Mit CurseForge verknüpfen"), command=self.link_curseforge_dialog)
-        d["page_btn"] = ttk.Button(btns, text=tr("Quelle öffnen ↗"), command=self._detail_release)
-        d["folder_btn"] = ttk.Button(btns, text=tr("Ordner öffnen"), command=self.open_folder)
+        d["page_btn"] = ttk.Button(btns, text=tr("Quelle ↗"), command=self._detail_release)
+        d["folder_btn"] = ttk.Button(btns, text=tr("Ordner"), command=self.open_folder)
+        d["hold_btn"] = ttk.Button(btns, text=tr("Festhalten"), command=self.toggle_hold)
         d["rm_btn"] = ttk.Button(btns, text=tr("Entfernen"), command=self.remove_selected, style="Danger.TButton")
         self.update_detail()
+
+    DETAIL_BTNS = ("upd_btn", "dl_btn", "rb_btn", "link_btn", "page_btn", "folder_btn", "hold_btn", "rm_btn")
 
     def update_detail(self):
         if not self.detail:
@@ -2547,8 +2686,8 @@ class App(BaseTk):
             sel = self.selected_addons()
         except tk.TclError:
             return
-        for k in ("upd_btn", "dl_btn", "link_btn", "page_btn", "folder_btn", "rm_btn"):
-            d[k].pack_forget()
+        for k in self.DETAIL_BTNS:
+            d[k].grid_forget()
         if not sel:
             d["kicker"].configure(text=spaced(tr("Details")))
             d["title"].configure(text=tr("Kein Addon gewählt"))
@@ -2565,10 +2704,14 @@ class App(BaseTk):
         d["title"].configure(text=main.title if len(sel) == 1 else tr("{0}  ({1} Ordner)", main.title, len(sel)))
         d["note"].configure(text=clean_wow_text(main.meta.get("notes", "")) or tr("Keine Beschreibung in der .toc."))
         d["version"].configure(text=main.version or "–")
-        pending = bool(src and self.updates.get(sid) and self.updates[sid] != src.get("tag"))
+        pending = self.has_update(sid)
         if src:
             if pending:
                 d["release"].configure(text=tr("{0} Update: {1}", UPD_MARK, self.updates[sid]), foreground=THEME["update"])
+            elif self.is_held(sid):
+                newer = self.held_update(sid)
+                d["release"].configure(text=src.get("tag", "–") + tr(" · festgehalten")
+                                       + (tr(" (neu: {0})", newer) if newer else ""), foreground=THEME["text_dim"])
             else:
                 d["release"].configure(text=src.get("tag", "–") + (tr("  · aktuell") if sid in self.updates else ""),
                                        foreground=THEME["text"])
@@ -2582,18 +2725,29 @@ class App(BaseTk):
         d["folders"].configure(text=", ".join(sorted(names)), foreground=THEME["text"])
         deps = sorted({x for a in sel for x in a.deps if x not in names})
         d["deps"].configure(text=", ".join(deps) or "–", foreground=THEME["text"])
-        order = []
+        full, half = [], []
         if pending:
-            order.append("upd_btn")
+            full.append("upd_btn")
             if self.cf_update_link(sel)[1]:
-                order.append("dl_btn")
+                full.append("dl_btn")
+        rb = self.rollback_info(sid)
+        if rb:
+            d["rb_btn"].configure(text=tr("↶ Zurück auf {0}", rb["source"].get("tag") or "?"))
+            full.append("rb_btn")
         if not src:
-            order.append("link_btn")
+            full.append("link_btn")
         else:
-            order.append("page_btn")
-        order += ["folder_btn", "rm_btn"]
-        for k in order:
-            d[k].pack(fill="x", pady=(0, 6))
+            half.append("page_btn")
+        half.append("folder_btn")
+        if src:
+            d["hold_btn"].configure(text=tr("Freigeben") if self.is_held(sid) else tr("Festhalten"))
+            half.append("hold_btn")
+        half.append("rm_btn")
+        for row, k in enumerate(full):
+            d[k].grid(row=row, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+        for i, k in enumerate(half):
+            d[k].grid(row=len(full) + i // 2, column=i % 2, sticky="ew", pady=(0, 6),
+                      padx=(0, 3) if i % 2 == 0 else (3, 0))
 
     def _detail_release(self):
         sel = self.selected_addons()
@@ -2637,7 +2791,7 @@ class App(BaseTk):
         box = self._card_box(page, pady=(12, 0), fill="both", expand=True, title=tr("CurseForge durchsuchen · nur WoW"))
         top = ttk.Frame(box, style="Panel.TFrame")
         top.pack(fill="x")
-        e = ttk.Entry(top, textvariable=self.cf_q)
+        e = self.cf_entry = ttk.Entry(top, textvariable=self.cf_q)
         e.pack(side="left", fill="x", expand=True, ipady=2)
         Placeholder(e, self.cf_q, tr("Addon-Name, z. B. Details, Questie, Bagnon …"))
         e.bind("<Return>", lambda ev: self.cf_search())
@@ -2926,13 +3080,14 @@ class App(BaseTk):
         ttk.Button(gbox, text=tr("Nach Leeroyzan-Update suchen"), command=self.check_manager_update).pack(
             anchor="w", pady=(10, 0))
         if portable_dir():
-            ttk.Label(gbox, text=tr("Portable Version – Einstellungen, Logs und Backups liegen im Ordner {0} neben "
-                                    "der .exe.", PORTABLE_DIR_NAME),
-                      style="Panel.TLabel",
-                      wraplength=360, justify="left").pack(anchor="w", pady=(10, 0))
+            where = tr("Portabel – Einstellungen, Logs und Backups liegen im Ordner {0} neben der .exe.",
+                       PORTABLE_DIR_NAME)
+        else:
+            where = tr("Einstellungen, Logs und Backups liegen in {0}.", config_dir())
+        ttk.Label(gbox, text=where, style="Panel.TLabel", wraplength=360, justify="left").pack(anchor="w", pady=(10, 0))
         hbox = self._card_box(rf, pady=(12, 0), title=tr("Hilfe"))
-        for text, cmd in ((tr("Log öffnen"), self.open_log), (tr("Addon-Ordner öffnen"), lambda: self.open_folder([])),
-                          (tr("Neu einlesen"), self.refresh)):
+        for text, cmd in ((tr("Log öffnen"), self.open_log), (tr("Datenordner öffnen"), lambda: open_in_explorer(config_dir())),
+                          (tr("Addon-Ordner öffnen"), lambda: self.open_folder([])), (tr("Neu einlesen"), self.refresh)):
             ttk.Button(hbox, text=text, command=cmd).pack(anchor="w", pady=(0, 6), fill="x")
         links = ttk.Frame(hbox, style="Panel.TFrame")
         links.pack(fill="x", pady=(6, 0))
@@ -3343,8 +3498,7 @@ class App(BaseTk):
             sid, src = self.folder_source(a.name)
             if not src or src.get("type") != "curseforge":
                 continue
-            new, info = self.updates.get(sid), self.update_info.get(sid) or {}
-            if new and new != src.get("tag") and info.get("best"):
+            if self.has_update(sid) and (self.update_info.get(sid) or {}).get("best"):
                 return sid
         return ""
 
@@ -3436,6 +3590,15 @@ class App(BaseTk):
         w = self.dl_watch.pop(sid)
         info, asset = w["info"], w["asset"]
         root, flavor = self.root_path, self.flavor
+        before = dict(self.sources()[sid]) if sid in self.sources() else None
+
+        def job():
+            if before:
+                try:
+                    save_rollback(root, flavor, sid, before)
+                except Exception as e:  # noqa
+                    log.warning("Vorversion von %s nicht gesichert: %s", sid, e)
+            return install_zip(path, root, flavor)
 
         def done(folders):
             self.remember_cf_source(info, asset, folders)
@@ -3448,8 +3611,10 @@ class App(BaseTk):
             if running_wow(root, flavor):
                 msg += tr("  WoW läuft – wirkt nach /reload.")
             self.set_status(msg)
-            self.notify(msg, "ok", timeout=10000)
+            self.notify(msg, "ok", [(tr("↶ Rückgängig"), lambda: self.rollback(sid))] if self.rollback_info(sid) else [],
+                        timeout=12000)
             self.refresh_browser_list()
+            self.install_dependencies([asset])
 
         def failed(err):
             self._dl_checked[str(path)] = self._dl_seen.get(str(path))
@@ -3459,7 +3624,7 @@ class App(BaseTk):
             log.error("Download %s konnte nicht installiert werden: %s", path, err)
             self.set_status(tr("{0} konnte nicht installiert werden: {1}", path.name, err))
 
-        self.run_bg(tr("Installiere {0}", path.name), lambda: install_zip(path, root, flavor), done, failed)
+        self.run_bg(tr("Installiere {0}", path.name), job, done, failed)
 
     def _hint_update_link(self):
         try:
@@ -3492,6 +3657,11 @@ class App(BaseTk):
         if src:
             label = tr("CurseForge-Seite öffnen ↗") if src.get("type") == "curseforge" else tr("Release-Seite öffnen ↗")
             items.append((label, lambda: self.open_link(self.source_page(sid, src))))
+            rb = self.rollback_info(sid)
+            if rb:
+                items.append((tr("↶ Zurück auf {0}", rb["source"].get("tag") or "?"), lambda: self.rollback(sid)))
+            items.append((tr("Updates wieder erlauben") if self.is_held(sid) else tr("Festhalten (keine Updates)"),
+                          lambda: self.toggle_hold(sid=sid)))
         if items:
             items.append(None)
         items += [(tr("Details"), lambda: self.show_details(main)),
@@ -3625,7 +3795,7 @@ class App(BaseTk):
         elif not a.enabled:
             status = tr("deaktiviert")
         elif missing:
-            status = "fehlt: " + ", ".join(missing)
+            status = tr("fehlt: {0}", ", ".join(missing))
         elif outdated:
             status = tr("veraltet")
         else:
@@ -3633,10 +3803,10 @@ class App(BaseTk):
         sid, src = self.folder_source(a.name)
         source = self.source_label(sid, src) if src else tr("manuell")
         upd = ""
-        has_update = bool(src and self.updates.get(sid) and self.updates[sid] != src.get("tag"))
+        has_update = self.has_update(sid)
         if src:
             upd = (f"{UPD_MARK} {self.updates[sid]}" + ("  (Browser)" if src.get("allow_dl") is False else "")
-                   if has_update else src.get("tag", ""))
+                   if has_update else src.get("tag", "") + (tr(" · festgehalten") if self.is_held(sid) else ""))
         if has_update:
             status = f"{UPD_MARK} {status}"
         tags = []
@@ -3749,8 +3919,8 @@ class App(BaseTk):
             self.render_cards(cards)
         active = sum(1 for a in self.addons if a.enabled)
         old = sum(1 for a in self.addons if a.enabled and self.is_outdated(a))
-        upd = sum(1 for r, tg in self.updates.items()
-                  if r in self.sources() and tg != self.sources()[r].get("tag"))
+        upd = len(self.pending_updates())
+        held_n = sum(1 for r in self.held() if self.held_update(r))
         parts = [tr("{0} aktiv / {1} gesamt", active, len(self.addons))]
         if old:
             parts.append(tr("{0} veraltet", old))
@@ -3760,8 +3930,9 @@ class App(BaseTk):
         if self.nav_buttons:
             self.nav_buttons["addons"].configure(text=tr("Meine Addons   {0}", len(self.addons)))
             self.nav_buttons["updates"].configure(text=tr("Updates   {0} {1}", UPD_MARK, upd) if upd else tr("Updates"))
-        self.upd_count_var.set(tr("{0} Update(s) verfügbar", upd) if upd else
-                               (tr("Alles aktuell") if self.updates else tr("Noch nicht geprüft")))
+        self.upd_count_var.set((tr("{0} Update(s) verfügbar", upd) if upd else
+                                (tr("Alles aktuell") if self.updates else tr("Noch nicht geprüft")))
+                               + (tr("  ·  {0} festgehalten", held_n) if held_n else ""))
         self.update_detail()
         if self.current_page == "updates":
             self.refresh_updates_page()
@@ -4031,7 +4202,153 @@ class App(BaseTk):
 
     # ----- Updates-Seite --------------------------------------------------------- #
     def pending_updates(self) -> list[str]:
-        return [r for r, tg in self.updates.items() if r in self.sources() and tg != self.sources()[r].get("tag")]
+        return [r for r in self.updates if self.has_update(r)]
+
+    # ----- Festhalten / Rückgängig ------------------------------------------------ #
+    def held(self) -> list:
+        return self.cfg["held"].setdefault(self.flavor, [])
+
+    def is_held(self, sid: str) -> bool:
+        return bool(sid) and sid in self.cfg.get("held", {}).get(self.flavor, [])
+
+    def held_update(self, sid: str) -> str:
+        """Neuere Version eines festgehaltenen Addons ("" wenn keine)."""
+        src, new = self.sources().get(sid), self.updates.get(sid)
+        return new if src and new and new != src.get("tag") and self.is_held(sid) else ""
+
+    def has_update(self, sid: str) -> bool:
+        src, new = self.sources().get(sid), self.updates.get(sid)
+        return bool(src and new and new != src.get("tag") and not self.is_held(sid))
+
+    def toggle_hold(self, addons=None, sid: str = ""):
+        if not sid:
+            sel = list(addons) if addons is not None else self.selected_addons()
+            if not sel:
+                return
+            sid = self.folder_source(self._group_main(sel).name)[0]
+        if not sid or sid not in self.sources():
+            return
+        name, held = self.source_name(sid), self.held()
+        if sid in held:
+            held.remove(sid)
+            msg = tr("{0}: Updates sind wieder erlaubt.", name)
+        else:
+            held.append(sid)
+            self.dl_watch.pop(sid, None)
+            msg = tr("{0} ist festgehalten und bekommt keine Updates, bis du es wieder freigibst.", name)
+        save_config(self.cfg)
+        log.info("Festhalten %s: %s", sid, sid in held)
+        self.render()
+        self.info(msg)
+
+    def rollback_info(self, sid: str) -> dict | None:
+        """Gespeicherte Vorversion – nur wenn sie sich von der installierten unterscheidet."""
+        src = self.sources().get(sid) if sid else None
+        rb = read_rollback(self.flavor, sid) if src else None
+        return rb if rb and rb["source"].get("tag") != src.get("tag") else None
+
+    def rollback_selected(self, addons=None):
+        sel = list(addons) if addons is not None else self.selected_addons()
+        if sel:
+            self.rollback(self.folder_source(self._group_main(sel).name)[0])
+
+    def rollback(self, sid: str):
+        rb = self.rollback_info(sid)
+        if not rb or not self.ready():
+            return
+        name, old_tag = self.source_name(sid), rb["source"].get("tag") or "?"
+        if not self.ask(tr("{0} auf die vorherige Version {1} zurücksetzen? Danach ist das Addon festgehalten, "
+                           "damit es nicht gleich wieder aktualisiert wird.", name, old_tag),
+                        yes=tr("Zurücksetzen"), no=tr("Abbrechen")):
+            return
+        root, flavor = self.root_path, self.flavor
+        current = list(self.sources()[sid].get("folders", []))
+
+        def done(meta):
+            old = dict(meta["source"])
+            self._claim_folders(sid, old.get("folders", []))
+            self.sources()[sid] = old
+            if sid not in self.held():
+                self.held().append(sid)
+            self.dl_watch.pop(sid, None)
+            save_config(self.cfg)
+            log.info("Rückgängig: %s -> %s", sid, old.get("tag"))
+            self.refresh()
+            msg = tr("{0} ist zurück auf {1} und festgehalten.", name, old_tag)
+            if running_wow(root, flavor):
+                msg += tr("  WoW läuft – wirkt nach /reload.")
+            self.set_status(msg)
+            self.notify(msg, "ok", [(tr("Freigeben"), lambda: self.toggle_hold(sid=sid))], timeout=12000)
+
+        def failed(err):
+            self.set_status(tr("Fehler: {0}", err))
+            self.error(str(err))
+
+        self.run_bg(tr("Setze {0} zurück", name), lambda: restore_rollback(root, flavor, sid, current), done, failed)
+
+    # ----- Abhängigkeiten ------------------------------------------------------------ #
+    def install_dependencies(self, assets: list[dict]):
+        """Installiert Addons nach, die laut CurseForge zwingend gebraucht werden und noch fehlen."""
+        want = []
+        for a in assets:
+            for mid in (a or {}).get("deps") or []:
+                if mid not in want and CF_PREFIX + str(mid) not in self.sources():
+                    want.append(mid)
+        key = self.cf_key()
+        if not want or not key or not self.root_path or not self.flavor:
+            return
+        root, flavor = self.root_path, self.flavor
+        gv = self.game[0] if self.game else ""
+        have = {plain_key(a.name) for a in self.addons} | {plain_key(a.title) for a in self.addons}
+        known = set(self.sources())
+
+        def job():
+            ok, manual, errors, seen = [], [], [], set()
+            todo = list(want)
+            while todo and len(seen) < 25:
+                mid = todo.pop(0)
+                if mid in seen or CF_PREFIX + str(mid) in known:
+                    continue
+                seen.add(mid)
+                info, label = None, str(mid)
+                try:
+                    mod = cf_get_mod(mid, key)
+                    label = mod.get("name") or label
+                    if {plain_key(mod.get("name", "")), plain_key(mod.get("slug", ""))} & have - {""}:
+                        continue                         # schon da (z. B. von Hand installiert)
+                    info = cf_info(mod, cf_files(mid, key), flavor, gv)
+                    if not info["best"]:
+                        raise CFError(tr("keine passende Datei gefunden"))
+                    got = cf_install_asset(info["best"], info, root, flavor, key)
+                    ok.append((info, info["best"], got))
+                    have.update(plain_key(g) for g in got)
+                    todo += [d for d in info["best"].get("deps", []) if d not in seen]
+                except ManualDownload:
+                    manual.append((info, info["best"]))
+                except Exception as e:  # noqa
+                    log.error("Abhängigkeit %s: %s", label, e)
+                    errors.append(f"{label}: {e}")
+            return ok, manual, errors
+
+        def done(out):
+            ok, manual, errors = out
+            for info, asset, got in ok:
+                self.remember_cf_source(info, asset, got)
+                self.remember_bundle(got)
+            if ok:
+                save_config(self.cfg)
+                self.refresh()
+                names = ", ".join(info["repo"] for info, _, _ in ok)
+                log.info("Abhängigkeiten installiert: %s", names)
+                self.set_status(tr("Benötigte Addons mitinstalliert: {0}", names))
+                self.notify(tr("Benötigte Addons mitinstalliert: {0}", names), "ok", timeout=10000)
+            if errors:
+                self.warn(tr("Benötigte Addons nicht installiert:") + "\n" + "\n".join(errors))
+            if manual:
+                self.run_download_queue([cf_queue_item(i, a) for i, a in manual],
+                                        tr("Benötigte Addons – im Browser laden:"))
+
+        self.run_bg(tr("Installiere benötigte Addons"), job, done)
 
     def refresh_updates_page(self):
         if not getattr(self, "upd_tree", None):
@@ -4368,7 +4685,7 @@ class App(BaseTk):
         tv.delete(*tv.get_children())
         self._backups = list_backups(self.flavor) if self.flavor else []
         for i, b in enumerate(self._backups):
-            tv.insert("", "end", iid=str(i), values=(f"{b['when']:%d.%m.%Y  %H:%M}",
+            tv.insert("", "end", iid=str(i), values=(b["when"].strftime(tr("%d.%m.%Y  %H:%M")),
                                                      tr(BACKUP_KINDS.get(b["kind"], b["kind"]))),
                       tags=["odd"] if i % 2 else [])
         if self._backups:
@@ -4576,6 +4893,7 @@ class App(BaseTk):
                         [(tr("Projektseite ↗"), lambda: self.open_link(info["page"]))], timeout=12000)
             if getattr(self, "cf_tree", None):
                 self.cf_show_rows()
+            self.install_dependencies([asset])
 
         def failed(err):
             if isinstance(err, ManualDownload):
@@ -4665,9 +4983,9 @@ class App(BaseTk):
             save_config(self.cfg)
             self.render()
             for r, info in res.items():
-                if r.startswith(CF_PREFIX) and info.get("best") and info["tag"] != self.sources()[r].get("tag"):
+                if r.startswith(CF_PREFIX) and info.get("best") and self.has_update(r):
                     self.watch_download(r)
-            n = sum(1 for r, info in res.items() if info["tag"] != self.sources()[r].get("tag"))
+            n = sum(1 for r in res if self.has_update(r))
             msg = tr("{0} Update(s) verfügbar.", n) if n else tr("Alle Addons sind aktuell.")
             if errors:
                 msg += tr("  ({0} Fehler)", len(errors))
@@ -4704,6 +5022,7 @@ class App(BaseTk):
                 plan.append((r, info, asset))
 
         want_backup = bool(self.cfg.get("auto_backup"))
+        before = {r: dict(self.sources()[r]) for r, _, _ in plan}
 
         def job():
             if want_backup:      # im Hintergrund-Thread nur mit lokalen Werten arbeiten
@@ -4714,6 +5033,11 @@ class App(BaseTk):
             ok, manual, errors = [], [], []
             for r, info, asset in plan:
                 try:
+                    if info.get("allow_dl", True) or not r.startswith(CF_PREFIX):
+                        try:
+                            save_rollback(root, flavor, r, before[r])       # für „Rückgängig“
+                        except Exception as e:  # noqa – Rückgängig ist ein Extra, das Update geht vor
+                            log.warning("Vorversion von %s nicht gesichert: %s", r, e)
                     if r.startswith(CF_PREFIX):
                         folders = cf_install_asset(asset, info, root, flavor, cf_key)
                     else:
@@ -4738,12 +5062,15 @@ class App(BaseTk):
                 msg += tr("  ({0} nicht automatisch)", len(manual) + len(errors))
             self.set_status(msg)
             if results:
-                self.notify(msg, "ok", timeout=10000)
+                acts = [(tr("↶ Rückgängig"), lambda r=results[0][0]: self.rollback(r))] \
+                    if len(results) == 1 and self.rollback_info(results[0][0]) else []
+                self.notify(msg, "ok", acts, timeout=12000)
             if errors:
                 self.warn(tr("Nicht aktualisiert:") + "\n" + "\n".join(errors))
             if manual:
                 self.run_download_queue([cf_queue_item(i, a) for i, a, _ in manual],
                                         tr("Im Browser laden (der Autor sperrt Programm-Downloads):"))
+            self.install_dependencies([a for r, _, a, _ in results if r.startswith(CF_PREFIX)])
 
         self.run_bg(tr("Aktualisiere"), job, done)
 
@@ -4976,6 +5303,7 @@ class App(BaseTk):
             if manual:
                 self.run_download_queue([cf_queue_item(i, a) for i, a, _ in manual],
                                         tr("Im Browser laden (der Autor sperrt Programm-Downloads):"))
+            self.install_dependencies([a for repo, _, a, _ in ok if repo is None])
 
         self.run_bg(tr("Lade Addons {0}", what), job, done)
 
@@ -5321,6 +5649,58 @@ class App(BaseTk):
 
 # Übersetzungen: deutscher Originaltext -> English
 TRANSLATIONS["en"] = {
+    "  ·  {0} festgehalten":
+        "  ·  {0} held",
+    " (neu: {0})":
+        " (new: {0})",
+    " · festgehalten":
+        " · held",
+    "%d.%m.%Y  %H:%M":
+        "%Y-%m-%d  %H:%M",
+    "Benötigte Addons mitinstalliert: {0}":
+        "Required addons installed as well: {0}",
+    "Benötigte Addons nicht installiert:":
+        "Required addons not installed:",
+    "Benötigte Addons – im Browser laden:":
+        "Required addons – download in browser:",
+    "Datenordner öffnen":
+        "Open data folder",
+    "Einstellungen, Logs und Backups liegen in {0}.":
+        "Settings, logs and backups are stored in {0}.",
+    "Festhalten":
+        "Hold",
+    "Festhalten (keine Updates)":
+        "Hold (no updates)",
+    "Freigeben":
+        "Allow updates",
+    "Für dieses Addon ist keine vorherige Version gespeichert.":
+        "No previous version is stored for this addon.",
+    "Installiere benötigte Addons":
+        "Installing required addons",
+    "Portabel – Einstellungen, Logs und Backups liegen im Ordner {0} neben der .exe.":
+        "Portable – settings, logs and backups are stored in the {0} folder next to the .exe.",
+    "Quelle ↗":
+        "Source ↗",
+    "Setze {0} zurück":
+        "Rolling back {0}",
+    "Updates wieder erlauben":
+        "Allow updates again",
+    "Zurücksetzen":
+        "Roll back",
+    "fehlt: {0}":
+        "missing: {0}",
+    "{0} auf die vorherige Version {1} zurücksetzen? Danach ist das Addon festgehalten, damit es nicht gleich wieder aktualisiert wird.":
+        "Roll {0} back to the previous version {1}? The addon will then be held so it isn't updated again right away.",
+    "{0} ist festgehalten und bekommt keine Updates, bis du es wieder freigibst.":
+        "{0} is held and gets no updates until you allow them again.",
+    "{0} ist zurück auf {1} und festgehalten.":
+        "{0} is back on {1} and held.",
+    "{0}: Updates sind wieder erlaubt.":
+        "{0}: updates are allowed again.",
+    "↶ Rückgängig":
+        "↶ Undo",
+    "↶ Zurück auf {0}":
+        "↶ Back to {0}",
     "Bitte 'owner/repo' oder eine GitHub-URL angeben.":
         "Please enter 'owner/repo' or a GitHub URL.",
     "Bitte den CurseForge-Link (…/wow/addons/name) oder den Namen des Addons angeben.":
@@ -5541,8 +5921,6 @@ TRANSLATIONS["en"] = {
         "Download from CurseForge ↗",
     "Mit CurseForge verknüpfen":
         "Link with CurseForge",
-    "Quelle öffnen ↗":
-        "Open source ↗",
     "Ordner öffnen":
         "Open folder",
     "Entfernen":
@@ -6215,8 +6593,6 @@ TRANSLATIONS["en"] = {
         " – will be installed automatically as soon as it is ready.",
     "Lade Manager {0}":
         "Downloading manager {0}",
-    "Portable Version – Einstellungen, Logs und Backups liegen im Ordner {0} neben der .exe.":
-        "Portable version – settings, logs and backups are stored in the {0} folder next to the .exe.",
 }
 
 

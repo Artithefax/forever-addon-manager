@@ -12,6 +12,7 @@ __pycache__/
 venv/
 
 # Local data – never commit personal config, API keys, backups or exports
+Leeroyzan-Data/
 config.json
 *.lzpack
 *.lzlist

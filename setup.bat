@@ -1,8 +1,11 @@
 @echo off
 REM ==========================================================
-REM  setup.bat - baut Leeroyzan.exe aus leeroyzan.py und
-REM  installiert es (Startmenue + Desktop), ohne Adminrechte.
-REM  Nebenbei entsteht dist\Leeroyzan-Portable.zip.
+REM  setup.bat - baut die portable Version von Leeroyzan aus
+REM  leeroyzan.py:
+REM    dist\Leeroyzan-Portable\      fertiger Ordner zum Starten
+REM    dist\Leeroyzan-Portable.zip    zum Weitergeben (ohne deine
+REM                                   Einstellungen)
+REM  Es wird nichts installiert, keine Adminrechte noetig.
 REM
 REM  Python muss NICHT installiert sein: Fehlt es, laedt das
 REM  Skript das Werkzeug "uv" in den Unterordner .build_tools
@@ -11,7 +14,7 @@ REM  wird nichts installiert. Ist Python 3.10+ vorhanden, wird
 REM  das genommen.
 REM
 REM  Normalerweise nicht noetig: Jedes GitHub-Release enthaelt
-REM  Leeroyzan-Setup.exe und Leeroyzan-Portable.zip fertig.
+REM  Leeroyzan-Portable.zip fertig.
 REM ==========================================================
 chcp 65001 >nul
 setlocal EnableExtensions
@@ -85,54 +88,43 @@ if errorlevel 1 goto :fail
 if exist build rmdir /s /q build
 if exist Leeroyzan.spec del /q Leeroyzan.spec
 
-REM ---- Portable Version: .exe + Ordner "Leeroyzan-Data" -------------------
+REM ---- Fertiger Ordner: .exe + "Leeroyzan-Data" ----------------------------
+REM Vorhandene Daten in dist\Leeroyzan-Portable\Leeroyzan-Data bleiben erhalten.
 echo [4/5] %M_PORT%
-if exist dist\portable rmdir /s /q dist\portable
-mkdir dist\portable\Leeroyzan\Leeroyzan-Data
-copy /y dist\Leeroyzan.exe dist\portable\Leeroyzan\ >nul
-if exist portable-readme.txt copy /y portable-readme.txt dist\portable\Leeroyzan\Leeroyzan-Data\README.txt >nul
-powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "Compress-Archive -Path 'dist\portable\Leeroyzan' -DestinationPath 'dist\Leeroyzan-Portable.zip' -Force"
-if errorlevel 1 goto :fail
-rmdir /s /q dist\portable
+if not exist dist\Leeroyzan-Portable\Leeroyzan-Data mkdir dist\Leeroyzan-Portable\Leeroyzan-Data
+copy /y dist\Leeroyzan.exe dist\Leeroyzan-Portable\Leeroyzan.exe >nul
+if errorlevel 1 goto :running
+if exist portable-readme.txt if not exist dist\Leeroyzan-Portable\Leeroyzan-Data\README.txt copy /y portable-readme.txt dist\Leeroyzan-Portable\Leeroyzan-Data\README.txt >nul
 
-REM ---- Installation nach %LOCALAPPDATA%\Programs\Leeroyzan ----------------
-if not defined LOCALAPPDATA goto :fail
-set "LZ_DIR=%LOCALAPPDATA%\Programs\Leeroyzan"
-set "LZ_EXE=%LOCALAPPDATA%\Programs\Leeroyzan\Leeroyzan.exe"
-:check_running
-tasklist /FI "IMAGENAME eq Leeroyzan.exe" 2>nul | find /I "Leeroyzan.exe" >nul
-if errorlevel 1 goto :install
-echo %M_RUNNING%
-pause >nul
-goto :check_running
-
-:install
-echo [5/5] %M_INSTALL% %LZ_DIR%
-if not exist "%LZ_DIR%" mkdir "%LZ_DIR%"
-copy /y dist\Leeroyzan.exe "%LZ_EXE%" >nul
-if errorlevel 1 goto :fail
-REM Sprache an Leeroyzan weitergeben (wie beim Leeroyzan-Setup.exe)
-if not exist "%APPDATA%\Leeroyzan" mkdir "%APPDATA%\Leeroyzan"
-> "%APPDATA%\Leeroyzan\setup.ini" (echo [Setup]& echo Language=%LZ_LANG%)
+REM ---- ZIP zum Weitergeben: immer aus einem leeren Ordner, nie mit eigenen Daten ----
+echo [5/5] %M_ZIP%
+if exist dist\_zip rmdir /s /q dist\_zip
+mkdir dist\_zip\Leeroyzan\Leeroyzan-Data
+copy /y dist\Leeroyzan.exe dist\_zip\Leeroyzan\ >nul
+if exist portable-readme.txt copy /y portable-readme.txt dist\_zip\Leeroyzan\Leeroyzan-Data\README.txt >nul
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$w = New-Object -ComObject WScript.Shell;" ^
-  "foreach ($d in [Environment]::GetFolderPath('Programs'), [Environment]::GetFolderPath('Desktop')) {" ^
-  "  $l = $w.CreateShortcut((Join-Path $d 'Leeroyzan.lnk')); $l.TargetPath = $env:LZ_EXE;" ^
-  "  $l.WorkingDirectory = $env:LZ_DIR; $l.IconLocation = $env:LZ_EXE + ',0'; $l.Save() }"
+  "Compress-Archive -Path 'dist\_zip\Leeroyzan' -DestinationPath 'dist\Leeroyzan-Portable.zip' -Force"
+if errorlevel 1 goto :fail
+rmdir /s /q dist\_zip
 
 echo.
 echo %M_DONE%
-echo   %LZ_EXE%
+echo   %~dp0dist\Leeroyzan-Portable\Leeroyzan.exe
 echo %M_PORTDONE%
 echo   %~dp0dist\Leeroyzan-Portable.zip
 echo.
 choice /c %M_YN% /n /m "%M_START% "
 if errorlevel 2 goto :end
-start "" "%LZ_EXE%"
+start "" "%~dp0dist\Leeroyzan-Portable\Leeroyzan.exe"
 :end
 endlocal
 exit /b 0
+
+:running
+echo.
+echo %M_RUNNING%
+pause
+exit /b 1
 
 :fail
 echo.
@@ -149,11 +141,11 @@ set "M_UV=Lade uv herunter …"
 set "M_DEPS=Installiere PyInstaller und Drag-und-Drop-Unterstützung …"
 set "M_NODND=[Hinweis] tkinterdnd2 nicht verfügbar – Drag-und-Drop ist deaktiviert."
 set "M_BUILD=Baue Leeroyzan.exe – das dauert ein bis zwei Minuten …"
-set "M_PORT=Erstelle die portable Version …"
-set "M_RUNNING=Leeroyzan läuft noch. Bitte schließen und dann eine Taste drücken …"
-set "M_INSTALL=Installiere nach"
-set "M_DONE=Fertig! Leeroyzan ist installiert (Startmenü und Desktop):"
-set "M_PORTDONE=Portable Version (ohne Installation, z. B. für einen USB-Stick):"
+set "M_PORT=Aktualisiere den Ordner dist\Leeroyzan-Portable …"
+set "M_ZIP=Erstelle Leeroyzan-Portable.zip zum Weitergeben …"
+set "M_RUNNING=[FEHLER] dist\Leeroyzan-Portable\Leeroyzan.exe läuft noch – bitte schließen und setup.bat erneut starten."
+set "M_DONE=Fertig! Portabler Ordner (direkt startbar, deine Daten bleiben darin):"
+set "M_PORTDONE=ZIP zum Weitergeben (ohne deine Einstellungen):"
 set "M_YN=JN"
 set "M_START=Leeroyzan jetzt starten? [J/N]"
 set "M_FAIL=[FEHLER] Setup fehlgeschlagen – siehe Ausgabe oben."
@@ -167,11 +159,11 @@ set "M_UV=Downloading uv …"
 set "M_DEPS=Installing PyInstaller and drag-and-drop support …"
 set "M_NODND=[Note] tkinterdnd2 not available – drag and drop is disabled."
 set "M_BUILD=Building Leeroyzan.exe – this takes a minute or two …"
-set "M_PORT=Creating the portable version …"
-set "M_RUNNING=Leeroyzan is still running. Please close it, then press any key …"
-set "M_INSTALL=Installing to"
-set "M_DONE=Done! Leeroyzan is installed (Start menu and desktop):"
-set "M_PORTDONE=Portable version (no installation, e.g. for a USB stick):"
+set "M_PORT=Updating the folder dist\Leeroyzan-Portable …"
+set "M_ZIP=Creating Leeroyzan-Portable.zip for sharing …"
+set "M_RUNNING=[ERROR] dist\Leeroyzan-Portable\Leeroyzan.exe is still running – please close it and run setup.bat again."
+set "M_DONE=Done! Portable folder (ready to start, your data stays inside):"
+set "M_PORTDONE=ZIP for sharing (without your settings):"
 set "M_YN=YN"
 set "M_START=Start Leeroyzan now? [Y/N]"
 set "M_FAIL=[ERROR] Setup failed – see the output above."
