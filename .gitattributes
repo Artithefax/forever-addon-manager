@@ -1,0 +1,4 @@
+# Windows-Skripte immer mit CRLF auschecken, sonst bricht cmd.exe ab
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.py text eol=lf
