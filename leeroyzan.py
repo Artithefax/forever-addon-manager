@@ -58,7 +58,7 @@ except Exception:                      # noqa – Paket fehlt oder Tk-Erweiterun
     HAS_DND = False
 
 APP_NAME = "Leeroyzan"
-APP_VERSION = "1.0.3"
+APP_VERSION = "1.0.4"
 USER_AGENT = f"Leeroyzan/{APP_VERSION}"
 
 # Selbst-Update über GitHub-Releases dieses Repos
@@ -642,6 +642,10 @@ def rank_assets(assets: list[dict], flavor: str = "") -> list[dict]:
 
 def github_latest(repo: str, token: str = "") -> dict:
     data = json.loads(http_get(f"https://api.github.com/repos/{repo}/releases/latest", token))
+    return release_info(repo, data)
+
+
+def release_info(repo: str, data: dict) -> dict:
     assets = [{"name": a["name"], "url": a["browser_download_url"], "size": a.get("size", 0)}
               for a in data.get("assets", []) if a["name"].lower().endswith(".zip")]
     return {
@@ -654,6 +658,7 @@ def github_latest(repo: str, token: str = "") -> dict:
         "notes": (data.get("body") or "").strip(),
         "page": data.get("html_url", f"https://github.com/{repo}/releases"),
         "published": (data.get("published_at") or "")[:10],
+        "published_at": data.get("published_at") or "",
     }
 
 
@@ -810,6 +815,22 @@ def zip_name_matches(name: str, wanted: str) -> bool:
     def stem(n: str) -> str:
         return re.sub(r"[\s_]*\(\d+\)$", "", Path(n).stem).lower().replace(" ", "_")
     return bool(wanted) and stem(name) == stem(wanted)
+
+
+def default_download_dir() -> Path:
+    """Der Downloads-Ordner des Browsers – unter Windows auch, wenn er verschoben wurde (z. B. nach D:)."""
+    if os.name == "nt":
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders") as k:
+                value, _ = winreg.QueryValueEx(k, "{374DE290-123F-4565-9164-39C4925E467B}")
+            p = Path(os.path.expandvars(value))
+            if p.is_dir():
+                return p
+        except OSError:
+            pass
+    return Path.home() / "Downloads"
 
 
 def download_matches(path: Path, asset: dict, since: float) -> bool:
@@ -1246,17 +1267,42 @@ class NoReleaseYet(Exception):
     """Im Repo gibt es (noch) kein veröffentlichtes Release."""
 
 
+BUILD_GRACE_S = 2 * 3600       # so lange gilt ein Release ohne .exe als „wird noch gebaut“
+
+
+def release_age_s(info: dict) -> float:
+    try:
+        ts = datetime.fromisoformat(info.get("published_at", "").replace("Z", "+00:00"))
+        return time.time() - ts.timestamp()
+    except ValueError:
+        return float("inf")
+
+
+def pick_self_update(releases: list[dict]) -> dict | None:
+    """Höchste neuere Version, die sich einspielen lässt – oder die gerade noch gebaut wird.
+    Releases ohne Leeroyzan.exe (z. B. alte oder fehlgeschlagene) werden übersprungen."""
+    newer = sorted((r for r in releases if parse_version(r["tag"]) > parse_version(APP_VERSION)),
+                   key=lambda r: parse_version(r["tag"]), reverse=True)
+    for r in newer:
+        if not is_frozen() or update_ready(r) or release_age_s(r) < BUILD_GRACE_S:
+            return r
+        log.warning("Release %s hat keine %s – wird übersprungen", r["tag"], EXE_ASSET)
+    return None
+
+
 def check_self_update(token: str = "") -> dict | None:
     """Liefert die Release-Infos, wenn auf GitHub eine neuere Version liegt."""
     try:
-        info = github_latest(UPDATE_REPO, token)
+        data = json.loads(http_get(f"https://api.github.com/repos/{UPDATE_REPO}/releases?per_page=30", token))
     except urllib.error.HTTPError as e:
-        if e.code == 404:      # GitHub meldet 404, solange kein Release veröffentlicht ist
+        if e.code == 404:
             raise NoReleaseYet() from e
         raise
-    if parse_version(info["tag"]) > parse_version(APP_VERSION):
-        return info
-    return None
+    releases = [release_info(UPDATE_REPO, r) for r in data
+                if isinstance(r, dict) and not r.get("draft") and not r.get("prerelease")]
+    if not releases:
+        raise NoReleaseYet()           # noch nichts veröffentlicht
+    return pick_self_update(releases)
 
 
 def self_update_asset(info: dict) -> dict | None:
@@ -1340,16 +1386,18 @@ def launch_replacer(new_exe: Path) -> None:
     """Startet ein kleines Skript, das nach dem Beenden die alte .exe ersetzt und neu startet."""
     old_exe = Path(sys.executable)
     bat = Path(tempfile.gettempdir()) / f"leeroyzan_update_{os.getpid()}.bat"
+    ulog = config_dir() / "update.log"
     script = f"""@echo off
 chcp 65001 >nul
 set "PID={os.getpid()}"
+>>"{ulog}" echo %date% %time% Update gestartet: "{new_exe}" -^> "{old_exe}"
 :wait
 tasklist /FI "PID eq %PID%" 2>nul | find "%PID%" >nul && (ping -n 2 127.0.0.1 >nul & goto wait)
 set /a n=0
 :move
-move /Y "{new_exe}" "{old_exe}" >nul 2>&1 && goto start
+move /Y "{new_exe}" "{old_exe}" >nul 2>&1 && (>>"{ulog}" echo %date% %time% ersetzt & goto start)
 set /a n+=1
-if %n% GEQ 30 goto start
+if %n% GEQ 30 (>>"{ulog}" echo %date% %time% FEHLER: Datei konnte nicht ersetzt werden & goto start)
 ping -n 2 127.0.0.1 >nul
 goto move
 :start
@@ -1397,9 +1445,14 @@ THEME = {
     "btn_text":    "#fff7e6",
     "crest":       "#16242c",   # Wappen-Nachtblau
     "warn":        "#e69633",
-    "update":      "#7ddc6a",
+    "ok":          "#7ddc6a",   # aktiv / alles in Ordnung
+    "update":      "#ffd54a",   # Update verfügbar
+    "update_bg":   "#2d2610",
     "old":         "#d6c37a",   # Interface passt nicht zur Spielversion
 }
+
+
+UPD_MARK = "⬇"          # Kennzeichen für Addons mit verfügbarem Update
 
 
 def spaced(text: str) -> str:
@@ -2069,6 +2122,7 @@ class App(BaseTk):
         self.jobs: queue.Queue = queue.Queue()
         self.quiet_jobs: queue.Queue = queue.Queue()
         self.watching_build = ""
+        self._watch_manual = False
         self.dl_watch: dict[str, dict] = {}     # CurseForge-Updates, deren ZIP im Download-Ordner erwartet wird
         self._dl_job = None
         self._dl_seen: dict[str, tuple] = {}     # Pfad -> (Größe, Änderungszeit) beim letzten Blick
@@ -2091,6 +2145,7 @@ class App(BaseTk):
         if self.cfg.get("check_on_start") and self.sources():
             self.after(700, lambda: self.check_updates(silent=True))
         cleanup_self_update()
+        self.after(900, self._report_self_update)
         if self.cfg.get("self_update_mode") != "off":
             self.after(1500, lambda: self.check_manager_update(silent=True))
         log.info("Gestartet: %s %s, Ordner=%s, Version=%s", APP_NAME, APP_VERSION,
@@ -2610,7 +2665,7 @@ class App(BaseTk):
         if src:
             new = self.updates.get(sid)
             if new and new != src.get("tag"):
-                d["release"].configure(text=f"Update: {new}", foreground=THEME["update"])
+                d["release"].configure(text=f"{UPD_MARK} Update: {new}", foreground=THEME["update"])
             else:
                 d["release"].configure(text=src.get("tag", "–") + ("  · aktuell" if new else ""),
                                        foreground=THEME["text"])
@@ -2946,12 +3001,15 @@ class App(BaseTk):
             chips = tk.Frame(card, bg=t["row_a"])
             chips.pack(fill="x")
             status_color = (t["text_faint"] if "disabled" in tags else t["warn"] if "warn" in tags
-                            else t["old"] if "old" in tags else t["update"])
+                            else t["old"] if "old" in tags else t["ok"])
+            if "update" in tags:
+                v = re.search(r"\d+(?:\.\d+)+", str(vals[6]).replace("  (Browser)", ""))
+                upd_chip = f"{UPD_MARK} Update {v.group(0)}" if v else f"{UPD_MARK} Update verfügbar"
             for text, fg, bg in ((f"v{vals[3]}" if vals[3] else "ohne Version", t["text"], t["pill"]),
                                  (vals[5].split(":")[0] or "manuell",
                                   t["text_dim"], t["pill"]),
-                                 (vals[6] if "update" in tags else vals[0], t["update"] if "update" in tags
-                                  else status_color, "#18261a" if "update" in tags else t["pill"])):
+                                 (upd_chip if "update" in tags else vals[0], t["update"] if "update" in tags
+                                  else status_color, t["update_bg"] if "update" in tags else t["pill"])):
                 tk.Label(chips, text=text, fg=fg, bg=bg, font=self.fonts["small"], padx=9, pady=2).pack(
                     side="left", padx=(0, 6))
             if "update" in tags and self.cf_update_link(members)[1]:
@@ -3043,7 +3101,7 @@ class App(BaseTk):
 
     def download_dir(self) -> Path:
         d = (self.cfg.get("download_dir") or "").strip()
-        return Path(d) if d else Path.home() / "Downloads"
+        return Path(d) if d else default_download_dir()
 
     def folder_source(self, folder: str) -> tuple[str, dict] | tuple[None, None]:
         for sid, s in self.sources().items():
@@ -3100,9 +3158,12 @@ class App(BaseTk):
         self.cfg["check_on_start"] = bool(self.check_start_var.get())
         label = self.self_update_var.get()
         mode = next((k for k, v in self.UPDATE_MODES.items() if v == label), "auto")
+        changed = mode != self.cfg.get("self_update_mode")
         self.cfg["self_update_mode"] = mode
         self.cfg["self_update_check"] = mode != "off"
         save_config(self.cfg)
+        if changed and mode == "auto":
+            self.after(300, lambda: self.check_manager_update(silent=True))
 
     def ready(self, modifies: bool = True, quiet: bool = False) -> bool:
         """Prüft, ob eine Aktion starten darf. modifies=True warnt zusätzlich, wenn WoW läuft."""
@@ -3287,8 +3348,12 @@ class App(BaseTk):
             if prev != sig or st.st_size == 0 or self._dl_checked.get(key) == sig:
                 continue                              # lädt noch, leer oder schon als unpassend erkannt
             for sid, w in self.dl_watch.items():
-                if zip_name_matches(f.name, w["asset"]["file_name"]) and download_matches(f, w["asset"], w["since"]):
+                if not zip_name_matches(f.name, w["asset"]["file_name"]):
+                    continue
+                if download_matches(f, w["asset"], w["since"]):
                     return sid, f
+                self.set_status(f"{f.name} passt nicht zur erwarteten Version {w['asset']['name']} – "
+                                "bitte über „Update bei CurseForge herunterladen“ laden.")
             self._dl_checked[key] = sig
         return None
 
@@ -3491,8 +3556,10 @@ class App(BaseTk):
         upd = ""
         has_update = bool(src and self.updates.get(sid) and self.updates[sid] != src.get("tag"))
         if src:
-            upd = (f"→ {self.updates[sid]}" + ("  (Browser)" if src.get("allow_dl") is False else "")
+            upd = (f"{UPD_MARK} {self.updates[sid]}" + ("  (Browser)" if src.get("allow_dl") is False else "")
                    if has_update else src.get("tag", ""))
+        if has_update:
+            status = f"{UPD_MARK} {status}"
         tags = []
         if not a.enabled:
             tags.append("disabled")
@@ -3515,6 +3582,8 @@ class App(BaseTk):
             status += "  ·  Hinweis"
         elif "old" in child_tags:
             status += "  ·  veraltet"
+        if "update" in child_tags:
+            status = f"{UPD_MARK} {status}"
         root = g["root"]
         ref = root or members[0]
         rvals, _ = self.row_values(ref)
@@ -4512,6 +4581,27 @@ class App(BaseTk):
                     lambda: restore_backup(chosen["path"], root, flavor), done)
 
     # ----- Selbst-Update --------------------------------------------------- #
+    def _report_self_update(self):
+        """Nach einem Neustart durch das Manager-Update: Erfolg melden oder erklären, was schiefging."""
+        pending = self.cfg.pop("pending_self_update", None)
+        if not pending:
+            return
+        save_config(self.cfg)
+        if parse_version(APP_VERSION) >= parse_version(pending.get("to", "")):
+            log.info("Manager-Update erfolgreich: %s -> %s", pending.get("from"), APP_VERSION)
+            self.set_status(f"✓ Leeroyzan wurde auf v{APP_VERSION} aktualisiert.")
+            return
+        log.error("Manager-Update auf %s wurde nicht eingesetzt (läuft weiter v%s)", pending.get("to"), APP_VERSION)
+        if messagebox.askyesno(
+                APP_NAME, f"Das Update auf {pending.get('to')} wurde geladen, konnte aber nicht eingesetzt "
+                          f"werden – es läuft weiter v{APP_VERSION}.\n\n"
+                          f"Leeroyzan liegt hier:\n{Path(sys.executable).parent}\n\n"
+                          "Häufige Ursachen: ein geschützter Ordner (z. B. „Programme“), ein Virenscanner oder "
+                          "OneDrive sperrt die Datei. Lege Leeroyzan.exe am besten in einen eigenen Ordner, z. B. "
+                          "Dokumente\\Leeroyzan.\n\nDetails stehen in update.log.\n\n"
+                          "Release-Seite öffnen, um die neue Version einmalig von Hand zu laden?", icon="warning"):
+            self.open_link(f"https://github.com/{UPDATE_REPO}/releases/latest")
+
     def check_manager_update(self, silent: bool = False):
         if self.busy:
             if silent:                       # z. B. während der Addon-Prüfung beim Start
@@ -4592,29 +4682,38 @@ class App(BaseTk):
         if ready:
             self.install_manager_update(info)
         elif frozen:
-            self.watch_manager_build(info["tag"])
+            self.watch_manager_build(info["tag"], manual=True)
         else:
             self.open_link(info.get("page") or f"https://github.com/{UPDATE_REPO}/releases")
 
-    BUILD_POLL_MS = 90_000          # alle 90 s nachsehen …
-    BUILD_POLL_TRIES = 20           # … höchstens 30 Minuten lang
+    BUILD_POLL_MS = 60_000          # jede Minute nachsehen (GitHub erlaubt ohne Token 60 Abfragen/Stunde) …
+    BUILD_POLL_TRIES = 30           # … höchstens 30 Minuten lang
 
-    def watch_manager_build(self, tag: str, tries: int = 0):
+    def watch_manager_build(self, tag: str, tries: int = 0, manual: bool = False):
         """Wartet im Hintergrund, bis die .exe des Releases gebaut ist, und installiert sie dann automatisch."""
         if tries == 0:
             if self.watching_build == tag:
                 return                               # läuft schon
             self.watching_build = tag
+            self._watch_manual = manual
             log.info("Manager-Update %s: warte auf den Build der .exe", tag)
         if self.watching_build != tag:
             return
         if tries >= self.BUILD_POLL_TRIES:
             self.watching_build = ""
             log.warning("Manager-Update %s: .exe nach %d Versuchen nicht fertig", tag, tries)
-            self.set_status(f"Die .exe für {tag} ist noch nicht fertig – später „Manager-Update suchen“.")
+            self.set_status(f"Für {tag} ist auf GitHub keine Leeroyzan.exe erschienen.")
+            if self._watch_manual and messagebox.askyesno(
+                    APP_NAME, f"Für {tag} ist auch nach 30 Minuten keine Leeroyzan.exe am Release.\n\n"
+                              "Wahrscheinlich ist der automatische Build auf GitHub fehlgeschlagen. Auf der "
+                              "Actions-Seite siehst du es (rotes X) – dort lässt er sich mit „Re-run jobs“ "
+                              "erneut starten.\n\nActions-Seite öffnen?", icon="warning"):
+                self.open_link(f"https://github.com/{UPDATE_REPO}/actions")
             return
-        self.set_status(f"Manager-Update {tag} wird auf GitHub noch gebaut – wird automatisch installiert, "
-                        "sobald es fertig ist.")
+        mins = tries * self.BUILD_POLL_MS // 60_000
+        self.set_status(f"{UPD_MARK} Manager-Update {tag}: GitHub baut die .exe noch"
+                        + (f" (wartet seit {mins} min)" if mins else "")
+                        + " – wird automatisch installiert, sobald sie fertig ist.")
         token = self.cfg.get("github_token", "")
 
         def done(info, err):
@@ -4629,10 +4728,7 @@ class App(BaseTk):
                 return
             self.after(self.BUILD_POLL_MS, lambda: self.watch_manager_build(tag, tries + 1))
 
-        if tries == 0:
-            done(None, RuntimeError("erster Durchlauf"))   # die erste Prüfung kam gerade erst
-        else:
-            self.run_quiet(lambda: check_self_update(token), done)
+        self.run_quiet(lambda: check_self_update(token), done)
 
     def install_manager_update(self, info: dict, automatic: bool = False):
         """Lädt die neue .exe, beendet den Manager und lässt sie per Skript einsetzen."""
@@ -4648,20 +4744,30 @@ class App(BaseTk):
                 self.after(2000, lambda: done(new_exe))
                 return
             try:
+                self.cfg["pending_self_update"] = {"from": APP_VERSION, "to": info["tag"]}
+                save_config(self.cfg)
                 if is_frozen():
                     launch_replacer(new_exe)
                 else:
                     apply_script_update(new_exe)
             except Exception as e:  # noqa
+                self.cfg.pop("pending_self_update", None)
+                save_config(self.cfg)
                 messagebox.showerror(APP_NAME, f"Update konnte nicht gestartet werden:\n{e}")
                 return
             self.destroy()
 
         def failed(err):
             log.error("Manager-Update fehlgeschlagen: %s", err)
+            if isinstance(err, PermissionError):
+                err = (f"Keine Schreibrechte im Ordner {Path(sys.executable).parent}.\n"
+                       "Lege Leeroyzan.exe in einen eigenen Ordner, z. B. Dokumente\\Leeroyzan.")
             if automatic:
                 self.set_status("Automatisches Manager-Update fehlgeschlagen – siehe Log.")
-                return
+                if self.cfg.get("self_update_failed_tag") == info["tag"]:
+                    return                    # pro Version nur einmal melden
+                self.cfg["self_update_failed_tag"] = info["tag"]
+                save_config(self.cfg)
             if messagebox.askyesno(APP_NAME, f"Das Update ist fehlgeschlagen:\n{err}\n\n"
                                              "Release-Seite im Browser öffnen?"):
                 self.open_link(info.get("page") or f"https://github.com/{UPDATE_REPO}/releases")
