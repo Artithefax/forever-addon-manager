@@ -61,12 +61,12 @@ Run `build_exe.bat`. It creates an isolated virtual environment, installs PyInst
 
 ## Releases and auto-update
 
-The manager checks this repository's latest GitHub release on start (can be turned off) and offers to update itself. It downloads `Leeroyzan.exe`, verifies it against `Leeroyzan.exe.sha256`, replaces itself and restarts.
+The manager checks this repository's latest GitHub release on start. With *Manager-Updates: Automatisch installieren* (default) it updates itself without any download by hand: it downloads `Leeroyzan.exe`, verifies it against `Leeroyzan.exe.sha256`, replaces itself and restarts. If a release was just published and the `.exe` is still being built, the manager waits in the background (checking every 90 seconds for up to 30 minutes) and installs it as soon as it is ready. When run as a Python script, it replaces `leeroyzan.py` with the release's version instead (keeping a `.py.bak`); inside a git checkout it leaves the file alone – use `git pull` there.
 
 Publishing a new version:
 
-1. Set `APP_VERSION` in `leeroyzan.py` (e.g. `1.0.1`) and commit.
-2. Create a release with the tag `v1.0.1` (Releases → Draft a new release → Publish).
+1. Set `APP_VERSION` in `leeroyzan.py` (e.g. `1.0.3`) and commit.
+2. Create a release with the tag `v1.0.3` (Releases → Draft a new release → Publish).
 3. The *Build release exe* workflow builds the `.exe` on a Windows runner and attaches it plus its SHA-256 checksum to the release (takes a few minutes).
 
 ## Where data is stored

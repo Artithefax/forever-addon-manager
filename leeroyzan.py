@@ -58,12 +58,13 @@ except Exception:                      # noqa – Paket fehlt oder Tk-Erweiterun
     HAS_DND = False
 
 APP_NAME = "Leeroyzan"
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.0.2"
 USER_AGENT = f"Leeroyzan/{APP_VERSION}"
 
 # Selbst-Update über GitHub-Releases dieses Repos
 UPDATE_REPO = "Artithefax/leeroyzan"
 EXE_ASSET = "Leeroyzan.exe"
+SCRIPT_ASSET = "leeroyzan.py"                     # Quelldatei im Repo (für die Python-Variante)
 
 # Link-Buttons in der Kopfzeile (Text, Adresse) – hier einfach anpassbar
 HEADER_LINKS = [
@@ -1244,6 +1245,21 @@ def self_update_asset(info: dict) -> dict | None:
     return None
 
 
+def script_update_possible() -> bool:
+    """Python-Variante: Skript darf sich selbst ersetzen (nicht in einer Git-Arbeitskopie)."""
+    p = Path(__file__).resolve()
+    return p.suffix == ".py" and not (p.parent / ".git").exists() and os.access(p.parent, os.W_OK)
+
+
+def update_ready(info: dict) -> bool:
+    """Kann diese Installation das Release jetzt selbst einspielen?
+    Für die .exe müssen Datei UND Prüfsumme am Release hängen (der Build auf GitHub ist dann fertig)."""
+    if is_frozen():
+        names = {a["name"].lower() for a in info.get("all_assets", [])}
+        return EXE_ASSET.lower() in names and (EXE_ASSET + ".sha256").lower() in names
+    return script_update_possible()
+
+
 def new_exe_path() -> Path:
     exe = Path(sys.executable)
     return exe.with_name(exe.stem + ".new.exe")
@@ -1259,12 +1275,12 @@ def download_self_update(info: dict, token: str = "") -> Path:
         raise ValueError("Die heruntergeladene Datei ist keine gültige Windows-Anwendung.")
     sha_asset = next((a for a in info.get("all_assets", [])
                       if a["name"].lower() == (asset["name"] + ".sha256").lower()), None)
-    if sha_asset:
-        expected = http_get(sha_asset["url"], token, accept="application/octet-stream")
-        expected = expected.decode("ascii", "replace").split()[0].strip().lower()
-        actual = hashlib.sha256(blob).hexdigest()
-        if expected != actual:
-            raise ValueError("Prüfsumme stimmt nicht – Download beschädigt. Bitte später erneut versuchen.")
+    if not sha_asset:
+        raise ValueError("Zum Release gehört noch keine Prüfsumme – der Build ist wohl noch nicht fertig.")
+    expected = http_get(sha_asset["url"], token, accept="application/octet-stream")
+    expected = (expected.decode("ascii", "replace").split() or [""])[0].strip().lower()
+    if expected != hashlib.sha256(blob).hexdigest():
+        raise ValueError("Prüfsumme stimmt nicht – Download beschädigt. Bitte später erneut versuchen.")
     target = new_exe_path()
     try:
         target.write_bytes(blob)
@@ -1272,6 +1288,31 @@ def download_self_update(info: dict, token: str = "") -> Path:
         raise PermissionError(f"Keine Schreibrechte in {target.parent}. Verschiebe den Manager z. B. "
                               "in deinen Benutzerordner oder lade das Update von der Release-Seite.")
     return target
+
+
+def download_script_update(info: dict, token: str = "") -> Path:
+    """Python-Variante: lädt leeroyzan.py des Releases und prüft Version und Syntax."""
+    url = f"https://raw.githubusercontent.com/{UPDATE_REPO}/{urllib.parse.quote(info['tag'])}/{SCRIPT_ASSET}"
+    try:
+        text = http_get(url, token, accept="text/plain").decode("utf-8")
+    except UnicodeDecodeError:
+        raise ValueError("Die geladene Datei ist kein gültiges Skript.") from None
+    m = re.search(r'^APP_VERSION = "([^"]+)"', text, re.M)
+    if not m or parse_version(m.group(1)) != parse_version(info["tag"]):
+        raise ValueError("Die geladene Datei passt nicht zur Release-Version.")
+    compile(text, SCRIPT_ASSET, "exec")          # Syntaxfehler -> Abbruch, das alte Skript bleibt
+    target = Path(__file__).resolve().with_suffix(".new.py")
+    target.write_text(text, encoding="utf-8")
+    return target
+
+
+def apply_script_update(new_script: Path) -> None:
+    """Ersetzt das laufende Skript (alte Fassung bleibt als .py.bak) und startet es neu."""
+    cur = Path(__file__).resolve()
+    shutil.copy2(cur, cur.with_suffix(".py.bak"))
+    os.replace(new_script, cur)
+    flags = 0x00000008 if os.name == "nt" else 0          # losgelöst starten
+    subprocess.Popen([sys.executable, str(cur), *sys.argv[1:]], close_fds=True, creationflags=flags)
 
 
 def launch_replacer(new_exe: Path) -> None:
@@ -1303,6 +1344,8 @@ def cleanup_self_update() -> None:
     """Räumt ein liegengebliebenes .new.exe nach einem abgebrochenen Update weg."""
     if is_frozen():
         new_exe_path().unlink(missing_ok=True)
+    else:
+        Path(__file__).resolve().with_suffix(".new.py").unlink(missing_ok=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -2002,6 +2045,8 @@ class App(BaseTk):
         self.update_info: dict[str, dict] = {}  # repo -> Release-Infos
         self.game: tuple[str, int] | None = None
         self.jobs: queue.Queue = queue.Queue()
+        self.quiet_jobs: queue.Queue = queue.Queue()
+        self.watching_build = ""
         self.busy = False
 
         if not self.cfg["wow_root"]:
@@ -3067,7 +3112,23 @@ class App(BaseTk):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def run_quiet(self, func, on_done):
+        """Wie run_bg, aber unsichtbar: kein Status, kein Sanduhr-Cursor, blockiert nichts."""
+        def worker():
+            try:
+                self.quiet_jobs.put((on_done, func(), None))
+            except Exception as e:  # noqa
+                self.quiet_jobs.put((on_done, None, e))
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def _poll_jobs(self):
+        try:
+            while True:
+                cb, res, err = self.quiet_jobs.get_nowait()
+                cb(res, err)
+        except queue.Empty:
+            pass
         try:
             while True:
                 cb, err_cb, res, err = self.jobs.get_nowait()
@@ -4338,13 +4399,16 @@ class App(BaseTk):
                     messagebox.showinfo(APP_NAME, f"Du nutzt bereits die neueste Version (v{APP_VERSION}).")
                 return
             auto = silent and self.cfg.get("self_update_mode") == "auto"
-            if auto and is_frozen() and self_update_asset(info):
+            if auto and update_ready(info):
                 self.install_manager_update(info, automatic=True)
                 return
+            if auto and is_frozen():
+                # Release ist veröffentlicht, GitHub baut die .exe aber noch: im Hintergrund warten
+                self.watch_manager_build(info["tag"])
+                return
             if auto:
-                # Python-Version oder .exe noch nicht gebaut: nur dezent melden
-                self.set_status(f"Manager-Update {info['tag']} verfügbar – "
-                                "„Manager-Update suchen“ für Details.")
+                # Python-Skript in einer Git-Arbeitskopie: nur dezent melden
+                self.set_status(f"Manager-Update {info['tag']} verfügbar – „git pull“ in deiner Kopie.")
                 return
             if silent and info["tag"] == self.cfg.get("skip_manager_version"):
                 self.set_status(f"Manager-Update {info['tag']} verfügbar (übersprungen).")
@@ -4374,18 +4438,21 @@ class App(BaseTk):
         self.run_bg("Suche Manager-Update", lambda: check_self_update(token), done, failed)
 
     def offer_manager_update(self, info: dict, silent: bool):
-        frozen = is_frozen()
-        has_exe = self_update_asset(info) is not None
-        if frozen and has_exe:
+        frozen, ready = is_frozen(), update_ready(info)
+        if ready:
             hint = "Der Manager lädt die neue Version, beendet sich und startet automatisch neu."
+            ok_text = "Jetzt aktualisieren"
         elif frozen:
-            hint = "Die .exe für dieses Release wird gerade noch gebaut. Versuche es in ein paar Minuten erneut."
+            hint = ("GitHub baut die .exe für dieses Release gerade noch (meist 3–5 Minuten). Der Manager wartet "
+                    "im Hintergrund und installiert sie automatisch, sobald sie fertig ist – du kannst normal "
+                    "weiterarbeiten.")
+            ok_text = "Automatisch installieren, sobald fertig"
         else:
-            hint = "Du startest den Manager als Python-Skript. Die neue Version lädst du von der Release-Seite."
+            hint = "Du startest den Manager aus einer Git-Arbeitskopie – hol dir die neue Version mit „git pull“."
+            ok_text = "Release-Seite öffnen"
         item = {"repo": f"{APP_NAME}", "old": f"v{APP_VERSION}", "new": info["tag"],
                 "notes": info.get("notes", ""), "published": info.get("published", "")}
-        ok = UpdateDialog(self, [item], False, heading="Neue Manager-Version",
-                          ok_text="Jetzt aktualisieren" if frozen and has_exe else "Release-Seite öffnen",
+        ok = UpdateDialog(self, [item], False, heading="Neue Manager-Version", ok_text=ok_text,
                           cancel_text="Diese Version überspringen" if silent else "Später",
                           hint=hint).show()
         if not ok:
@@ -4393,10 +4460,50 @@ class App(BaseTk):
                 self.cfg["skip_manager_version"] = info["tag"]
                 save_config(self.cfg)
             return
-        if not (frozen and has_exe):
+        if ready:
+            self.install_manager_update(info)
+        elif frozen:
+            self.watch_manager_build(info["tag"])
+        else:
             self.open_link(info.get("page") or f"https://github.com/{UPDATE_REPO}/releases")
+
+    BUILD_POLL_MS = 90_000          # alle 90 s nachsehen …
+    BUILD_POLL_TRIES = 20           # … höchstens 30 Minuten lang
+
+    def watch_manager_build(self, tag: str, tries: int = 0):
+        """Wartet im Hintergrund, bis die .exe des Releases gebaut ist, und installiert sie dann automatisch."""
+        if tries == 0:
+            if self.watching_build == tag:
+                return                               # läuft schon
+            self.watching_build = tag
+            log.info("Manager-Update %s: warte auf den Build der .exe", tag)
+        if self.watching_build != tag:
             return
-        self.install_manager_update(info)
+        if tries >= self.BUILD_POLL_TRIES:
+            self.watching_build = ""
+            log.warning("Manager-Update %s: .exe nach %d Versuchen nicht fertig", tag, tries)
+            self.set_status(f"Die .exe für {tag} ist noch nicht fertig – später „Manager-Update suchen“.")
+            return
+        self.set_status(f"Manager-Update {tag} wird auf GitHub noch gebaut – wird automatisch installiert, "
+                        "sobald es fertig ist.")
+        token = self.cfg.get("github_token", "")
+
+        def done(info, err):
+            if self.watching_build != tag:
+                return
+            if err is None and info is None:         # Release zurückgezogen oder schon aktuell
+                self.watching_build = ""
+                return
+            if info and update_ready(info):
+                self.watching_build = ""
+                self.install_manager_update(info, automatic=True)
+                return
+            self.after(self.BUILD_POLL_MS, lambda: self.watch_manager_build(tag, tries + 1))
+
+        if tries == 0:
+            done(None, RuntimeError("erster Durchlauf"))   # die erste Prüfung kam gerade erst
+        else:
+            self.run_quiet(lambda: check_self_update(token), done)
 
     def install_manager_update(self, info: dict, automatic: bool = False):
         """Lädt die neue .exe, beendet den Manager und lässt sie per Skript einsetzen."""
@@ -4412,7 +4519,10 @@ class App(BaseTk):
                 self.after(2000, lambda: done(new_exe))
                 return
             try:
-                launch_replacer(new_exe)
+                if is_frozen():
+                    launch_replacer(new_exe)
+                else:
+                    apply_script_update(new_exe)
             except Exception as e:  # noqa
                 messagebox.showerror(APP_NAME, f"Update konnte nicht gestartet werden:\n{e}")
                 return
@@ -4429,7 +4539,8 @@ class App(BaseTk):
 
         label = (f"Neue Version {info['tag']} gefunden – wird installiert, der Manager startet gleich neu"
                  if automatic else f"Lade Manager {info['tag']}")
-        self.run_bg(label, lambda: download_self_update(info, token), done, failed)
+        fetch = download_self_update if is_frozen() else download_script_update
+        self.run_bg(label, lambda: fetch(info, token), done, failed)
 
     # ----- Drag & Drop ----------------------------------------------------- #
     def on_drop(self, event):
