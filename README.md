@@ -1,6 +1,6 @@
-# Forever Addon Manager
+# Leeroyzan
 
-A lightweight, personal addon manager for **World of Warcraft: Forever** (and other WoW versions), written in Python with a Tkinter GUI for Windows.
+A lightweight, personal addon manager for **World of Warcraft** – Forever, Classic and Retail – written in Python with a Tkinter GUI for Windows. Because updating addons should take one click, not a raid plan.
 
 > Hobby project – non-commercial, no ads, no telemetry. Not affiliated with Blizzard Entertainment or CurseForge.
 
@@ -14,8 +14,9 @@ A lightweight, personal addon manager for **World of Warcraft: Forever** (and ot
 - Addon sets: save groups of addons and switch between them with one click
 - Enable/disable addons, warn when WoW is running
 - WTF backups (manual and automatic before updates) with restore
-- Share addon selections with friends as `.faddons` packages
-- Drag & drop for ZIP and `.faddons` files (optional, via `tkinterdnd2`)
+- Share addon selections with friends as `.lzpack` packages
+- Share **download lists** (`.lzlist` file or a plain-text code that fits into Discord/SMS messages)
+- Drag & drop for ZIP, `.lzpack` and `.lzlist` files (optional, via `tkinterdnd2`)
 - Log file of all changes
 - Self-update from GitHub releases
 
@@ -24,12 +25,23 @@ A lightweight, personal addon manager for **World of Warcraft: Forever** (and ot
 Addons can be installed from CurseForge by pasting the project link (**Add → From CurseForge…**), and they are included in the normal update check. It uses the official CurseForge API and is designed to respect addon authors:
 
 - **No redistribution.** CurseForge files are never rehosted, mirrored or bundled. Every download is fetched directly from CurseForge by the user's own client.
-- **Shared packages contain references only.** For CurseForge projects, a `.faddons` package stores the project and file ID, never the files themselves. The recipient's client downloads the file from CurseForge or opens the project page.
+- **Shared packages contain references only.** For CurseForge projects, a `.lzpack` package stores the project and file ID, never the files themselves. The recipient's client downloads the file from CurseForge or opens the project page.
 - **`allowModDistribution` is respected.** If an author disables third-party distribution, the tool only links to the CurseForge project page.
 - **Attribution.** The project name, author and a link back to the CurseForge project page (where the author's donation options live) are shown in the details and after each install.
-- **Own API key per user.** Get a free key at <https://console.curseforge.com/> and paste it into the settings. It is stored only in the user's local config (`%APPDATA%\ForeverAddonManager\config.json`), never embedded in the source code or the built executable, and only ever sent to `api.curseforge.com`.
+- **Own API key per user.** Get a free key at <https://console.curseforge.com/> and paste it into the settings. It is stored only in the user's local config (`%APPDATA%\Leeroyzan\config.json`), never embedded in the source code or the built executable, and only ever sent to `api.curseforge.com`.
 - **Verified downloads.** Files are only fetched from CurseForge's CDN over HTTPS and checked against the SHA-1 hash published by the API.
+- **Blocked downloads stay blocked.** If an author disables third-party downloads, the manager does not work around it: it opens the normal CurseForge download page in your browser, you click download, and the manager installs the file from your download folder once it appears.
+- **Manually installed addons** can be linked to their CurseForge project (automatically via the `X-Curse-Project-ID` in the `.toc`, or by pasting the project link). Afterwards they are included in update checks like any other addon.
 - **Minimal traffic.** Update checks run on app start or on manual request only (one request per installed CurseForge addon).
+
+## Download lists
+
+A download list is the lightweight way to share many addons: it contains **only references** (CurseForge project/file IDs and GitHub `owner/repo` names) – no addon files, no paths, no personal data.
+
+- **Share:** select addons (or none for all) and click **Liste teilen…** (Teilen page, Add menu or the *Mehr* menu). You get a text code that can be split into messages of a chosen size – *Discord/Chat* (1800 characters), *Kurznachricht* (500) or *SMS* (150) – or saved as a small `.lzlist` file. A *readable list* with links can be copied as well. Optionally the exact CurseForge file versions and your addon sets are included.
+- **Import:** **Liste importieren…** accepts the pasted code (all parts, in any order; surrounding chat text and code-block backticks are ignored) or a `.lzlist` file, also via drag & drop. The manager shows what will be installed, skips addons you already have, and downloads the rest with *your own* CurseForge key. Downloads blocked by the author use the same browser-download flow as everywhere else.
+- **Safe by design:** the code is `LZ1:<part>/<total>:<data>` (compressed JSON, Base32 so it survives chat apps). Imported lists are strictly validated; only known CurseForge IDs and valid GitHub repo names are accepted, and the size is capped.
+- Addons without a download source (installed manually and not linked to CurseForge) cannot be listed – the dialog tells you which ones; use *Mit CurseForge verknüpfen* or a `.lzpack` package for those.
 
 ## Requirements
 
@@ -39,26 +51,26 @@ Addons can be installed from CurseForge by pasting the project link (**Add → F
 ## Running from source
 
 ```bat
-python forever_addon_manager.py
+python leeroyzan.py
 ```
 
 ## Building the executable
 
-Run `build_exe.bat`. It creates an isolated virtual environment, installs PyInstaller (and `tkinterdnd2` for drag & drop) and writes `dist\ForeverAddonManager.exe`.
+Run `build_exe.bat`. It creates an isolated virtual environment, installs PyInstaller (and `tkinterdnd2` for drag & drop) and writes `dist\Leeroyzan.exe`.
 
 ## Releases and auto-update
 
-The manager checks this repository's latest GitHub release on start (can be turned off) and offers to update itself. It downloads `ForeverAddonManager.exe`, verifies it against `ForeverAddonManager.exe.sha256`, replaces itself and restarts.
+The manager checks this repository's latest GitHub release on start (can be turned off) and offers to update itself. It downloads `Leeroyzan.exe`, verifies it against `Leeroyzan.exe.sha256`, replaces itself and restarts.
 
 Publishing a new version:
 
-1. Set `APP_VERSION` in `forever_addon_manager.py` (e.g. `2.3.0`) and commit.
-2. Create a release with the tag `v2.3.0` (Releases → Draft a new release → Publish).
+1. Set `APP_VERSION` in `leeroyzan.py` (e.g. `1.0.1`) and commit.
+2. Create a release with the tag `v1.0.1` (Releases → Draft a new release → Publish).
 3. The *Build release exe* workflow builds the `.exe` on a Windows runner and attaches it plus its SHA-256 checksum to the release (takes a few minutes).
 
 ## Where data is stored
 
-Configuration, backups and the log file are stored in `%APPDATA%\ForeverAddonManager`. The manager only reads and writes files inside the WoW `Interface\AddOns`, `Interface\AddOns_Disabled` and `WTF` folders – it never modifies the game client.
+Configuration, backups and the log file are stored in `%APPDATA%\Leeroyzan`. The manager only reads and writes files inside the WoW `Interface\AddOns`, `Interface\AddOns_Disabled` and `WTF` folders – it never modifies the game client.
 
 ## License
 

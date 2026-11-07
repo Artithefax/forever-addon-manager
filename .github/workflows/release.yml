@@ -1,4 +1,4 @@
-# Baut ForeverAddonManager.exe, sobald auf GitHub ein Release veröffentlicht wird,
+# Baut Leeroyzan.exe, sobald auf GitHub ein Release veröffentlicht wird,
 # und hängt die .exe samt SHA-256-Prüfsumme an das Release an.
 # Der Auto-Updater im Manager lädt genau diese beiden Dateien.
 
@@ -34,7 +34,7 @@ jobs:
       - name: Versionsnummer prüfen
         shell: pwsh
         run: |
-          $line = Select-String -Path forever_addon_manager.py -Pattern '^APP_VERSION = "(.+)"' | Select-Object -First 1
+          $line = Select-String -Path leeroyzan.py -Pattern '^APP_VERSION = "(.+)"' | Select-Object -First 1
           $code = $line.Matches[0].Groups[1].Value
           $tag  = $env:TAG -replace '^v', ''
           Write-Host "APP_VERSION im Code: $code  /  Release-Tag: $tag"
@@ -50,20 +50,20 @@ jobs:
         shell: pwsh
         run: |
           $icon = @()
-          if (Test-Path forever_addon_manager.ico) { $icon = @('--icon', 'forever_addon_manager.ico') }
+          if (Test-Path leeroyzan.ico) { $icon = @('--icon', 'leeroyzan.ico') }
           pyinstaller --noconfirm --clean --onefile --windowed `
-            --name ForeverAddonManager @icon `
+            --name Leeroyzan @icon `
             --collect-all tkinterdnd2 `
-            forever_addon_manager.py
+            leeroyzan.py
 
       - name: Prüfsumme erzeugen
         shell: pwsh
         run: |
-          $hash = (Get-FileHash dist\ForeverAddonManager.exe -Algorithm SHA256).Hash.ToLower()
-          "$hash  ForeverAddonManager.exe" | Out-File -Encoding ascii -NoNewline dist\ForeverAddonManager.exe.sha256
+          $hash = (Get-FileHash dist\Leeroyzan.exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  Leeroyzan.exe" | Out-File -Encoding ascii -NoNewline dist\Leeroyzan.exe.sha256
           Write-Host "SHA-256: $hash"
 
       - name: An Release anhängen
         shell: pwsh
         run: |
-          gh release upload $env:TAG dist\ForeverAddonManager.exe dist\ForeverAddonManager.exe.sha256 --clobber
+          gh release upload $env:TAG dist\Leeroyzan.exe dist\Leeroyzan.exe.sha256 --clobber

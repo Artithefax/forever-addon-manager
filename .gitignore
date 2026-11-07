@@ -12,7 +12,8 @@ venv/
 
 # Local data – never commit personal config, API keys, backups or exports
 config.json
-*.faddons
+*.lzpack
+*.lzlist
 backups/
 *.log
 .env

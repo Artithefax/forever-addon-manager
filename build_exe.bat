@@ -1,6 +1,6 @@
 @echo off
 REM ==========================================================
-REM  Baut ForeverAddonManager.exe aus forever_addon_manager.py
+REM  Baut Leeroyzan.exe aus leeroyzan.py
 REM  Voraussetzung: Python 3.10+ (python.org, "Add to PATH")
 REM  Diese Datei in denselben Ordner wie das .py legen und
 REM  doppelklicken.
@@ -28,8 +28,8 @@ if not defined PY (
 )
 echo Verwende: %PY%
 
-if not exist forever_addon_manager.py (
-    echo [FEHLER] forever_addon_manager.py liegt nicht in diesem Ordner.
+if not exist leeroyzan.py (
+    echo [FEHLER] leeroyzan.py liegt nicht in diesem Ordner.
     pause
     exit /b 1
 )
@@ -48,22 +48,22 @@ if defined DND_OPT (echo Drag ^& Drop: aktiviert) else (echo [Hinweis] tkinterdn
 
 echo [3/3] Baue EXE ...
 set "ICON_OPT="
-if exist forever_addon_manager.ico (
-    set "ICON_OPT=--icon forever_addon_manager.ico"
-    echo Verwende Icon: forever_addon_manager.ico
+if exist leeroyzan.ico (
+    set "ICON_OPT=--icon leeroyzan.ico"
+    echo Verwende Icon: leeroyzan.ico
 ) else (
-    echo [Hinweis] forever_addon_manager.ico nicht gefunden - baue ohne eigenes Icon.
+    echo [Hinweis] leeroyzan.ico nicht gefunden - baue ohne eigenes Icon.
 )
 pyinstaller --noconfirm --clean --onefile --windowed ^
-    --name ForeverAddonManager %ICON_OPT% %DND_OPT% ^
-    forever_addon_manager.py || goto :fail
+    --name Leeroyzan %ICON_OPT% %DND_OPT% ^
+    leeroyzan.py || goto :fail
 
 call deactivate
 rmdir /s /q build 2>nul
-del /q ForeverAddonManager.spec 2>nul
+del /q Leeroyzan.spec 2>nul
 
 echo.
-echo Fertig: %~dp0dist\ForeverAddonManager.exe
+echo Fertig: %~dp0dist\Leeroyzan.exe
 explorer dist
 pause
 exit /b 0

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Forever Addon Manager
+Leeroyzan
 Ein schlanker Addon-Manager mit GUI für World of Warcraft (Forever, Classic, Retail).
 
 Funktionen:
@@ -12,7 +12,8 @@ Funktionen:
   - Addons von CurseForge installieren und aktualisieren (eigener API-Key, nur lokal gespeichert)
   - Addon-Sets: Gruppen von Addons speichern und mit einem Klick umschalten
   - Addons deaktivieren/aktivieren (Verschieben nach Interface/AddOns_Disabled)
-  - Addon-Pakete (.faddons) exportieren und importieren, um Addons zu teilen
+  - Addon-Pakete (.lzpack) exportieren und importieren, um Addons zu teilen
+  - Download-Listen (.lzlist oder Textcode für Discord/SMS) teilen: nur Verweise, keine Dateien
   - WTF-Ordner sichern und wiederherstellen, automatisches Backup vor Updates
   - Warnung, wenn WoW läuft; Drag & Drop (mit tkinterdnd2); Logdatei
 
@@ -20,6 +21,7 @@ Läuft mit der Python-Standardbibliothek; tkinterdnd2 ist optional (Drag & Drop)
 Arbeitet ausschließlich mit Dateien im Addon-/WTF-Ordner – kein Eingriff in den Spielclient.
 """
 
+import base64
 import hashlib
 import html
 import json
@@ -32,12 +34,14 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import threading
 import urllib.error
 import urllib.parse
 import urllib.request
 import webbrowser
 import zipfile
+import zlib
 from datetime import datetime
 from pathlib import Path
 
@@ -53,19 +57,19 @@ except Exception:                      # noqa – Paket fehlt oder Tk-Erweiterun
     DND_FILES = None
     HAS_DND = False
 
-APP_NAME = "Forever Addon Manager"
-APP_VERSION = "2.5.0"
-USER_AGENT = f"ForeverAddonManager/{APP_VERSION}"
+APP_NAME = "Leeroyzan"
+APP_VERSION = "1.0.0"
+USER_AGENT = f"Leeroyzan/{APP_VERSION}"
 
 # Selbst-Update über GitHub-Releases dieses Repos
-UPDATE_REPO = "Artithefax/forever-addon-manager"
-EXE_ASSET = "ForeverAddonManager.exe"
+UPDATE_REPO = "Artithefax/leeroyzan"
+EXE_ASSET = "Leeroyzan.exe"
 
 # Link-Buttons in der Kopfzeile (Text, Adresse) – hier einfach anpassbar
 HEADER_LINKS = [
     ("CurseForge", "https://www.curseforge.com/wow"),
     ("GitHub", "https://github.com/search?q=wow+forever+addon&type=repositories&s=updated"),
-    ("Projektseite", "https://github.com/Artithefax/forever-addon-manager"),
+    ("Projektseite", "https://github.com/Artithefax/leeroyzan"),
 ]
 
 # --------------------------------------------------------------------------- #
@@ -74,7 +78,7 @@ HEADER_LINKS = [
 
 def config_dir() -> Path:
     base = os.environ.get("APPDATA") or str(Path.home() / ".config")
-    d = Path(base) / "ForeverAddonManager"
+    d = Path(base) / "Leeroyzan"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -84,7 +88,7 @@ BACKUP_DIR = config_dir() / "backups"
 LOG_FILE = config_dir() / "manager.log"
 AUTO_BACKUPS_KEEP = 10
 
-log = logging.getLogger("fam")
+log = logging.getLogger("leeroyzan")
 
 
 def setup_logging() -> None:
@@ -109,6 +113,7 @@ def load_config() -> dict:
     cfg.setdefault("sources", {})   # flavor -> {source_id: {...}}
     cfg.setdefault("github_token", "")
     cfg.setdefault("curseforge_key", "")   # eigener API-Key – bleibt nur in dieser Datei
+    cfg.setdefault("download_dir", "")     # Browser-Download-Ordner (leer = ~/Downloads)
     cfg.setdefault("sets", {})      # flavor -> {setname: [ordner, ...]}
     cfg.setdefault("auto_backup", True)
     cfg.setdefault("check_on_start", True)
@@ -475,10 +480,10 @@ def restore_backup(backup: Path, root: str, flavor: str) -> Path | None:
 
 
 # --------------------------------------------------------------------------- #
-# Addon-Pakete zum Teilen (.faddons = ZIP mit manifest.json + AddOns/<Ordner>/...)
+# Addon-Pakete zum Teilen (.lzpack = ZIP mit manifest.json + AddOns/<Ordner>/...)
 # --------------------------------------------------------------------------- #
 
-PACK_EXT = ".faddons"
+PACK_EXT = ".lzpack"
 PACK_FORMAT = 1
 PACK_MAX_BYTES = 1024 ** 3          # Schutz gegen übergroße/manipulierte Pakete (1 GB entpackt)
 SAFE_NAME_RE = re.compile(r"^[\w .+\-!()&'\[\]]+$")
@@ -489,7 +494,7 @@ def valid_addon_name(name: str) -> bool:
 
 
 def export_pack(addons: list, sources: dict, flavor: str, dest: Path) -> Path:
-    """Schreibt die gewählten Addons inkl. Quellinfos in eine .faddons-Datei."""
+    """Schreibt die gewählten Addons inkl. Quellinfos in eine .lzpack-Datei."""
     entries = []
     for a in addons:
         entry = {"folder": a.name, "title": a.title, "version": a.version, "source": None}
@@ -703,13 +708,17 @@ class ManualDownload(Exception):
         self.reason = reason
 
 
-def cf_request(path: str, key: str, params: dict | None = None) -> dict:
+def cf_request(path: str, key: str, params: dict | None = None, body: dict | None = None) -> dict:
     key = (key or "").strip()
     if not key:
         raise CFError("Kein CurseForge-API-Key hinterlegt (Einstellungen).")
     url = CF_API + path + ("?" + urllib.parse.urlencode(params) if params else "")
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json",
-                                               "x-api-key": key})
+    headers = {"User-Agent": USER_AGENT, "Accept": "application/json", "x-api-key": key}
+    data = None
+    if body is not None:
+        data = json.dumps(body).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST" if body is not None else "GET")
     try:
         with urllib.request.urlopen(req, timeout=30) as r:
             return json.loads(r.read().decode("utf-8"))
@@ -750,6 +759,56 @@ def cf_get_mod(ref, key: str) -> dict:
     if not mod or mod.get("gameId", CF_GAME_ID) != CF_GAME_ID:
         raise CFError(f"Kein WoW-Addon „{ref}“ bei CurseForge gefunden.")
     return mod
+
+
+def cf_get_mods(ids: list[int], key: str) -> list[dict]:
+    """Mehrere Projekte mit einer einzigen Anfrage holen."""
+    return cf_request("/mods", key, body={"modIds": list(ids)}).get("data") or []
+
+
+def toc_curse_id(meta: dict) -> int | None:
+    """Projekt-ID, die der CurseForge-Packager in viele .toc-Dateien schreibt."""
+    raw = str(meta.get("x-curse-project-id", "")).strip()
+    return int(raw) if raw.isdigit() else None
+
+
+def cf_match_installed(versions: list[str], assets: list[dict]) -> dict | None:
+    """Findet die CurseForge-Datei, die zur installierten .toc-Version passt (oder None)."""
+    def find(v: str):
+        pat = re.compile(r"(?<![\d.])v?" + re.escape(v) + r"(?!\d|\.\d)", re.IGNORECASE)
+        return [a for a in assets if pat.search(a["name"]) or pat.search(a.get("file_name", ""))]
+
+    for ver in versions:
+        v = (ver or "").strip().lstrip("vV")
+        if not v or v.startswith("@") or "project-version" in v:
+            continue
+        cands = find(v)
+        if not cands:
+            m = re.match(r"(\d+(?:\.\d+)+)", v)
+            if m and m.group(1) != v:
+                cands = find(m.group(1))
+        if cands:
+            return sorted(cands, key=lambda a: a["date"], reverse=True)[0]
+    return None
+
+
+def cf_download_url(info: dict, asset: dict) -> str:
+    """Die normale Download-Adresse der CurseForge-Webseite (wird im Browser des Nutzers geöffnet)."""
+    slug = info.get("slug", "")
+    if slug and asset.get("file_id"):
+        return f"https://www.curseforge.com/wow/addons/{slug}/download/{asset['file_id']}"
+    return info.get("page", "").rstrip("/") + "/files"
+
+
+def cf_queue_item(info: dict, asset: dict) -> dict:
+    return {"name": info.get("repo", "?"), "info": info, "asset": asset, "page": cf_download_url(info, asset)}
+
+
+def zip_name_matches(name: str, wanted: str) -> bool:
+    """Gleicher Dateiname, auch wenn der Browser „ (1)“ angehängt hat."""
+    def stem(n: str) -> str:
+        return re.sub(r"[\s_]*\(\d+\)$", "", Path(n).stem).lower().replace(" ", "_")
+    return bool(wanted) and stem(name) == stem(wanted)
 
 
 def cf_files(mod_id: int, key: str) -> list[dict]:
@@ -854,6 +913,7 @@ def cf_check(src: dict, key: str, flavor: str, game_ver: str) -> dict:
     info = cf_info(cf_mod_from_source(src), files, flavor, game_ver, src)
     if not info["best"]:
         raise CFError("keine passende Datei gefunden")
+    info["allow_dl"] = bool(info["best"].get("url"))     # ohne Download-Adresse: Autor hat es gesperrt
     if info["tag"] != src.get("tag"):
         info["notes"] = cf_changelog(src["mod_id"], info["best"]["file_id"], key)
     return info
@@ -899,6 +959,152 @@ def cf_pack_item(src: dict, key: str, flavor: str, game_ver: str) -> dict:
     if not info["best"]:
         raise CFError("keine passende Datei gefunden")
     return info
+
+# --------------------------------------------------------------------------- #
+# Download-Listen: nur Verweise (CurseForge-/GitHub-Quellen), als Datei oder als Textcode
+# --------------------------------------------------------------------------- #
+
+LIST_EXT = ".lzlist"
+LIST_PREFIX = "LZ1"
+LIST_FORMAT = "leeroyzan-list"
+LIST_MAX_ENTRIES = 500
+LIST_PART_SIZES = {"Discord / Chat (1800 Zeichen)": 1800, "Kurznachricht (500 Zeichen)": 500,
+                   "SMS (150 Zeichen)": 150}
+
+
+class ListError(ValueError):
+    pass
+
+
+def build_list(addons: list, sources: dict, flavor: str, sets: dict,
+               exact: bool = True, with_sets: bool = True) -> tuple[dict, list[str]]:
+    """Baut die Liste aus den gewählten Addons. Gibt (Nutzdaten, Namen ohne Quelle) zurück."""
+    names = {a.name for a in addons}
+    entries, linked = [], set()
+    for sid, src in sources.items():
+        folders = set(src.get("folders", []))
+        if not folders & names:
+            continue
+        linked |= folders
+        if src.get("type") == "curseforge":
+            if type(src.get("mod_id")) is not int:
+                continue
+            e = {"t": "c", "i": src["mod_id"], "n": src.get("name", ""), "s": src.get("slug", "")}
+            if exact and isinstance(src.get("file_id"), int):
+                e["f"] = src["file_id"]
+        else:
+            e = {"t": "g", "r": sid}
+            if src.get("asset_key"):
+                e["k"] = src["asset_key"]
+        entries.append(e)
+    payload = {"v": 1, "fl": flavor, "a": entries}
+    if with_sets:
+        picked = {n: sorted(m for m in members if m in names) for n, members in sets.items()}
+        picked = {n: m for n, m in picked.items() if m}
+        if picked:
+            payload["s"] = picked
+    return payload, sorted(names - linked, key=str.lower)
+
+
+def list_to_code(payload: dict, part_len: int = 1800) -> list[str]:
+    """Komprimiert die Liste und zerlegt sie in Textteile 'LZ1:1/3:…' (Großbuchstaben + Ziffern)."""
+    raw = zlib.compress(json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8"), 9)
+    body = base64.b32encode(raw).decode("ascii").rstrip("=")
+    n = 1
+    while True:
+        room = max(20, part_len - len(f"{LIST_PREFIX}:{n}/{n}:"))
+        need = max(1, -(-len(body) // room))
+        if need <= n:
+            break
+        n = need
+    return [f"{LIST_PREFIX}:{i + 1}/{n}:{body[i * room:(i + 1) * room]}" for i in range(n)]
+
+
+def list_to_file_text(payload: dict) -> str:
+    doc = {"format": LIST_FORMAT, "created": datetime.now().isoformat(timespec="seconds"), **payload}
+    return json.dumps(doc, ensure_ascii=False, indent=1)
+
+
+def list_readable(payload: dict) -> str:
+    lines = [f"Addon-Liste für WoW {(payload.get('fl') or '').strip('_')} – {len(payload['a'])} Addons (Leeroyzan)"]
+    for e in payload["a"]:
+        if e["t"] == "c":
+            url = (f"https://www.curseforge.com/wow/addons/{e['s']}" if e.get("s")
+                   else f"https://www.curseforge.com/projects/{e['i']}")
+            lines.append(f"• {e.get('n') or e.get('s') or e['i']} – {url}")
+        else:
+            lines.append(f"• {e['r'].split('/')[-1]} – https://github.com/{e['r']}")
+    return "\n".join(lines)
+
+
+def _decode_code(text: str) -> dict:
+    parts: dict[int, str] = {}
+    total = 0
+    for m in re.finditer(rf"{LIST_PREFIX}:(\d+)/(\d+):([A-Za-z2-7]+)", text, re.I):
+        idx, tot = int(m.group(1)), int(m.group(2))
+        if tot != total and total:
+            raise ListError("Die Teile gehören zu verschiedenen Listen.")
+        total = tot
+        parts[idx] = m.group(3).upper()
+    if not parts:
+        raise ListError("Keine Download-Liste erkannt. Der Code beginnt mit „LZ1:“.")
+    missing = [i for i in range(1, total + 1) if i not in parts]
+    if missing:
+        raise ListError("Es fehlt Teil " + ", ".join(map(str, missing)) + f" von {total}.")
+    body = "".join(parts[i] for i in range(1, total + 1))
+    try:
+        d = zlib.decompressobj()
+        raw = d.decompress(base64.b32decode(body + "=" * (-len(body) % 8)), 2_000_000)
+        if d.unconsumed_tail:
+            raise ListError("Die Liste ist ungewöhnlich groß und wird nicht geladen.")
+        return json.loads(raw.decode("utf-8"))
+    except ListError:
+        raise
+    except Exception:  # noqa – beschädigter Code
+        raise ListError("Der Code ist unvollständig oder beschädigt. Bitte alle Teile erneut kopieren.") from None
+
+
+def parse_list_text(text: str) -> dict:
+    """Liest eine Liste aus Dateiinhalt (JSON) oder Chat-Text (LZ1-Code) und prüft sie streng."""
+    text = text.replace("`", "").strip()
+    try:
+        data = json.loads(text) if text.startswith("{") else _decode_code(text)
+    except json.JSONDecodeError:
+        raise ListError("Die Datei ist keine gültige Download-Liste.") from None
+    if not isinstance(data, dict) or data.get("v") != 1 or not isinstance(data.get("a"), list):
+        raise ListError("Unbekanntes oder zu neues Listenformat – bitte den Manager aktualisieren.")
+    if len(data["a"]) > LIST_MAX_ENTRIES:
+        raise ListError("Die Liste ist zu lang.")
+    clean = []
+    for e in data["a"]:
+        if not isinstance(e, dict):
+            continue
+        if e.get("t") == "c" and type(e.get("i")) is int and e["i"] > 0:
+            item = {"t": "c", "i": e["i"], "n": str(e.get("n", ""))[:80],
+                    "s": re.sub(r"[^a-z0-9-]", "", str(e.get("s", "")).lower())[:80]}
+            if type(e.get("f")) is int and e["f"] > 0:
+                item["f"] = e["f"]
+            clean.append(item)
+        elif e.get("t") == "g":
+            try:
+                item = {"t": "g", "r": parse_repo(str(e.get("r", "")))}
+            except ValueError:
+                continue
+            if e.get("k"):
+                item["k"] = str(e["k"])[:100]
+            clean.append(item)
+    if not clean:
+        raise ListError("Die Liste enthält keine installierbaren Addons.")
+    sets: dict[str, list[str]] = {}
+    raw_sets = data.get("s") if isinstance(data.get("s"), dict) else {}
+    bad = r'[\x00-\x1f\\/:*?"<>|]'
+    for name, members in list(raw_sets.items())[:50]:
+        if isinstance(members, list) and 1 <= len(str(name)) <= 64 and not re.search(r"[\x00-\x1f]", str(name)):
+            ok = [m for m in members[:300] if isinstance(m, str) and 1 <= len(m) <= 100
+                  and not re.search(bad, m) and not m.startswith(".")]
+            if ok:
+                sets[str(name)] = ok
+    return {"fl": str(data.get("fl", ""))[:60], "a": clean, "s": sets}
 
 # --------------------------------------------------------------------------- #
 # Gruppierung zusammengehöriger Addon-Ordner
@@ -1038,23 +1244,28 @@ def self_update_asset(info: dict) -> dict | None:
     return None
 
 
+def new_exe_path() -> Path:
+    exe = Path(sys.executable)
+    return exe.with_name(exe.stem + ".new.exe")
+
+
 def download_self_update(info: dict, token: str = "") -> Path:
     """Lädt die neue .exe neben die laufende und prüft sie (MZ-Header, ggf. SHA-256)."""
     asset = self_update_asset(info)
     if not asset:
-        raise ValueError("Das Release enthält noch keine ForeverAddonManager.exe.")
+        raise ValueError(f"Das Release enthält noch keine {EXE_ASSET}.")
     blob = http_get(asset["url"], token, accept="application/octet-stream")
     if len(blob) < 1_000_000 or blob[:2] != b"MZ":
         raise ValueError("Die heruntergeladene Datei ist keine gültige Windows-Anwendung.")
     sha_asset = next((a for a in info.get("all_assets", [])
-                      if a["name"].lower() == (EXE_ASSET + ".sha256").lower()), None)
+                      if a["name"].lower() == (asset["name"] + ".sha256").lower()), None)
     if sha_asset:
         expected = http_get(sha_asset["url"], token, accept="application/octet-stream")
         expected = expected.decode("ascii", "replace").split()[0].strip().lower()
         actual = hashlib.sha256(blob).hexdigest()
         if expected != actual:
             raise ValueError("Prüfsumme stimmt nicht – Download beschädigt. Bitte später erneut versuchen.")
-    target = Path(sys.executable).with_name("ForeverAddonManager.new.exe")
+    target = new_exe_path()
     try:
         target.write_bytes(blob)
     except PermissionError:
@@ -1066,7 +1277,7 @@ def download_self_update(info: dict, token: str = "") -> Path:
 def launch_replacer(new_exe: Path) -> None:
     """Startet ein kleines Skript, das nach dem Beenden die alte .exe ersetzt und neu startet."""
     old_exe = Path(sys.executable)
-    bat = Path(tempfile.gettempdir()) / f"fam_update_{os.getpid()}.bat"
+    bat = Path(tempfile.gettempdir()) / f"leeroyzan_update_{os.getpid()}.bat"
     script = f"""@echo off
 chcp 65001 >nul
 set "PID={os.getpid()}"
@@ -1091,7 +1302,7 @@ start "" "{old_exe}"
 def cleanup_self_update() -> None:
     """Räumt ein liegengebliebenes .new.exe nach einem abgebrochenen Update weg."""
     if is_frozen():
-        Path(sys.executable).with_name("ForeverAddonManager.new.exe").unlink(missing_ok=True)
+        new_exe_path().unlink(missing_ok=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -1156,6 +1367,7 @@ def apply_theme(root) -> dict:
         "title": pick_font(root, serif, 22, "bold"),
         "sub":   pick_font(root, serif, 10, "italic"),
         "page":  pick_font(root, serif, 18, "bold"),
+        "side":  pick_font(root, serif, 14, "bold"),
         "hero":  pick_font(root, serif, 26, "bold"),
         "play":  pick_font(root, serif, 15, "bold"),
         "tile":  pick_font(root, serif, 20, "bold"),
@@ -1336,57 +1548,39 @@ def apply_theme(root) -> dict:
 
 
 def draw_emblem(cv, x0: int, y0: int, s: int) -> None:
-    """Eigenes Wappen: Schild mit gekreuzten Schwertern und Edelstein."""
+    """Eigenes Wappen: Schild mit schräg nach vorn stürmendem L und Fahrtlinien."""
     t = THEME
 
     def p(fx, fy):
         return x0 + fx * s, y0 + fy * s
 
+    def lean(fx, fy):                      # Neigung nach vorn
+        return p(fx + 0.18 * (.5 - fy), fy)
+
     shield = [p(.12, .10), p(.50, .02), p(.88, .10), p(.88, .48),
               p(.72, .78), p(.50, .96), p(.28, .78), p(.12, .48)]
-    flat = [c for pt in shield for c in pt]
-    cv.create_polygon(flat, fill=t["crest"], outline=t["gold"], width=max(2, s // 24))
+    cv.create_polygon([c for pt in shield for c in pt], fill=t["crest"], outline=t["gold"],
+                      width=max(2, s // 24))
     inner = [p(.20, .16), p(.50, .10), p(.80, .16), p(.80, .47),
              p(.67, .72), p(.50, .87), p(.33, .72), p(.20, .47)]
     cv.create_polygon([c for pt in inner for c in pt], fill="", outline=t["border"],
                       width=max(1, s // 40))
-    w = max(2, s // 16)
-    for (ax, ay, bx, by, gx1, gy1, gx2, gy2) in (
-            (.26, .22, .74, .74, .62, .70, .74, .58),
-            (.74, .22, .26, .74, .26, .58, .38, .70)):
-        cv.create_line(*p(ax, ay), *p(bx, by), fill=t["text"], width=w, capstyle="round")
-        cv.create_line(*p(gx1, gy1), *p(gx2, gy2), fill=t["gold"], width=w, capstyle="round")
-    r = s * .07
-    cx, cy = p(.50, .44)
-    cv.create_oval(cx - r, cy - r, cx + r, cy + r, fill=t["gold"], outline=t["gold_deep"])
+    letter = [(.36, .24), (.50, .24), (.50, .62), (.70, .62), (.70, .74), (.36, .74)]
+    cv.create_polygon([c for fx, fy in letter for c in lean(fx, fy)], fill=t["gold"],
+                      outline=t["gold_deep"], width=max(1, s // 60))
+    for fy, ln in ((.36, .12), (.48, .16), (.60, .12)):
+        cv.create_line(*lean(.33 - ln, fy), *lean(.33, fy), fill=t["text"],
+                       width=max(2, s // 28), capstyle="round")
+
+
+ICON_PNG = (
+    "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"
+)
 
 
 def make_icon(root, n: int = 32):
-    """Fenstersymbol als Pixelgrafik (ohne Zusatzbibliotheken)."""
-    t = THEME
-    img = tk.PhotoImage(master=root, width=n, height=n)
-    mid = (n - 1) / 2
-    for y in range(n):
-        fy = y / (n - 1)
-        hw = (n * .40) if fy < .5 else (n * .40) * max(0.0, (1 - fy) / .5)
-        row = []
-        for x in range(n):
-            dx = abs(x - mid)
-            if dx > hw or fy < .04:
-                row.append(None)
-            elif dx > hw - 2 or fy < .10:
-                row.append(t["gold"])
-            elif abs((x - mid) - (y - n * .48)) < 1.2 or abs((x - mid) + (y - n * .48)) < 1.2:
-                row.append(t["text"])
-            else:
-                row.append(t["crest"])
-        for x, c in enumerate(row):
-            if c is None:
-                img.put(t["header"], (x, y))
-                img.transparency_set(x, y, True)
-            else:
-                img.put(c, (x, y))
-    return img
+    """Fenstersymbol aus dem eingebetteten PNG (L im Schild)."""
+    return tk.PhotoImage(master=root, data=ICON_PNG)
 
 
 # --------------------------------------------------------------------------- #
@@ -1494,6 +1688,217 @@ class AssetDialog(Dialog):
         sel = self.lb.curselection()
         if sel:
             self.result = self.assets[sel[0]]
+            self.destroy()
+
+
+class DownloadWatchDialog(Dialog):
+    """Wartet, bis der Nutzer eine vom Autor gesperrte Datei im Browser geladen hat, und installiert sie."""
+
+    POLL_MS = 1000
+
+    def __init__(self, parent, item: dict, pos: int, total: int, watch_dir: Path, root: str, flavor: str):
+        super().__init__(parent, APP_NAME, "Download abwarten", 640, 430)
+        self.item, self.root_path, self.flavor, self.watch_dir = item, root, flavor, watch_dir
+        self.start = time.time()
+        self.sizes: dict[str, int] = {}
+        self.bad: set[str] = set()
+        self.alive = True
+        self._job = None
+        asset = item["asset"]
+        ttk.Label(self.body, text=f"{pos} von {total}  ·  {item['name']}",
+                  font=parent.fonts["bold"]).pack(anchor="w")
+        ttk.Label(self.body, wraplength=590, justify="left", padding=(0, 8, 0, 8), text=(
+            "Der Autor erlaubt keinen Download über Programme wie diesen. Der Manager hat die "
+            "Download-Seite im Browser geöffnet – lade dort die Datei\n\n"
+            f"      {asset.get('file_name') or asset['name']}\n\n"
+            "Sobald sie in diesem Ordner liegt, installiert der Manager sie automatisch:\n\n"
+            f"      {watch_dir}")).pack(anchor="w")
+        self.state_var = tk.StringVar(value="Warte auf den Download …")
+        ttk.Label(self.body, textvariable=self.state_var, wraplength=590).pack(anchor="w", pady=(6, 6))
+        self.bar = ttk.Progressbar(self.body, mode="indeterminate")
+        self.bar.pack(fill="x")
+        self.bar.start(15)
+        self.add_button("Alle abbrechen", self.cancel)
+        self.add_button("Überspringen", self.skip)
+        self.add_button("Datei wählen…", self.pick)
+        self.add_button("Seite erneut öffnen", lambda: parent.open_link(item["page"]))
+        self._job = self.after(self.POLL_MS, self.poll)
+
+    def destroy(self):
+        self.alive = False
+        if self._job:
+            try:
+                self.after_cancel(self._job)
+            except tk.TclError:
+                pass
+        super().destroy()
+
+    def skip(self):
+        self.result = ("skip",)
+        self.destroy()
+
+    def find(self) -> Path | None:
+        want = self.item["asset"].get("file_name", "")
+        try:
+            files = list(self.watch_dir.glob("*.zip"))
+        except OSError:
+            return None
+        for f in files:
+            if str(f) in self.bad or not zip_name_matches(f.name, want):
+                continue
+            try:
+                st = f.stat()
+            except OSError:
+                continue
+            if st.st_mtime < self.start - 15:
+                continue                       # alte Datei von früher
+            prev = self.sizes.get(str(f))
+            self.sizes[str(f)] = st.st_size
+            if st.st_size > 0 and prev == st.st_size:      # Größe unverändert -> Download fertig
+                return f
+        return None
+
+    def install(self, path: Path):
+        try:
+            folders = install_zip(path, self.root_path, self.flavor)
+        except Exception as e:  # noqa
+            self.bad.add(str(path))
+            self.state_var.set(f"{path.name}: {e}")
+            return
+        self.result = ("ok", folders, path)
+        self.destroy()
+
+    def poll(self):
+        if not self.alive:
+            return
+        found = self.find()
+        if found:
+            self.state_var.set(f"Gefunden: {found.name} – installiere …")
+            self.install(found)
+        if self.alive:
+            self._job = self.after(self.POLL_MS, self.poll)
+
+    def pick(self):
+        f = filedialog.askopenfilename(parent=self, title="Heruntergeladene ZIP wählen",
+                                       initialdir=str(self.watch_dir), filetypes=[("ZIP-Archive", "*.zip")])
+        if f:
+            self.install(Path(f))
+
+
+class ShareListDialog(Dialog):
+    """Download-Liste erzeugen: als Textcode (in Teilen für Discord/SMS) oder als Datei."""
+
+    def __init__(self, parent, addons: list, unlinked: list[str]):
+        super().__init__(parent, APP_NAME, "Download-Liste teilen", 720, 640)
+        self.addons, self.unlinked = addons, unlinked
+        self.payload: dict = {}
+        self.parts: list[str] = []
+        self.exact = tk.BooleanVar(value=True)
+        self.with_sets = tk.BooleanVar(value=bool(parent.sets()))
+        self.size_var = tk.StringVar(value=next(iter(LIST_PART_SIZES)))
+        self.info_var = tk.StringVar()
+        ttk.Label(self.body, textvariable=self.info_var, wraplength=670, justify="left").pack(anchor="w")
+        opts = ttk.Frame(self.body)
+        opts.pack(fill="x", pady=(10, 0))
+        ttk.Checkbutton(opts, text="Genau meine Versionen mitgeben (CurseForge)", variable=self.exact,
+                        style="Plain.TCheckbutton", command=self.rebuild).pack(anchor="w")
+        if parent.sets():
+            ttk.Checkbutton(opts, text="Meine Addon-Sets mitsenden", variable=self.with_sets,
+                            style="Plain.TCheckbutton", command=self.rebuild).pack(anchor="w", pady=(4, 0))
+        row = ttk.Frame(self.body)
+        row.pack(fill="x", pady=(10, 6))
+        ttk.Label(row, text="Nachrichtenlänge").pack(side="left", padx=(0, 8))
+        cb = ttk.Combobox(row, textvariable=self.size_var, state="readonly", width=30,
+                          values=list(LIST_PART_SIZES))
+        cb.pack(side="left")
+        cb.bind("<<ComboboxSelected>>", lambda e: self.rebuild())
+        self.count_var = tk.StringVar()
+        ttk.Label(row, textvariable=self.count_var).pack(side="right")
+        self.txt = self.text_box("")
+        self.add_button("Schließen", self.cancel)
+        self.add_button("Als Datei speichern…", self.save_file)
+        self.add_button("Lesbare Liste kopieren", self.copy_readable)
+        self.add_button("Alle Teile kopieren", self.copy_all, primary=True)
+        self.rebuild()
+
+    def rebuild(self):
+        p = self.parent
+        self.payload, _ = build_list(self.addons, p.sources(), p.flavor, p.sets(),
+                                     self.exact.get(), self.with_sets.get())
+        self.parts = list_to_code(self.payload, LIST_PART_SIZES[self.size_var.get()])
+        n_c = sum(1 for e in self.payload["a"] if e["t"] == "c")
+        info = f"{len(self.payload['a'])} Addons in der Liste ({n_c} CurseForge, {len(self.payload['a']) - n_c} GitHub)."
+        if self.unlinked:
+            shown = ", ".join(self.unlinked[:8]) + (" …" if len(self.unlinked) > 8 else "")
+            info += (f"\nNicht enthalten, weil ohne Download-Quelle: {shown}.\n"
+                     "Tipp: Über „Mit CurseForge verknüpfen“ bekommen sie eine Quelle – oder teile sie als .lzpack-Paket.")
+        self.info_var.set(info)
+        self.count_var.set(f"{len(self.parts)} Teil(e), {sum(len(x) for x in self.parts)} Zeichen")
+        self.txt.configure(state="normal")
+        self.txt.delete("1.0", "end")
+        for i, part in enumerate(self.parts, 1):
+            if len(self.parts) > 1:
+                self.txt.insert("end", f"Teil {i} von {len(self.parts)} – als eigene Nachricht senden:\n", "dim")
+            self.txt.insert("end", part + "\n\n")
+        self.txt.configure(state="disabled")
+
+    def _copy(self, text: str, what: str):
+        self.parent.clipboard_clear()
+        self.parent.clipboard_append(text)
+        self.parent.update()
+        self.parent.set_status(f"{what} in die Zwischenablage kopiert.")
+
+    def copy_all(self):
+        self._copy("\n\n".join(self.parts), "Code" if len(self.parts) == 1 else f"{len(self.parts)} Teile")
+        if len(self.parts) > 1:
+            messagebox.showinfo(APP_NAME, f"Alle {len(self.parts)} Teile liegen in der Zwischenablage, getrennt "
+                                          "durch eine Leerzeile. Sende jeden Teil als eigene Nachricht – oder "
+                                          "markiere sie einzeln im Textfeld.", parent=self)
+
+    def copy_readable(self):
+        self._copy(list_readable(self.payload), "Lesbare Liste")
+
+    def save_file(self):
+        dest = filedialog.asksaveasfilename(
+            parent=self, title="Download-Liste speichern", defaultextension=LIST_EXT,
+            initialfile=f"Addonliste_{datetime.now().strftime('%Y-%m-%d')}{LIST_EXT}",
+            filetypes=[("Leeroyzan-Liste", f"*{LIST_EXT}")])
+        if dest:
+            Path(dest).write_text(list_to_file_text(self.payload), encoding="utf-8")
+            self.parent.set_status(f"Liste gespeichert: {dest}")
+
+
+class ImportListDialog(Dialog):
+    """Textcode (oder Dateiinhalt) einer Download-Liste einfügen."""
+
+    def __init__(self, parent):
+        super().__init__(parent, APP_NAME, "Download-Liste importieren", 640, 460)
+        ttk.Label(self.body, wraplength=590, padding=(0, 0, 0, 8), text=(
+            "Füge hier den Code ein, den dir jemand geschickt hat (beginnt mit LZ1:). Bei mehreren Teilen "
+            "alle Teile nacheinander einfügen – die Reihenfolge ist egal.")).pack(anchor="w")
+        self.txt = self.text_box("")
+        self.txt.focus_set()
+        self.add_button("Abbrechen", self.cancel)
+        self.add_button("Datei öffnen…", self.open_file)
+        self.add_button("Aus Zwischenablage", self.paste)
+        self.add_button("Weiter", self.ok, primary=True)
+
+    def paste(self):
+        try:
+            self.txt.insert("end", self.parent.clipboard_get() + "\n")
+        except tk.TclError:
+            pass
+
+    def open_file(self):
+        f = filedialog.askopenfilename(parent=self, title="Download-Liste öffnen",
+                                       filetypes=[("Leeroyzan-Liste", f"*{LIST_EXT}"), ("Alle Dateien", "*.*")])
+        if f:
+            self.txt.insert("end", Path(f).read_text(encoding="utf-8", errors="replace"))
+
+    def ok(self):
+        text = self.txt.get("1.0", "end").strip()
+        if text:
+            self.result = text
             self.destroy()
 
 
@@ -1764,7 +2169,8 @@ class App(BaseTk):
         mb["menu"] = self._menu(mb, [("ZIP-Datei installieren…", self.install_zip_dialog),
                                      ("Von GitHub…", self.install_github_dialog),
                                      ("Von CurseForge…", self.install_curseforge_dialog),
-                                     ("Addon-Paket importieren…", self.import_pack_dialog)])
+                                     ("Addon-Paket importieren…", self.import_pack_dialog),
+                                     ("Download-Liste / Code importieren…", self.import_list_dialog)])
         return mb
 
     def _menu(self, parent, items) -> tk.Menu:
@@ -1787,8 +2193,8 @@ class App(BaseTk):
         self.tree.heading("#0", text="")
         self.tree.bind("<<TreeviewOpen>>", lambda e: self._remember_open(True))
         self.tree.bind("<<TreeviewClose>>", lambda e: self._remember_open(False))
-        widths = {"status": 170, "name": 160, "title": 240, "version": 100,
-                  "interface": 115, "source": 200, "update": 110}
+        widths = {"status": 150, "name": 160, "title": 200, "version": 100,
+                  "interface": 105, "source": 200, "update": 210}
         if self.layout == "seitenleiste":
             widths.update(name=210, version=90, source=170, status=120)
         for c in self.COLUMNS:
@@ -1876,8 +2282,11 @@ class App(BaseTk):
               ("Auswahl exportieren…", self.export_pack_dialog, None)],
              [("WTF sichern", self.backup, None),
               ("Wiederherstellen…", self.restore_dialog, None),
-              ("Ordner öffnen", self.open_folder, None),
-              ("CurseForge-Key…", self.settings_dialog, None)]),
+              ("Ordner öffnen", self.open_folder, None)]),
+            ([("Mit CurseForge verknüpfen", self.link_curseforge_dialog, None),
+              ("Liste teilen…", self.share_list_dialog, None),
+              ("Liste importieren…", self.import_list_dialog, None)],
+             [("CurseForge-Key…", self.settings_dialog, None)]),
         ]
         for i, (left, right) in enumerate(rows):
             bar = ttk.Frame(inner, style="Panel.TFrame")
@@ -1905,7 +2314,7 @@ class App(BaseTk):
         head.pack(fill="x")
         ttk.Label(head, text=spaced("Installierte Addons"), style="Section.TLabel").pack(side="left")
         if HAS_DND:
-            ttk.Label(head, text="   ZIP- oder .faddons-Dateien einfach ins Fenster ziehen",
+            ttk.Label(head, text="   ZIP- oder .lzpack-Dateien einfach ins Fenster ziehen",
                       style="Hint.TLabel").pack(side="left")
         ttk.Label(head, textvariable=self.count_var, style="Count.TLabel").pack(side="right")
         self._w_filter(head).pack(side="right", padx=(0, 14))
@@ -1922,8 +2331,8 @@ class App(BaseTk):
         w = h.winfo_width()
         draw_emblem(h, 20, 11, 62)
         h.create_text(96, 26, anchor="w", fill=t["gold"], font=self.fonts["brand"],
-                      text="–  " + spaced("Forever Addon") + "  –")
-        h.create_text(94, 54, anchor="w", fill=t["gold"], font=self.fonts["title"], text="MANAGER")
+                      text="–  " + spaced("Addon Manager") + "  –")
+        h.create_text(94, 54, anchor="w", fill=t["gold"], font=self.fonts["title"], text="LEEROYZAN")
         info = f"v{APP_VERSION}"
         if self.game:
             info = f"Spielversion {self.game[0]}  ·  Interface {self.game[1]}     " + info
@@ -1957,8 +2366,8 @@ class App(BaseTk):
         brand.pack(fill="x")
         draw_emblem(brand, 0, 4, 54)
         brand.create_text(64, 20, anchor="w", fill=t["gold"], font=self.fonts["label"],
-                          text=spaced("Forever Addon"))
-        brand.create_text(63, 44, anchor="w", fill=t["gold"], font=self.fonts["page"], text="MANAGER")
+                          text=spaced("Addon Manager"))
+        brand.create_text(63, 44, anchor="w", fill=t["gold"], font=self.fonts["side"], text="LEEROYZAN")
 
         ttk.Label(side, text=spaced("Spielversion"), style="SideKicker.TLabel").pack(anchor="w", pady=(18, 6))
         self._w_flavor(side, width=22).pack(fill="x")
@@ -2153,13 +2562,15 @@ class App(BaseTk):
                 ("Von CurseForge installieren", "CurseForge-Link einfügen – Download und Updates laufen "
                  "automatisch (braucht deinen eigenen API-Key in den Einstellungen).",
                  self.install_curseforge_dialog),
-                ("Addon-Paket importieren", "Eine .faddons-Datei, die dir jemand mit dem Manager geschickt hat.",
-                 self.import_pack_dialog)):
+                ("Addon-Paket importieren", "Eine .lzpack-Datei, die dir jemand mit dem Manager geschickt hat.",
+                 self.import_pack_dialog),
+                ("Download-Liste importieren", "Einen Code aus Discord/Chat einfügen oder eine .lzlist-Datei öffnen.",
+                 self.import_list_dialog)):
             card = self._card_box(page, pady=(12, 0))
             ttk.Button(card, text=title, style="Primary.TButton", width=26, command=cmd).pack(side="left")
             ttk.Label(card, text=text, style="Panel.TLabel", wraplength=520).pack(side="left", padx=(16, 0))
         if HAS_DND:
-            ttk.Label(page, text="Tipp: ZIP- und .faddons-Dateien kannst du auch einfach ins Fenster ziehen.",
+            ttk.Label(page, text="Tipp: ZIP- und .lzpack-Dateien kannst du auch einfach ins Fenster ziehen.",
                       style="Hint.TLabel").pack(anchor="w", pady=(14, 0))
 
     def _page_sets(self, host):
@@ -2191,6 +2602,11 @@ class App(BaseTk):
         ttk.Button(row, text="Alle aktualisieren", style="Primary.TButton",
                    command=self.update_all).pack(side="left", padx=(8, 0))
         ttk.Label(row, textvariable=self.count_var, style="Panel.TLabel").pack(side="right")
+        link = ttk.Frame(box, style="Panel.TFrame")
+        link.pack(fill="x", pady=(14, 0))
+        ttk.Button(link, text="Manuelle Addons mit CurseForge verknüpfen", command=self.link_curseforge_dialog).pack(side="left")
+        ttk.Label(link, text="Dann prüft der Manager auch von Hand installierte Addons auf Updates.",
+                  style="Panel.TLabel").pack(side="left", padx=(12, 0))
         self._w_check(box, "Beim Start auf Addon-Updates prüfen", self.check_start_var).pack(anchor="w", pady=(12, 0))
         self._w_check(box, "Vor Updates automatisch WTF sichern", self.auto_backup_var).pack(anchor="w", pady=(6, 0))
         box2 = self._card_box(page, pady=(12, 0))
@@ -2227,8 +2643,9 @@ class App(BaseTk):
 
     def _page_share(self, host):
         page, _ = self._page("share", "Teilen", "Addons mit Freunden teilen",
-                             "Wähle auf der Seite „Addons“ aus, was du teilen willst, und exportiere es als "
-                             ".faddons-Paket. Dein Freund importiert es mit demselben Manager.")
+                             "Wähle auf der Seite „Addons“ aus, was du teilen willst: als .lzpack-Paket "
+                             "(mit Dateien) oder als schlanke Download-Liste (nur Verweise, auch als Text für "
+                             "Discord und SMS). Dein Freund importiert beides mit demselben Manager.")
         box = self._card_box(page)
         row = ttk.Frame(box, style="Panel.TFrame")
         row.pack(fill="x")
@@ -2237,6 +2654,16 @@ class App(BaseTk):
         ttk.Button(row, text="Alle exportieren…",
                    command=lambda: self.export_pack_dialog(list(self.addons))).pack(side="left", padx=(8, 0))
         ttk.Button(row, text="Paket importieren…", command=self.import_pack_dialog).pack(side="right")
+        box2 = self._card_box(page, pady=(12, 0))
+        ttk.Label(box2, style="Panel.TLabel", wraplength=700, justify="left",
+                  text="Download-Liste: enthält nur Verweise auf CurseForge/GitHub – keine Dateien. Sie passt als "
+                       "Text in eine Discord- oder Kurznachricht (bei Bedarf in mehreren Teilen) oder als kleine "
+                       "Datei. Dein Freund lädt die Addons mit seinem eigenen API-Key.").pack(anchor="w")
+        row2 = ttk.Frame(box2, style="Panel.TFrame")
+        row2.pack(fill="x", pady=(10, 0))
+        ttk.Button(row2, text="Download-Liste teilen…", style="Primary.TButton",
+                   command=self.share_list_dialog).pack(side="left")
+        ttk.Button(row2, text="Liste / Code importieren…", command=self.import_list_dialog).pack(side="right")
 
     def _page_settings(self, host):
         page, _ = self._page("settings", "Einstellungen", "Manager einrichten")
@@ -2265,8 +2692,8 @@ class App(BaseTk):
         draw_emblem(crest, 0, 2, 64)
         brand = ttk.Frame(head, style="Head.TFrame")
         brand.pack(side="left", padx=(16, 0))
-        ttk.Label(brand, text="–  " + spaced("Forever Addon") + "  –", style="HeadKicker.TLabel").pack(anchor="w")
-        ttk.Label(brand, text="MANAGER", style="HeadTitle.TLabel").pack(anchor="w")
+        ttk.Label(brand, text="–  " + spaced("Addon Manager") + "  –", style="HeadKicker.TLabel").pack(anchor="w")
+        ttk.Label(brand, text="LEEROYZAN", style="HeadTitle.TLabel").pack(anchor="w")
         self._w_play(head, style="BigPlay.TButton", text="▶   SPIELEN").pack(side="right")
         info = ttk.Frame(head, style="Head.TFrame")
         info.pack(side="right", padx=(0, 22))
@@ -2308,8 +2735,11 @@ class App(BaseTk):
         more["menu"] = self._menu(more, [
             ("Aktive als Set speichern…", self.save_set), ("Set löschen", self.delete_set), None,
             ("Alle Addons exportieren…", lambda: self.export_pack_dialog(list(self.addons))),
-            ("Paket importieren…", self.import_pack_dialog), None,
+            ("Paket importieren…", self.import_pack_dialog),
+            ("Download-Liste teilen…", self.share_list_dialog),
+            ("Download-Liste / Code importieren…", self.import_list_dialog), None,
             ("WTF sichern", self.backup), ("Backup wiederherstellen…", self.restore_dialog), None,
+            ("Mit CurseForge verknüpfen…", self.link_curseforge_dialog), None,
             ("Einstellungen…", self.settings_dialog), ("Manager-Update suchen", self.check_manager_update),
             ("Log öffnen", self.open_log), ("Addon-Ordner öffnen", lambda: self.open_folder([])),
             ("Neu laden", self.refresh), None,
@@ -2359,10 +2789,27 @@ class App(BaseTk):
         ttk.Button(row, text="Testen", command=test).pack(side="left", padx=(8, 0))
         ttk.Button(row, text="Key holen  ↗", command=lambda: self.open_link(CF_KEY_URL)).pack(side="left", padx=(8, 0))
         ttk.Label(f, textvariable=status, style=ls, wraplength=520).pack(anchor="w", pady=(4, 0))
+        ttk.Label(f, text="Download-Ordner deines Browsers (für Addons, deren Autor Downloads sperrt):",
+                  style=ls).pack(anchor="w", pady=(10, 0))
+        drow = ttk.Frame(f, style=fs)
+        drow.pack(fill="x", pady=(4, 0))
+        dvar = tk.StringVar(value=str(self.download_dir()))
+
+        def dstore(*_):
+            self.cfg["download_dir"] = dvar.get().strip()
+            save_config(self.cfg)
+        dvar.trace_add("write", dstore)
+        ttk.Entry(drow, textvariable=dvar).pack(side="left", fill="x", expand=True)
+
+        def browse():
+            d = filedialog.askdirectory(title="Download-Ordner wählen", initialdir=dvar.get() or None)
+            if d:
+                dvar.set(d)
+        ttk.Button(drow, text="Durchsuchen…", command=browse).pack(side="left", padx=(8, 0))
         return f
 
     def settings_dialog(self):
-        dlg = Dialog(self, APP_NAME, "Einstellungen", 720, 460)
+        dlg = Dialog(self, APP_NAME, "Einstellungen", 720, 560)
         box = ttk.Frame(dlg.body)
         box.pack(fill="x")
         self._w_path(box, frame_style="TFrame", label_style="TLabel", with_version=False).pack(fill="x")
@@ -2501,6 +2948,10 @@ class App(BaseTk):
 
     def cf_key(self) -> str:
         return (self.cfg.get("curseforge_key") or "").strip()
+
+    def download_dir(self) -> Path:
+        d = (self.cfg.get("download_dir") or "").strip()
+        return Path(d) if d else Path.home() / "Downloads"
 
     def folder_source(self, folder: str) -> tuple[str, dict] | tuple[None, None]:
         for sid, s in self.sources().items():
@@ -2676,6 +3127,7 @@ class App(BaseTk):
 
     def remember_cf_source(self, info: dict, asset: dict, folders: list[str]):
         sid = CF_PREFIX + str(info["mod_id"])
+        folders = sorted(set(folders) | set(self.sources().get(sid, {}).get("folders", [])))
         self._claim_folders(sid, folders)
         self.sources()[sid] = {
             "type": "curseforge", "tag": asset["name"], "asset": asset["name"],
@@ -2764,7 +3216,8 @@ class App(BaseTk):
         upd = ""
         has_update = bool(src and self.updates.get(sid) and self.updates[sid] != src.get("tag"))
         if src:
-            upd = f"→ {self.updates[sid]}" if has_update else src.get("tag", "")
+            upd = (f"→ {self.updates[sid]}" + ("  (Browser)" if src.get("allow_dl") is False else "")
+                   if has_update else src.get("tag", ""))
         tags = []
         if not a.enabled:
             tags.append("disabled")
@@ -2933,13 +3386,27 @@ class App(BaseTk):
 
         def done(res):
             names = [n for part in res for n in part]
-            for part in res:
+            for zp, part in zip(files, res):
                 self.remember_bundle(part)
+                self._sync_cf_after_zip(Path(zp).name, part)
+            save_config(self.cfg)
             log.info("ZIP installiert: %s", ", ".join(names))
             self.refresh()
             self.set_status(f"Installiert: {', '.join(names)}")
 
         self.run_bg("Installiere ZIP", job, done)
+
+    def _sync_cf_after_zip(self, zip_name: str, folders: list[str]):
+        """Wurde per ZIP genau die bekannte CurseForge-Datei installiert, gilt das Addon als aktuell."""
+        for sid, src in list(self.sources().items()):
+            if src.get("type") != "curseforge" or not (set(folders) & set(src.get("folders", []))):
+                continue
+            info = self.update_info.get(sid)
+            asset = next((a for a in (info or {}).get("assets", [])
+                          if zip_name_matches(zip_name, a.get("file_name", ""))), None)
+            if asset:
+                self._adopt_cf(sid, asset)
+                self.updates.pop(sid, None)
 
     def install_github_dialog(self):
         if not self.ready():
@@ -2963,10 +3430,132 @@ class App(BaseTk):
                 self.settings_dialog()
         return self.cf_key()
 
-    def manual_cf(self, page: str, name: str, reason: str):
-        if messagebox.askyesno(APP_NAME, f"{name}: {reason}\n\nDie CurseForge-Seite öffnen? Dort die ZIP "
-                                         "laden und danach ins Manager-Fenster ziehen (oder „ZIP installieren“)."):
-            self.open_link(page)
+    def run_download_queue(self, items: list[dict], intro: str):
+        """Gesperrte Addons: Download-Seite öffnen, Browser-Download abwarten, automatisch installieren."""
+        if not items:
+            return
+        names = "\n".join(f"• {i['name']}" for i in items[:12])
+        if not messagebox.askyesno(
+                APP_NAME, f"{intro}\n\n{names}\n\nDer Manager öffnet die Download-Seite im Browser. Du klickst dort "
+                          f"einmal auf den Download – sobald die Datei in\n{self.download_dir()}\nliegt, installiert "
+                          "der Manager sie automatisch.\n\nJetzt starten?"):
+            return
+        done = []
+        for n, item in enumerate(items, 1):
+            self.open_link(item["page"])
+            res = DownloadWatchDialog(self, item, n, len(items), self.download_dir(),
+                                      self.root_path, self.flavor).show()
+            if not res or res[0] == "cancel":
+                break
+            if res[0] == "ok":
+                folders = res[1]
+                info, asset = item["info"], item["asset"]
+                self.remember_cf_source(info, asset, folders)
+                self.remember_bundle(folders)
+                self.updates.pop(CF_PREFIX + str(info["mod_id"]), None)
+                log.info("Per Browser geladen: %s (%s) -> %s", info["repo"], asset["name"], ", ".join(folders))
+                done.append(item["name"])
+        save_config(self.cfg)
+        self.refresh()
+        self.set_status(f"{len(done)} von {len(items)} Addon(s) per Browser-Download installiert.")
+
+    def _adopt_cf(self, sid: str, asset: dict):
+        src = self.sources()[sid]
+        src.update(tag=asset["name"], asset=asset["name"], asset_key=asset_key(asset["name"]),
+                   file_id=asset["file_id"], game_versions=asset["game_versions"],
+                   release_type=asset["release_type"])
+
+    def link_curseforge_dialog(self):
+        """Manuell installierte Addons mit CurseForge verknüpfen – danach laufen sie bei den Updates mit."""
+        if not self.ready(modifies=False):
+            return
+        key = self.need_cf_key()
+        if not key:
+            return
+        sel = [a for a in self.selected_addons() if not self.folder_source(a.name)[1]]
+        targets: list[tuple] = []          # (Projekt-ID oder Slug, [Addons])
+        if sel:
+            ids = {a.name: toc_curse_id(a.meta) for a in sel}
+            if all(ids.values()):
+                by_id: dict = {}
+                for a in sel:
+                    by_id.setdefault(ids[a.name], []).append(a)
+                targets = list(by_id.items())
+            else:
+                names = ", ".join(a.title for a in sel[:4]) + (" …" if len(sel) > 4 else "")
+                text = simpledialog.askstring(APP_NAME, f"CurseForge-Link zu „{names}“:", parent=self)
+                if not text:
+                    return
+                try:
+                    targets = [(parse_cf_ref(text), sel)]
+                except ValueError as e:
+                    messagebox.showerror(APP_NAME, str(e))
+                    return
+        else:
+            by_id = {}
+            for a in self.addons:
+                cid = toc_curse_id(a.meta)
+                if cid and not self.folder_source(a.name)[1]:
+                    by_id.setdefault(cid, []).append(a)
+            if not by_id:
+                messagebox.showinfo(APP_NAME, "Bei den manuell installierten Addons ist keine CurseForge-Kennung "
+                                              "hinterlegt.\n\nTipp: Wähle ein Addon in der Liste aus und klicke "
+                                              "erneut – dann kannst du den CurseForge-Link einfügen.")
+                return
+            targets = list(by_id.items())
+        flavor, gv = self.flavor, (self.game[0] if self.game else "")
+
+        def job():
+            results, errors, mods = [], [], {}
+            ids = [r for r, _ in targets if isinstance(r, int)]
+            if len(ids) > 1:
+                try:
+                    mods = {m["id"]: m for m in cf_get_mods(ids, key)}
+                except CFError:
+                    mods = {}
+            for ref, addons in targets:
+                try:
+                    mod = mods.get(ref) or cf_get_mod(ref, key)
+                    files = cf_files(mod["id"], key)
+                    if not files:
+                        raise CFError("keine ZIP-Dateien bei CurseForge gefunden")
+                    info = cf_info(mod, files, flavor, gv)
+                    versions = [a.version for a in addons]
+                    results.append((info, cf_match_installed(versions, info["assets"]),
+                                    [a.name for a in addons], versions))
+                except Exception as e:  # noqa
+                    errors.append(f"{addons[0].title}: {e}")
+            return results, errors
+
+        def done(out):
+            results, errors = out
+            unsure = [r for r in results if not r[1]]
+            linked = 0
+            for info, match, folders, _ in results:
+                if match:
+                    self.remember_cf_source(info, match, folders)
+                    linked += 1
+            if unsure:
+                names = "\n".join(f"• {i['repo']}  (installiert: {', '.join(v for v in vers if v) or '?'}, "
+                                  f"neueste Datei: {i['tag']})" for i, _, _, vers in unsure)
+                current = messagebox.askyesno(
+                    APP_NAME, "Bei diesen Addons lässt sich die installierte Version keiner CurseForge-Datei "
+                              f"zuordnen:\n\n{names}\n\nSollen sie als aktuell gelten?\n\n"
+                              "Ja = die neueste Datei gilt als installiert.\n"
+                              "Nein = sie werden als veraltet behandelt, das nächste Update installiert die neueste Datei.")
+                for info, _, folders, _ in unsure:
+                    self.remember_cf_source(info, info["best"] if current else dict(info["best"], name="", file_id=None),
+                                            folders)
+                    linked += 1
+            save_config(self.cfg)
+            self.refresh()
+            self.set_status(f"{linked} Addon(s) mit CurseForge verknüpft.")
+            if errors:
+                messagebox.showwarning(APP_NAME, "Nicht verknüpft:\n\n" + "\n".join(errors))
+            if linked:
+                self.after(200, self.check_updates)
+
+        self.run_bg("Verknüpfe mit CurseForge", job, done)
 
     def install_curseforge_dialog(self):
         if not self.ready():
@@ -2996,10 +3585,6 @@ class App(BaseTk):
 
     def _pick_and_install_cf(self, info: dict):
         best = info["best"] or info["assets"][0]
-        if not info["allow_dl"]:
-            self.manual_cf(info["page"].rstrip("/") + "/files", info["repo"],
-                           "Der Autor erlaubt keinen Download über Programme wie diesen.")
-            return
         asset = best
         if len(info["assets"]) > 1:
             info["dialog_text"] = (f"{info['repo']} von {info['author'] or 'unbekannt'} (CurseForge). "
@@ -3022,8 +3607,8 @@ class App(BaseTk):
 
         def failed(err):
             if isinstance(err, ManualDownload):
-                self.set_status("Manueller Download nötig.")
-                self.manual_cf(err.page, info["repo"], err.reason)
+                self.set_status("Download über den Browser nötig.")
+                self.run_download_queue([cf_queue_item(info, asset)], f"{info['repo']}: {err.reason}")
             else:
                 self.set_status(f"Fehler: {err}")
                 messagebox.showerror(APP_NAME, str(err))
@@ -3093,6 +3678,15 @@ class App(BaseTk):
             for r, info in res.items():
                 self.updates[r] = info["tag"]
                 self.update_info[r] = info
+                src = self.sources().get(r)
+                if r.startswith(CF_PREFIX) and src:
+                    src["allow_dl"] = info.get("allow_dl", True)
+                    # Habe ich die neueste Datei schon (z. B. per Browser/ZIP installiert)? Dann kein Update.
+                    if info["tag"] != src.get("tag") and info.get("best"):
+                        versions = [a.version for a in self.addons if a.name in src.get("folders", [])]
+                        if cf_match_installed(versions, [info["best"]]):
+                            self._adopt_cf(r, info["best"])
+            save_config(self.cfg)
             self.render()
             n = sum(1 for r, info in res.items() if info["tag"] != self.sources()[r].get("tag"))
             msg = f"{n} Update(s) verfügbar." if n else "Alle Addons sind aktuell."
@@ -3118,10 +3712,16 @@ class App(BaseTk):
             return
         if not self.ready():
             return
+        blocked = {r for r in pending if r.startswith(CF_PREFIX) and self.update_info.get(r, {}).get("allow_dl") is False}
+        warn = ("⚠ Der Autor sperrt Downloads über Programme – der Manager öffnet die Download-Seite und "
+                "installiert die Datei, sobald du sie im Browser lädst.\n\n")
         items = [{"repo": self.source_name(r), "old": self.sources()[r].get("tag"), "new": self.updates[r],
-                  "notes": self.update_info.get(r, {}).get("notes", ""),
+                  "notes": (warn if r in blocked else "") + (self.update_info.get(r, {}).get("notes") or ""),
                   "published": self.update_info.get(r, {}).get("published", "")} for r in pending]
-        if not UpdateDialog(self, items, bool(self.cfg.get("auto_backup"))).show():
+        hint = ("Vor dem Update wird automatisch ein WTF-Backup angelegt." if self.cfg.get("auto_backup") else "")
+        if blocked:
+            hint = (hint + "  " if hint else "") + f"{len(blocked)} Addon(s) laufen über den Browser-Download."
+        if not UpdateDialog(self, items, bool(self.cfg.get("auto_backup")), hint=hint).show():
             return
         root, flavor, token = self.root_path, self.flavor, self.cfg.get("github_token", "")
         cf_key = self.cf_key()
@@ -3152,7 +3752,7 @@ class App(BaseTk):
                         folders = github_install_asset(asset, root, flavor, token)
                     ok.append((r, info, asset, folders))
                 except ManualDownload as m:
-                    manual.append((info.get("repo", r), m))
+                    manual.append((info, asset, m))
                 except Exception as e:  # noqa
                     log.error("Update %s: %s", r, e)
                     errors.append(f"{info.get('repo', r)}: {e}")
@@ -3169,15 +3769,11 @@ class App(BaseTk):
             if manual or errors:
                 msg += f"  ({len(manual) + len(errors)} nicht automatisch)"
             self.set_status(msg)
-            if manual:
-                names = "\n".join(f"• {n}: {m.reason}" for n, m in manual)
-                if messagebox.askyesno(APP_NAME, "Diese Addons lassen sich nicht automatisch laden:\n\n"
-                                                 f"{names}\n\nDie CurseForge-Seiten öffnen? Dort ZIP laden "
-                                                 "und ins Manager-Fenster ziehen."):
-                    for _, m in manual:
-                        self.open_link(m.page)
             if errors:
                 messagebox.showwarning(APP_NAME, "Nicht aktualisiert:\n\n" + "\n".join(errors))
+            if manual:
+                self.run_download_queue([cf_queue_item(i, a) for i, a, _ in manual],
+                                        "Diese Addons dürfen nicht direkt geladen werden:")
 
         self.run_bg("Aktualisiere", job, done)
 
@@ -3359,6 +3955,133 @@ class App(BaseTk):
 
         self.run_bg("Exportiere Paket", lambda: export_pack(sel, sources, flavor, Path(dest)), done)
 
+    def share_list_dialog(self, addons=None):
+        if not self.ready(modifies=False):
+            return
+        sel = list(addons) if addons is not None else (self.selected_addons() or list(self.addons))
+        if not sel:
+            messagebox.showinfo(APP_NAME, "Es sind keine Addons installiert.")
+            return
+        payload, unlinked = build_list(sel, self.sources(), self.flavor, self.sets())
+        if not payload["a"]:
+            messagebox.showinfo(APP_NAME, "Keines der Addons hat eine Download-Quelle (CurseForge oder GitHub).\n\n"
+                                          "Installiere sie über „Von CurseForge…“ bzw. „Von GitHub…“ oder "
+                                          "verknüpfe sie mit CurseForge. Alternativ teilst du sie als .lzpack-Paket.")
+            return
+        ShareListDialog(self, sel, unlinked).show()
+
+    def import_list_dialog(self, path=None):
+        if not self.ready():
+            return
+        if path:
+            try:
+                text = Path(path).read_text(encoding="utf-8", errors="replace")
+            except OSError as e:
+                messagebox.showerror(APP_NAME, f"Datei konnte nicht gelesen werden:\n{e}")
+                return
+        else:
+            text = ImportListDialog(self).show()
+        if not text:
+            return
+        try:
+            data = parse_list_text(text)
+        except ListError as e:
+            messagebox.showerror(APP_NAME, str(e))
+            return
+        have = self.sources()
+        todo, lines = [], []
+        for e in data["a"]:
+            sid = CF_PREFIX + str(e["i"]) if e["t"] == "c" else e["r"]
+            name = (e.get("n") or e.get("s") or sid) if e["t"] == "c" else e["r"]
+            if sid in have:
+                lines.append(f"• {name} – schon installiert, wird übersprungen")
+            else:
+                todo.append(e)
+                lines.append(f"• {name} – {'CurseForge' if e['t'] == 'c' else 'GitHub'}")
+        if not todo:
+            messagebox.showinfo(APP_NAME, "Alle Addons dieser Liste sind schon installiert.")
+            return
+        text = (f"Download-Liste mit {len(data['a'])} Addons ({data['fl'].strip('_') or '?'}):\n\n"
+                + "\n".join(lines[:25]) + ("\n…" if len(lines) > 25 else ""))
+        if data["fl"] and data["fl"] != self.flavor:
+            text += f"\n\nHinweis: Die Liste stammt aus {data['fl'].strip('_')}, du installierst in {self.flavor.strip('_')}."
+        if data["s"]:
+            text += f"\n\nEnthält {len(data['s'])} Addon-Set(s)."
+        if not messagebox.askyesno(APP_NAME, text + f"\n\n{len(todo)} Addon(s) jetzt herunterladen und installieren?"):
+            return
+        self._run_list_import(todo, data["s"])
+
+    def _run_list_import(self, todo: list[dict], sets: dict):
+        root, flavor = self.root_path, self.flavor
+        gv = self.game[0] if self.game else ""
+        token, key = self.cfg.get("github_token", ""), self.cf_key()
+        if any(e["t"] == "c" for e in todo) and not key:
+            if messagebox.askyesno(APP_NAME, "Für die CurseForge-Addons brauchst du deinen eigenen API-Key.\n\n"
+                                             "Jetzt in den Einstellungen eintragen?"):
+                self.settings_dialog()
+                key = self.cf_key()
+            if not key:
+                todo = [e for e in todo if e["t"] != "c"]
+                if not todo:
+                    return
+
+        def job():
+            ok, manual, errors = [], [], []
+            for e in todo:
+                label = (e.get("n") or e.get("s") or str(e["i"])) if e["t"] == "c" else e["r"]
+                info = None
+                try:
+                    if e["t"] == "c":
+                        info = cf_pack_item({"mod_id": e["i"], "file_id": e.get("f")}, key, flavor, gv)
+                        got = cf_install_asset(info["best"], info, root, flavor, key)
+                        ok.append((None, info, info["best"], got))
+                    else:
+                        info = github_latest(e["r"], token)
+                        asset = choose_asset(info, flavor, e.get("k", ""))
+                        if not asset:
+                            raise ValueError("Das Release enthält keine Dateien.")
+                        ok.append((e["r"], info, asset, github_install_asset(asset, root, flavor, token)))
+                except ManualDownload as m:
+                    manual.append((info, info["best"], m))
+                except Exception as ex:  # noqa
+                    log.error("Liste: %s: %s", label, ex)
+                    errors.append(f"{label}: {ex}")
+            return ok, manual, errors
+
+        def done(out):
+            ok, manual, errors = out
+            installed = []
+            for repo, info, asset, got in ok:
+                if repo is None:
+                    self.remember_cf_source(info, asset, got)
+                else:
+                    self.remember_source(repo, info, asset, got)
+                self.remember_bundle(got)
+                installed += got
+            for name, members in sets.items():
+                if name in (SET_ALL_OFF, SET_ALL_ON):
+                    continue
+                target = name
+                if target in self.sets() and sorted(self.sets()[target]) != sorted(members):
+                    target = f"{name} (importiert)"
+                self.sets()[target] = members
+            save_config(self.cfg)
+            log.info("Download-Liste importiert: %s", ", ".join(installed))
+            self.refresh()
+            self.reload_sets()
+            self.refresh_sets_overview()
+            msg = f"{len(ok)} Addon(s) aus der Liste installiert."
+            if sets:
+                msg += f"  {len(sets)} Set(s) übernommen."
+            self.set_status(msg)
+            if errors:
+                messagebox.showwarning(APP_NAME, "Nicht installiert:\n\n" + "\n".join(errors))
+            if manual:
+                self.run_download_queue([cf_queue_item(i, a) for i, a, _ in manual],
+                                        "Diese Addons dürfen nicht direkt geladen werden:")
+
+        self.run_bg("Lade Addons aus der Liste", job, done)
+
     def import_pack_dialog(self, path=None):
         if not self.ready():
             return
@@ -3424,7 +4147,7 @@ class App(BaseTk):
                     got = cf_install_asset(info["best"], info, root, flavor, cf_key)
                     cf_ok.append((info, info["best"], got))
                 except ManualDownload as m:
-                    manual.append((label, m))
+                    manual.append((info, info["best"], m))
                 except Exception as e:  # noqa
                     errors.append(f"{label}: {e}")
             return installed, cf_ok, manual, errors
@@ -3450,13 +4173,11 @@ class App(BaseTk):
             log.info("Paket importiert: %s -> %s", path, ", ".join(installed))
             self.refresh()
             self.set_status(f"{len(installed)} Addons aus Paket installiert.")
-            if manual:
-                names = "\n".join(f"• {n}: {m.reason}" for n, m in manual)
-                if messagebox.askyesno(APP_NAME, f"Manuell nachladen:\n\n{names}\n\nCurseForge-Seiten öffnen?"):
-                    for _, m in manual:
-                        self.open_link(m.page)
             if errors:
                 messagebox.showwarning(APP_NAME, "Nicht installiert:\n\n" + "\n".join(errors))
+            if manual:
+                self.run_download_queue([cf_queue_item(i, a) for i, a, _ in manual],
+                                        "Diese Addons dürfen nicht direkt geladen werden:")
 
         self.run_bg("Importiere Paket", job, done)
 
@@ -3616,10 +4337,13 @@ class App(BaseTk):
         paths = [Path(p) for p in self.tk.splitlist(event.data)]
         zips = [str(p) for p in paths if p.suffix.lower() == ".zip"]
         packs = [str(p) for p in paths if p.suffix.lower() == PACK_EXT]
-        if not zips and not packs:
-            self.set_status("Nur .zip- und .faddons-Dateien können abgelegt werden.")
+        lists = [str(p) for p in paths if p.suffix.lower() == LIST_EXT]
+        if not zips and not packs and not lists:
+            self.set_status("Nur .zip-, .lzpack- und .lzlist-Dateien können abgelegt werden.")
             return
-        if packs:
+        if lists:
+            self.after(50, lambda: self.import_list_dialog(lists[0]))
+        elif packs:
             self.after(50, lambda: self.import_pack_dialog(packs[0]))
         elif zips:
             self.after(50, lambda: self.install_zip_dialog(zips))
