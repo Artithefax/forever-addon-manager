@@ -58,7 +58,7 @@ except Exception:                      # noqa – Paket fehlt oder Tk-Erweiterun
     HAS_DND = False
 
 APP_NAME = "Leeroyzan"
-APP_VERSION = "1.0.2"
+APP_VERSION = "1.0.3"
 USER_AGENT = f"Leeroyzan/{APP_VERSION}"
 
 # Selbst-Update über GitHub-Releases dieses Repos
@@ -810,6 +810,27 @@ def zip_name_matches(name: str, wanted: str) -> bool:
     def stem(n: str) -> str:
         return re.sub(r"[\s_]*\(\d+\)$", "", Path(n).stem).lower().replace(" ", "_")
     return bool(wanted) and stem(name) == stem(wanted)
+
+
+def download_matches(path: Path, asset: dict, since: float) -> bool:
+    """Ist diese (fertig geladene) ZIP genau die erwartete CurseForge-Datei?
+    Mit SHA-1 der API eindeutig; sonst Dateigröße und Zeitpunkt des Downloads."""
+    try:
+        st = path.stat()
+    except OSError:
+        return False
+    if asset.get("sha1"):
+        h = hashlib.sha1()
+        try:
+            with open(path, "rb") as fh:
+                for chunk in iter(lambda: fh.read(1 << 20), b""):
+                    h.update(chunk)
+        except OSError:
+            return False
+        return h.hexdigest().lower() == asset["sha1"].lower()
+    if asset.get("size") and st.st_size != asset["size"]:
+        return False
+    return st.st_mtime >= since
 
 
 def cf_files(mod_id: int, key: str) -> list[dict]:
@@ -1959,7 +1980,8 @@ class UpdateDialog(Dialog):
             if it.get("link"):
                 tag = f"link{i}"
                 txt.tag_configure(tag, foreground=THEME["gold"], underline=True)
-                txt.tag_bind(tag, "<Button-1>", lambda e, u=it["link"]: parent.open_link(u))
+                txt.tag_bind(tag, "<Button-1>", lambda e, it=it: it["on_link"]() if it.get("on_link")
+                             else parent.open_link(it["link"]))
                 txt.tag_bind(tag, "<Enter>", lambda e: txt.configure(cursor="hand2"))
                 txt.tag_bind(tag, "<Leave>", lambda e: txt.configure(cursor=""))
                 txt.insert("end", "Download bei CurseForge öffnen ↗", tag)
@@ -2047,6 +2069,11 @@ class App(BaseTk):
         self.jobs: queue.Queue = queue.Queue()
         self.quiet_jobs: queue.Queue = queue.Queue()
         self.watching_build = ""
+        self.dl_watch: dict[str, dict] = {}     # CurseForge-Updates, deren ZIP im Download-Ordner erwartet wird
+        self._dl_job = None
+        self._dl_seen: dict[str, tuple] = {}     # Pfad -> (Größe, Änderungszeit) beim letzten Blick
+        self._dl_checked: dict[str, tuple] = {}  # Pfad -> (Größe, Änderungszeit) schon geprüft, passte nicht
+        self.modal_download = False
         self.busy = False
 
         if not self.cfg["wow_root"]:
@@ -3181,25 +3208,116 @@ class App(BaseTk):
         i = int(col_id[1:]) - 1
         return shown[i] if 0 <= i < len(shown) else ""
 
-    def cf_update_link(self, addons) -> tuple[str, str]:
-        """(Name, Download-Adresse) eines verfügbaren CurseForge-Updates dieser Addons – sonst ("", "")."""
+    def _pending_cf(self, addons) -> str:
+        """Quellen-ID eines offenen CurseForge-Updates dieser Addons ("" wenn keins)."""
         for a in addons:
             sid, src = self.folder_source(a.name)
             if not src or src.get("type") != "curseforge":
                 continue
             new, info = self.updates.get(sid), self.update_info.get(sid) or {}
             if new and new != src.get("tag") and info.get("best"):
-                return src.get("name") or sid, cf_download_url(info, info["best"])
-        return "", ""
+                return sid
+        return ""
 
-    def open_cf_update(self, addons=None):
-        sel = list(addons) if addons is not None else self.selected_addons()
-        name, url = self.cf_update_link(sel)
-        if not url:
+    def cf_update_link(self, addons) -> tuple[str, str]:
+        """(Name, Download-Adresse) eines verfügbaren CurseForge-Updates dieser Addons – sonst ("", "")."""
+        sid = self._pending_cf(addons)
+        if not sid:
+            return "", ""
+        info = self.update_info[sid]
+        return self.sources()[sid].get("name") or sid, cf_download_url(info, info["best"])
+
+    def open_cf_update(self, addons=None, sid: str = ""):
+        """CurseForge-Download im Browser öffnen – die geladene ZIP wird danach automatisch installiert."""
+        if not sid:
+            sid = self._pending_cf(list(addons) if addons is not None else self.selected_addons())
+        info = self.update_info.get(sid) or {}
+        if not sid or not info.get("best"):
             return
-        self.open_link(url)
-        self.set_status(f"CurseForge-Download für {name} geöffnet. Die ZIP danach mit „ZIP installieren“ "
-                        "einspielen (oder ins Fenster ziehen) – oder einfach „Alle aktualisieren“.")
+        self.open_link(cf_download_url(info, info["best"]))
+        self.watch_download(sid)
+        self.set_status(f"CurseForge-Download für {self.source_name(sid)} geöffnet – sobald die Datei in "
+                        f"{self.download_dir()} liegt, installiert Leeroyzan sie automatisch.")
+
+    # ----- Browser-Downloads automatisch einspielen ----------------------- #
+    DL_POLL_MS = 2000
+
+    def watch_download(self, sid: str, since: float | None = None):
+        """Erwartet die ZIP eines CurseForge-Updates im Download-Ordner und installiert sie, sobald sie da ist."""
+        info = self.update_info.get(sid) or {}
+        asset = info.get("best")
+        if not asset or not asset.get("file_name"):
+            return
+        since = time.time() - 15 if since is None else since
+        old = self.dl_watch.get(sid)
+        if old and old["asset"].get("file_id") == asset.get("file_id"):
+            old["since"] = min(old["since"], since)
+        else:
+            self.dl_watch[sid] = {"info": info, "asset": asset, "since": since, "flavor": self.flavor}
+            self._dl_checked.clear()          # schon gesehene Dateien für das neue Ziel erneut prüfen
+        if not self._dl_job:
+            self._dl_job = self.after(self.DL_POLL_MS, self._poll_downloads)
+
+    def _poll_downloads(self):
+        self._dl_job = None
+        for sid, w in list(self.dl_watch.items()):          # nur noch offene Updates beobachten
+            src = self.sources().get(sid) if w["flavor"] == self.flavor else None
+            if not src or src.get("file_id") == w["asset"].get("file_id"):
+                del self.dl_watch[sid]
+        if not self.dl_watch:
+            return
+        if not (self.busy or self.modal_download):
+            hit = self._find_download()
+            if hit:
+                self._install_download(*hit)
+        self._dl_job = self.after(self.DL_POLL_MS, self._poll_downloads)
+
+    def _find_download(self):
+        try:
+            files = list(self.download_dir().glob("*.zip"))
+        except OSError:
+            return None
+        for f in files:
+            try:
+                st = f.stat()
+            except OSError:
+                continue
+            key, sig = str(f), (st.st_size, st.st_mtime)
+            prev, self._dl_seen[key] = self._dl_seen.get(key), sig
+            if prev != sig or st.st_size == 0 or self._dl_checked.get(key) == sig:
+                continue                              # lädt noch, leer oder schon als unpassend erkannt
+            for sid, w in self.dl_watch.items():
+                if zip_name_matches(f.name, w["asset"]["file_name"]) and download_matches(f, w["asset"], w["since"]):
+                    return sid, f
+            self._dl_checked[key] = sig
+        return None
+
+    def _install_download(self, sid: str, path: Path):
+        w = self.dl_watch.pop(sid)
+        info, asset = w["info"], w["asset"]
+        root, flavor = self.root_path, self.flavor
+
+        def done(folders):
+            self.remember_cf_source(info, asset, folders)
+            self.remember_bundle(folders)
+            self.updates.pop(sid, None)
+            save_config(self.cfg)
+            log.info("Aus dem Download-Ordner aktualisiert: %s (%s) <- %s", info.get("repo"), asset["name"], path)
+            self.refresh()
+            msg = f"{info.get('repo') or sid} aus deinem Download-Ordner aktualisiert ({asset['name']})."
+            if running_wow(root, flavor):
+                msg += "  WoW läuft – wirkt nach /reload."
+            self.set_status(msg)
+
+        def failed(err):
+            self._dl_checked[str(path)] = self._dl_seen.get(str(path))
+            self.dl_watch.setdefault(sid, w)          # weiter auf einen neuen Download warten
+            if not self._dl_job:
+                self._dl_job = self.after(self.DL_POLL_MS, self._poll_downloads)
+            log.error("Download %s konnte nicht installiert werden: %s", path, err)
+            self.set_status(f"{path.name} konnte nicht installiert werden: {err}")
+
+        self.run_bg(f"Installiere {path.name}", lambda: install_zip(path, root, flavor), done, failed)
 
     def _hint_update_link(self):
         try:
@@ -3598,13 +3716,20 @@ class App(BaseTk):
                           "der Manager sie automatisch.\n\nJetzt starten?"):
             return
         done = []
-        for n, item in enumerate(items, 1):
-            self.open_link(item["page"])
-            res = DownloadWatchDialog(self, item, n, len(items), self.download_dir(),
-                                      self.root_path, self.flavor).show()
-            if not res or res[0] == "cancel":
-                break
-            if res[0] == "ok":
+        self.modal_download = True
+        try:
+            results = []
+            for n, item in enumerate(items, 1):
+                self.open_link(item["page"])
+                res = DownloadWatchDialog(self, item, n, len(items), self.download_dir(),
+                                          self.root_path, self.flavor).show()
+                results.append((item, res))
+                if not res or res[0] == "cancel":
+                    break
+        finally:
+            self.modal_download = False
+        for item, res in results:
+            if res and res[0] == "ok":
                 folders = res[1]
                 info, asset = item["info"], item["asset"]
                 self.remember_cf_source(info, asset, folders)
@@ -3845,6 +3970,9 @@ class App(BaseTk):
                             self._adopt_cf(r, info["best"])
             save_config(self.cfg)
             self.render()
+            for r, info in res.items():
+                if r.startswith(CF_PREFIX) and info.get("best") and info["tag"] != self.sources()[r].get("tag"):
+                    self.watch_download(r)
             n = sum(1 for r, info in res.items() if info["tag"] != self.sources()[r].get("tag"))
             msg = f"{n} Update(s) verfügbar." if n else "Alle Addons sind aktuell."
             if errors:
@@ -3876,7 +4004,8 @@ class App(BaseTk):
                   "notes": (warn if r in blocked else "") + (self.update_info.get(r, {}).get("notes") or ""),
                   "published": self.update_info.get(r, {}).get("published", ""),
                   "link": (cf_download_url(self.update_info[r], self.update_info[r]["best"])
-                           if r.startswith(CF_PREFIX) and self.update_info.get(r, {}).get("best") else "")}
+                           if r.startswith(CF_PREFIX) and self.update_info.get(r, {}).get("best") else ""),
+                  "on_link": lambda r=r: self.open_cf_update(sid=r)}
                  for r in pending]
         hint = ("Vor dem Update wird automatisch ein WTF-Backup angelegt." if self.cfg.get("auto_backup") else "")
         if blocked:
