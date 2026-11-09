@@ -1,0 +1,270 @@
+-- scenario.lua: a play session driven through the stub. Part 1 runs until a
+-- /reload, part 2 continues after it and logs out. Globals from the runner:
+-- ADDON_DIR, TESTS_DIR, SV_IN (file with saved variables or nil), PART.
+dofile(TESTS_DIR .. "/wow_stub.lua")
+if SV_IN then dofile(SV_IN) end
+if START_NOW then STUB.now = START_NOW end
+if PART == 2 then -- the game state after the reload is what part 1 left behind
+	STUB.level, STUB.xp, STUB.xpMax, STUB.money = 22, 200, 11000, 52625
+	STUB.skills[2][4], STUB.skills[3][4] = 46, 31
+end
+
+local failures, checks = 0, 0
+local function check(cond, msg)
+	checks = checks + 1
+	if not cond then failures = failures + 1; print("FAIL: " .. msg) end
+end
+
+STUB.loadAddon(ADDON_DIR)
+local LZ = _G.LeeroyzanLink
+STUB.fire("ADDON_LOADED", "LeeroyzanLink")
+STUB.fire("PLAYER_LOGIN")
+STUB.fire("PLAYER_ENTERING_WORLD", PART == 1, PART ~= 1)
+STUB.advance(2)
+
+local mod = LZ.modules.Session
+check(mod.enabled, "session module enabled")
+local s = mod:Current()
+check(s ~= nil, "session exists")
+
+local ME = STUB.playerGUID
+local MINE_PLAYER = 0x511     -- mine | friendly | player
+local HOSTILE_NPC = 0xa48     -- npc | hostile | outsider
+local PET = 0x1111            -- mine | friendly | pet
+local function mob(id, n) return string.format("Creature-0-5096-0-1-%d-00000%04d", id, n) end
+
+local function kill(id, name, n, class, opts)
+	opts = opts or {}
+	local g = mob(id, n)
+	if class then
+		STUB.units.target = { name = name, guid = g, class = class, level = opts.level or 22 }
+		STUB.fire("PLAYER_TARGET_CHANGED")
+	end
+	STUB.combat = true
+	STUB.cleu("SPELL_CAST_SUCCESS", ME, "Rosenbert", MINE_PLAYER, g, name, HOSTILE_NPC, 78, "Heldenhafter Stoß", 1)
+	STUB.cleu("SWING_DAMAGE", ME, "Rosenbert", MINE_PLAYER, g, name, HOSTILE_NPC, 60, -1, 1, nil, nil, nil, false, false, false)
+	STUB.cleu("SWING_DAMAGE", ME, "Rosenbert", MINE_PLAYER, g, name, HOSTILE_NPC, 95, -1, 1, nil, nil, nil, true, false, false)
+	STUB.cleu("SWING_MISSED", ME, "Rosenbert", MINE_PLAYER, g, name, HOSTILE_NPC, "DODGE", false)
+	STUB.cleu("SPELL_DAMAGE", ME, "Rosenbert", MINE_PLAYER, g, name, HOSTILE_NPC, 78, "Heldenhafter Stoß", 1, opts.big or 140, -1, 1, nil, nil, nil, opts.crit or false, false, false)
+	STUB.cleu("SWING_DAMAGE", g, name, HOSTILE_NPC, ME, "Rosenbert", MINE_PLAYER, 35, -1, 1, nil, nil, nil, false, false, false)
+	STUB.cleu("SWING_MISSED", g, name, HOSTILE_NPC, ME, "Rosenbert", MINE_PLAYER, "PARRY", false)
+	if not opts.noBlow then
+		STUB.cleu("PARTY_KILL", ME, "Rosenbert", MINE_PLAYER, g, name, HOSTILE_NPC)
+	end
+	STUB.cleu("UNIT_DIED", nil, nil, 0, g, name, HOSTILE_NPC)
+	STUB.combat = false
+	if opts.xp then
+		STUB.xp = STUB.xp + opts.xp
+		STUB.fire("CHAT_MSG_COMBAT_XP_GAIN", string.format("%s dies, you gain %d experience. (+%d exp Rested bonus)", name, opts.xp, math.floor(opts.xp / 2)))
+		STUB.fire("PLAYER_XP_UPDATE", "player")
+	end
+	STUB.advance(1)
+end
+
+local function loot(id, n, kind)
+	local link = STUB.link(id)
+	local msg
+	if kind == "pushed" then
+		msg = n > 1 and string.format(LOOT_ITEM_PUSHED_SELF_MULTIPLE, link, n) or string.format(LOOT_ITEM_PUSHED_SELF, link)
+	elseif kind == "created" then
+		msg = n > 1 and string.format(LOOT_ITEM_CREATED_SELF_MULTIPLE, link, n) or string.format(LOOT_ITEM_CREATED_SELF, link)
+	else
+		msg = n > 1 and string.format(LOOT_ITEM_SELF_MULTIPLE, link, n) or string.format(LOOT_ITEM_SELF, link)
+	end
+	STUB.fire("CHAT_MSG_LOOT", msg)
+end
+
+if PART == 1 then
+	check(s.start == STUB.now - 2, "session start time")
+	check(s.level.from == 21, "start level")
+
+	-- walking around, then a mount ride
+	STUB.speed = 7
+	STUB.advance(60)                -- 420 yards on foot
+	STUB.mounted, STUB.speed = true, 14
+	STUB.advance(30)                -- 420 yards mounted
+	STUB.mounted, STUB.speed = false, 0
+	STUB.fire("ZONE_CHANGED")
+	_G.JumpOrAscendStart(); _G.JumpOrAscendStart(); _G.JumpOrAscendStart()
+
+	-- quest accepted (Classic args: log index, quest ID)
+	STUB.questLog = { { title = "Die Bedrohung der Gnolle", level = 20, id = 125 } }
+	STUB.fire("QUEST_ACCEPTED", 1, 125)
+	STUB.questLog[2] = { title = "Unnützes Zeug", level = 19, id = 300 }
+	STUB.fire("QUEST_ACCEPTED", 2, 300)
+
+	-- kills: normal mobs, an elite, a rare; a pet kill and a kill by the group
+	kill(434, "Rotkammgnoll", 1, "normal", { xp = 120 })
+	kill(434, "Rotkammgnoll", 2, "normal", { xp = 120, big = 412, crit = true })
+	kill(434, "Rotkammgnoll", 3, nil, { xp = 120 })
+	kill(445, "Rotkammgnoll-Alpha", 4, "elite", { xp = 300 })
+	kill(947, "Rohh der Schweigsame", 5, "rare", { xp = 400, noBlow = true })
+	-- grey mob killed by the pet only (no XP message)
+	local g = mob(1922, 6)
+	STUB.cleu("SWING_DAMAGE", "Pet-0-1-2-3-4-5", "Wolf", PET, g, "Graue Hyäne", HOSTILE_NPC, 40, -1, 1, nil, nil, nil, false, false, false)
+	STUB.cleu("PARTY_KILL", "Pet-0-1-2-3-4-5", "Wolf", PET, g, "Graue Hyäne", HOSTILE_NPC)
+	STUB.cleu("UNIT_DIED", nil, nil, 0, g, "Graue Hyäne", HOSTILE_NPC)
+	-- a mob nobody of us touched dies: must not count
+	STUB.cleu("UNIT_DIED", nil, nil, 0, mob(500, 7), "Fremder Gnoll", HOSTILE_NPC)
+
+	-- heal, buff, environmental damage
+	STUB.cleu("SPELL_HEAL", ME, "Rosenbert", MINE_PLAYER, ME, "Rosenbert", MINE_PLAYER, 2061, "Erste Hilfe", 1, 300, 50, 0, false)
+	STUB.cleu("SPELL_AURA_APPLIED", "Player-1", "Priester", 0x514, ME, "Rosenbert", MINE_PLAYER, 1243, "Machtwort: Seelenstärke", 2, "BUFF")
+	STUB.cleu("SPELL_AURA_APPLIED", mob(434, 1), "Rotkammgnoll", HOSTILE_NPC, ME, "Rosenbert", MINE_PLAYER, 100, "Schwächung", 1, "DEBUFF")
+	STUB.cleu("ENVIRONMENTAL_DAMAGE", nil, nil, 0, ME, "Rosenbert", MINE_PLAYER, "Falling", 80)
+
+	-- loot from a mob, with money
+	STUB.units.target = { name = "Rotkammgnoll", guid = mob(434, 3), dead = true }
+	STUB.fire("LOOT_OPENED")
+	STUB.fire("CHAT_MSG_MONEY", "You loot 25 Copper")
+	STUB.money = STUB.money + 25; STUB.fire("PLAYER_MONEY")
+	loot(2589, 3)
+	loot(1210, 1)
+	STUB.fire("LOOT_CLOSED")
+	STUB.units.target = nil
+	STUB.advance(3)
+
+	-- herb gathering
+	STUB.fire("UNIT_SPELLCAST_SUCCEEDED", "player", "Cast-1", 2366)
+	STUB.fire("LOOT_OPENED")
+	loot(765, 2)
+	STUB.fire("LOOT_CLOSED")
+	STUB.fire("CHAT_MSG_SKILL", "Your skill in Kräuterkunde has increased to 46.")
+	STUB.skills[2][4] = 46
+	STUB.advance(3)
+
+	-- crafting
+	loot(118, 5, "created")
+	STUB.fire("CHAT_MSG_SKILL", "Your skill in Alchemie has increased to 31.")
+	STUB.skills[3][4] = 31
+	STUB.fire("CHAT_MSG_SYSTEM", "You have learned how to create a new item: Schwacher Heiltrank.")
+	STUB.fire("CHAT_MSG_SYSTEM", "You have learned a new spell: Spalten.")
+
+	-- discovering a subzone, reputation
+	STUB.xp = STUB.xp + 140
+	STUB.fire("CHAT_MSG_SYSTEM", "Discovered Steinwacht: 140 experience gained")
+	STUB.fire("UI_INFO_MESSAGE", 0, "Discovered Steinwacht: 140 experience gained")
+	STUB.fire("PLAYER_XP_UPDATE", "player")
+	STUB.fire("CHAT_MSG_COMBAT_FACTION_CHANGE", "Your Sturmwind reputation has increased by 250.")
+
+	-- quest turn-in at a vendor: XP, money, reward item
+	STUB.questID, STUB.questTitle = 125, "Die Bedrohung der Gnolle"
+	STUB.fire("QUEST_COMPLETE")
+	STUB.xp = STUB.xp + 1250
+	STUB.fire("QUEST_TURNED_IN", 125, 1250, 3500)
+	STUB.fire("PLAYER_XP_UPDATE", "player")
+	STUB.money = STUB.money + 3500; STUB.fire("PLAYER_MONEY")
+	loot(10000, 1, "pushed")
+	table.remove(STUB.questLog, 1)
+	STUB.advance(5)
+
+	-- abandon a quest
+	STUB.abandon = "Unnützes Zeug"
+	SetAbandonQuest()
+	AbandonQuest()
+
+	-- merchant: sell and repair
+	STUB.fire("MERCHANT_SHOW")
+	STUB.money = STUB.money + 300; STUB.fire("PLAYER_MONEY")
+	STUB.money = STUB.money - 1200; STUB.fire("PLAYER_MONEY")
+	STUB.fire("MERCHANT_CLOSED")
+	STUB.advance(5)
+
+	-- level up: rest of the bar + start of the next one
+	STUB.xp = 9900
+	STUB.fire("PLAYER_XP_UPDATE", "player")
+	STUB.level, STUB.xp, STUB.xpMax = 22, 200, 11000
+	STUB.fire("PLAYER_LEVEL_UP", 22)
+	STUB.fire("PLAYER_XP_UPDATE", "player")
+
+	-- AFK and resting for a while
+	STUB.afk, STUB.resting = true, true
+	STUB.advance(120)
+	STUB.afk, STUB.resting = false, false
+
+	check(s.kills.n == 6, "kills counted (incl. pet kill, excl. foreign): " .. s.kills.n)
+	check(s.kills.elite == 1 and s.kills.rare == 1, "elite/rare classified")
+	check(s.kills.blows == 5, "killing blows: " .. s.kills.blows)
+	check(s.xp.kills == 1060, "xp from kills incl. rested messages: " .. s.xp.kills)
+	check(s.xp.quests == 1250, "xp from quests")
+	check(s.xp.explore == 140, "xp from exploring (deduplicated): " .. s.xp.explore)
+	check(#s.explore.found == 1, "discovery deduplicated")
+	check(#s.quests.done == 1 and s.quests.done[1].title == "Die Bedrohung der Gnolle", "quest done with title")
+	check(#s.quests.accepted == 2, "quests accepted")
+	check(#s.quests.abandoned == 1 and s.quests.abandoned[1].title == "Unnützes Zeug", "quest abandoned")
+	check(s.money.gain.loot == 25 and s.money.gain.quest == 3500 and s.money.gain.vendor == 300, "money sources")
+	check(s.money.spend.vendor == 1200, "money spent at vendor")
+	check(s.prof.gathered.herb and s.prof.gathered.herb[765].n == 2, "herbs gathered")
+	check(s.prof.crafted[118].n == 5, "potions crafted")
+	check(s.prof.skills["Kräuterkunde"].b == 46, "skill up herbalism")
+	check(s.loot.items[2589].n == 3 and s.loot.items[1210].q == 2, "loot items")
+	check(s.loot.items[10000].p == 1, "quest reward marked as pushed")
+	check(#s.loot.notable == 2, "notable loot (green+): " .. #s.loot.notable)
+	check(s.combat.swings.n == 15 and s.combat.swings.dodge == 5 and s.combat.swings.crit == 5, "swings")
+	check(s.combat.maxHit == 412 and s.combat.maxHitCrit, "biggest hit")
+	check(s.combat.heal == 250 and s.combat.over == 50, "healing")
+	check(s.combat.buffs["Machtwort: Seelenstärke"] == 1, "buffs received")
+	check(s.combat.env.Falling == 80, "falling damage")
+	check(s.level.to == 22 and #s.level.ups == 1, "level up")
+	check(s.rep["Sturmwind"] == 250, "reputation")
+	check(math.abs(s.move.foot - 420) < 8, "distance on foot: " .. s.move.foot)
+	check(math.abs(s.move.mount - 420) < 15, "distance mounted: " .. s.move.mount)
+	check(s.move.jumps == 3, "jumps")
+	check(s.time.afk >= 118, "afk time: " .. s.time.afk)
+	check(#s.spellsLearned == 1 and #s.prof.learned == 1, "learned spell and recipe")
+	STUB.fire("PLAYER_LOGOUT")
+	check(s.played > 200, "played time: " .. s.played)
+else
+	-- after /reload: the same session continues
+	check(#LZ.gdb.sessionLog == 1, "no new session after reload: " .. #LZ.gdb.sessionLog)
+	check(s.resumes == 1, "resume counted")
+	check(s.kills.n == 6, "kills kept across reload")
+
+	-- dungeon run with boss, wipe and death
+	STUB.instance = { "Die Todesminen", "party", 1, "Normal", 5, 0, false, 36 }
+	STUB.group = 5
+	STUB.fire("ZONE_CHANGED_NEW_AREA")
+	STUB.advance(2)
+	check(#s.runs == 1 and s.runs[1].name == "Die Todesminen", "dungeon run opened")
+	kill(644, "Rhahk'Zor", 20, "elite", { xp = 500, level = 19 })
+	STUB.fire("ENCOUNTER_START", 1, "Edwin VanCleef", 1, 5)
+	STUB.fire("ENCOUNTER_END", 1, "Edwin VanCleef", 1, 5, 0)
+	STUB.cleu("SWING_DAMAGE", mob(639, 21), "Edwin VanCleef", HOSTILE_NPC, ME, "Rosenbert", MINE_PLAYER, 900, -1, 1, nil, nil, nil, true, false, false)
+	STUB.dead = true
+	STUB.fire("PLAYER_DEAD")
+	STUB.advance(20)
+	STUB.dead = false
+	STUB.fire("ENCOUNTER_START", 1, "Edwin VanCleef", 1, 5)
+	kill(639, "Edwin VanCleef", 22, "elite", { xp = 800 })
+	STUB.fire("ENCOUNTER_END", 1, "Edwin VanCleef", 1, 5, 1)
+	STUB.advance(60)
+	STUB.instance = { "Westfall", "none", 0, "", 0, 0, false, 0 }
+	STUB.fire("ZONE_CHANGED_NEW_AREA")
+	STUB.advance(2)
+
+	check(s.runs[1].stop ~= nil, "dungeon run closed")
+	check(s.runs[1].kills == 2 and #s.runs[1].bosses == 1 and s.runs[1].wipes == 1 and s.runs[1].deaths == 1, "run stats")
+	check(#s.bosses == 1 and s.bosses[1].name == "Edwin VanCleef", "boss recorded")
+	check(s.kills.boss == 1, "boss classified by encounter: " .. s.kills.boss)
+	check(s.deathN == 1 and s.deaths[1].by == "Edwin VanCleef", "death with killer")
+	check(s.time.instance >= 80, "time in instance: " .. s.time.instance)
+
+	-- flight path
+	STUB.taxi, STUB.speed = true, 30
+	STUB.advance(20)
+	STUB.taxi, STUB.speed = false, 0
+	STUB.fire("PLAYER_LOGOUT")
+	check(s.move.taxi > 500, "flight path distance")
+	check(s.played > 300, "played time grows across reload: " .. s.played)
+end
+
+-- the in-game page and the overview line must render without errors
+local okR, report = pcall(mod.Report, mod)
+check(okR and type(report) == "string" and report:find("Sitzung", 1, true) ~= nil, "in-game report: " .. tostring(report):sub(1, 200))
+local okS, summary = pcall(mod.Summary, mod)
+check(okS and type(summary) == "string", "summary line: " .. tostring(summary))
+for _, e in pairs(LZ.gdb.errors or {}) do check(false, "error logged by the addon: " .. tostring(e.msg)) end
+
+print(string.format("RESULT[part %d] %d checks, %d failures", PART, checks, failures))
+for _, line in ipairs(STUB.chat) do if line:find("ERROR") then print(line) end end
+return failures

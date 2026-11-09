@@ -28,6 +28,7 @@ One window, no pop-ups. A sidebar with the game version, the pages and a big **P
 | **My addons** | All installed addons as a list or as tiles, with search, grouping and a detail panel (update, undo an update, hold, open source, link with CurseForge, open folder, remove). Addons with an update are yellow with a ⬇ marker. |
 | **Discover** | Install directly from a CurseForge link, a GitHub repository or a ZIP from your download folder – and search CurseForge (WoW addons only) with file choice. |
 | **Updates** | Check and update all or single addons, read the changes, see which blocked downloads Leeroyzan is waiting for, link manual addons, and keep Leeroyzan itself up to date. |
+| **Sessions** | Every play session recorded by the companion addon **Leeroyzan Link** – a summary per session and totals per character and period (see below). |
 | **Share** | Create a download-list code for Discord/SMS or a `.lzpack` package – and paste a code you received to install it. |
 | **Sets & backups** | Addon sets (switch groups of addons on/off) and WTF backups with restore. |
 | **Settings** | WoW folder, CurseForge API key, download folder, language, update options, log and data folder. |
@@ -51,6 +52,23 @@ One window, no pop-ups. A sidebar with the game version, the pages and a big **P
 - Log file of all changes
 - Remembers window size and position; keyboard shortcuts: **Ctrl+F** search, **F5** rescan (on *Updates*: check for updates), **Del** remove the selected addons (with confirmation)
 - Self-update from GitHub releases
+
+## Play sessions (Leeroyzan Link)
+
+Leeroyzan comes with its own companion addon, **Leeroyzan Link** (folder `LeeroyzanLink` in this repository, also attached to every release as `LeeroyzanLink.zip`). Leeroyzan installs or updates it with one click on the **Sessions** page. In the game it records every session; after you log out, Leeroyzan imports it, keeps it and writes a summary:
+
+- **Time and date:** start and end, play time, time in combat, AFK, resting, in instances, on flight paths, dead
+- **Experience and gold:** XP split into kills, quests and exploring, level-ups; gold start → end with income and expenses by source (loot, quests, vendor, mail, auction house, trainer, flight master, trade)
+- **Quests:** completed (with XP and money), accepted, abandoned
+- **Loot:** every item with quality and vendor value, notable loot (green and better), quest rewards
+- **Combat:** damage (by ability, pet included), healing and overhealing, damage and healing taken, biggest hits, melee swings (hits, crits, misses, dodges, parries, blocks), spells cast, buffs and debuffs received, interrupts, dispels, deaths with place and killer
+- **Travel:** distance on foot (with an estimated step count), mounted, swimming, by flight path, jumps
+- **Professions:** skill-ups (before → after), crafted items, gathered herbs/ore/leather/fish, new recipes
+- **Exploration:** discovered areas (with XP), time per zone and visited subzones
+- **Dungeons and raids:** every instance with duration, kills, bosses, wipes, deaths, XP
+- **Enemies:** kills split into normal, elite, rare and bosses, killing blows, most killed enemies
+
+How it works: WoW addons cannot open network connections or write files, so the addon keeps its data in its *SavedVariables* (`WTF\Account\<account>\SavedVariables\LeeroyzanLink.lua`, the newest 30 sessions), which WoW writes on logout and on `/reload`. Leeroyzan watches that file, **only reads it** and stores each session as a JSON file in `Leeroyzan-Data\sessions\<game version>`. A `/reload` or logging back in with the same character within 15 minutes continues the same session. If Leeroyzan is open while you play, the summary appears as soon as the game is closed; otherwise on the next start. In the game, `/lz session` shows the current session.
 
 ## CurseForge integration
 
@@ -76,6 +94,10 @@ A download list is the lightweight way to share many addons: it contains **only 
 - **Import:** paste the code into *Receive* on the **Share** page – it accepts (all parts, in any order; surrounding chat text and code-block backticks are ignored) or a `.lzlist` file, also via drag & drop. The manager shows what will be installed, skips addons you already have, and downloads the rest with *your own* CurseForge key. Downloads blocked by the author use the same browser-download flow as everywhere else.
 - **Safe by design:** the code is `LZ1:<part>/<total>:<data>` (compressed JSON, Base32 so it survives chat apps). Imported lists are strictly validated; only known CurseForge IDs and valid GitHub repo names are accepted, and the size is capped.
 - Addons without a download source (installed manually and not linked to CurseForge) cannot be listed – the Share page tells you which ones; use *Link with CurseForge* or a `.lzpack` package for those.
+
+## Tests
+
+`tests/` drives the addon through a small imitation of the WoW API (a scripted play session with a `/reload` in the middle) and checks the import and the summaries: `pip install lupa`, then `python tests/test_sessions.py`.
 
 ## Requirements
 
@@ -109,11 +131,11 @@ Publishing a new version:
 
 1. Set `APP_VERSION` in `leeroyzan.py` (e.g. `1.2.0`) and commit.
 2. Create a release with the tag `v1.2.0` (Releases → Draft a new release → Publish).
-3. The *Build release exe* workflow builds the `.exe` on a Windows runner and attaches it plus its SHA-256 checksum and `Leeroyzan-Portable.zip` to the release (takes a few minutes).
+3. The *Build release exe* workflow builds the `.exe` on a Windows runner (with the `LeeroyzanLink` addon inside) and attaches it plus its SHA-256 checksum, `Leeroyzan-Portable.zip` and `LeeroyzanLink.zip` to the release (takes a few minutes).
 
 ## Where data is stored
 
-Configuration, backups, kept previous addon versions (for *undo*) and the log file are stored in the `Leeroyzan-Data` folder next to `Leeroyzan.exe` (*Settings → Help → Open data folder*). The manager only reads and writes files inside the WoW `Interface\AddOns`, `Interface\AddOns_Disabled` and `WTF` folders – it never modifies the game client.
+Configuration, backups, kept previous addon versions (for *undo*), imported play sessions and the log file are stored in the `Leeroyzan-Data` folder next to `Leeroyzan.exe` (*Settings → Help → Open data folder*). The manager only reads and writes files inside the WoW `Interface\AddOns`, `Interface\AddOns_Disabled` and `WTF` folders – it never modifies the game client.
 
 ## License
 

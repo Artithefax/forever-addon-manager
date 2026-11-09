@@ -1,0 +1,1246 @@
+-- Session: records a whole play session (login -> logout) for Leeroyzan:
+-- play time and date, experience and gold (with sources), quests, loot, combat
+-- (damage, healing, deaths, swings, spells, buffs), distance and steps,
+-- professions, exploration, dungeons/raids and kills (normal, elite, rare, boss).
+--
+-- A /reload or logging back in with the same character within a few minutes
+-- continues the same session. Sessions are stored in
+-- LeeroyzanLinkDB.global.sessionLog (newest MAX_SESSIONS); WoW writes that file on
+-- logout and Leeroyzan then imports, keeps and summarizes them.
+local ADDON, LZ = ...
+local T, P, C = LZ.T, LZ.P, LZ.C
+
+local mod = LZ:NewModule("Session", {
+	group = "link",
+	title = { "Sitzungsprotokoll", "Session log" },
+	desc = {
+		"Zeichnet jede Spielsitzung auf (Zeit, Erfahrung, Gold, Quests, Beute, Kampf, Strecke, Berufe, Entdeckungen, Instanzen, Kills). Nach dem Ausloggen übernimmt Leeroyzan die Sitzung und fasst sie zusammen.",
+		"Records every play session (time, experience, gold, quests, loot, combat, distance, professions, discoveries, instances, kills). After you log out, Leeroyzan imports the session and summarizes it.",
+	},
+	defaults = { resumeMinutes = 15 },
+})
+
+local VERSION = 2
+local MAX_SESSIONS = 30
+local TICK = 0.5
+local YARD_M = 0.9144
+local LIMIT = {
+	spells = 40, heals = 25, casts = 40, auras = 30, takenBy = 20, mobs = 80, items = 150, notable = 50,
+	accepted = 80, done = 80, abandoned = 40, deaths = 30, found = 60, zones = 30, subs = 25, skills = 40,
+	crafted = 40, gathered = 40, learned = 40, runs = 20, bosses = 40, rep = 20, ups = 20, levelUps = 20,
+}
+
+local s = nil       -- current session (a table inside the saved variables)
+local rt = {}       -- runtime state that is not saved
+local band = bit and bit.band
+
+----------------------------------------------------------------------
+-- Helpers
+----------------------------------------------------------------------
+local function now() return GetTime and GetTime() or 0 end
+
+local function add(t, k, v)
+	if k == nil then return end
+	t[k] = (t[k] or 0) + (v or 1)
+end
+
+local function push(list, entry, max)
+	list[#list + 1] = entry
+	while max and #list > max do table.remove(list, 1) end
+end
+
+-- Blizzard format string -> Lua pattern; also understands "%1$s" style arguments.
+local function pattern(fmt, open)
+	if type(fmt) ~= "string" or fmt == "" then return nil end
+	local p = fmt:gsub("%%%d%$", "%%")
+	p = p:gsub("([%(%)%.%%%+%-%*%?%[%]%^%$])", "%%%1")
+	p = p:gsub("%%%%s", "(.+)")
+	p = p:gsub("%%%%d", "(%%d+)")
+	return "^" .. p .. (open and "" or "$")
+end
+
+local function zoneName()
+	local z = (GetRealZoneText and GetRealZoneText()) or (GetZoneText and GetZoneText()) or ""
+	if z == "" then z = "?" end
+	return z
+end
+
+local function npcID(guid)
+	if type(guid) ~= "string" then return nil end
+	local kind, _, _, _, _, id = strsplit("-", guid)
+	if kind == "Creature" or kind == "Vehicle" then return tonumber(id) end
+end
+
+local function itemName(link)
+	return type(link) == "string" and link:match("%[(.-)%]") or nil
+end
+
+-- Keeps only the `max` biggest entries of a map. `value(v)` returns the sort value.
+local function trimMap(t, max, value)
+	local keys = {}
+	for k in pairs(t) do keys[#keys + 1] = k end
+	if #keys <= max then return end
+	table.sort(keys, function(a, b) return value(t[a]) > value(t[b]) end)
+	for i = max + 1, #keys do t[keys[i]] = nil end
+end
+local function byNumber(v) return type(v) == "number" and v or 0 end
+local function byFirst(v) return type(v) == "table" and (v[1] or 0) or 0 end
+local function byN(v) return type(v) == "table" and (v.n or 0) or 0 end
+local function bySec(v) return type(v) == "table" and (v.sec or 0) or 0 end
+
+local function round(x, digits)
+	local m = 10 ^ (digits or 0)
+	return math.floor((x or 0) * m + 0.5) / m
+end
+
+-- Thousands separator in the UI language.
+function LZ.Num(n)
+	n = math.floor((tonumber(n) or 0) + 0.5)
+	local neg = n < 0
+	local str = tostring(neg and -n or n)
+	local sep = LZ.lang == "de" and "." or ","
+	str = str:reverse():gsub("(%d%d%d)", "%1" .. sep):reverse()
+	if str:sub(1, 1) == sep then str = str:sub(2) end
+	return (neg and "-" or "") .. str
+end
+
+local function km(yards)
+	local v = (yards or 0) * YARD_M / 1000
+	local str = string.format("%.1f", v)
+	if LZ.lang == "de" then str = str:gsub("%.", ",") end
+	return str .. " km"
+end
+
+----------------------------------------------------------------------
+-- Several handlers per event inside this module
+----------------------------------------------------------------------
+local handlers = {}
+local function on(event, fn)
+	local list = handlers[event]
+	if not list then
+		list = {}
+		handlers[event] = list
+		mod:Event(event, function(self, ev, ...)
+			if not s then return end
+			for i = 1, #list do list[i](...) end
+		end)
+	end
+	list[#list + 1] = fn
+end
+
+----------------------------------------------------------------------
+-- Session table
+----------------------------------------------------------------------
+local function playerLevel() return (UnitLevel and UnitLevel("player")) or 0 end
+local function money() return (GetMoney and GetMoney()) or 0 end
+
+local function newSession()
+	local t = time()
+	local _, class = UnitClass("player")
+	local _, race = UnitRace("player")
+	local lvl, m = playerLevel(), money()
+	return {
+		v = VERSION, id = LZ.charKey .. ":" .. t, char = LZ.charKey,
+		name = UnitName and UnitName("player") or nil,
+		realm = GetRealmName and GetRealmName() or nil,
+		class = class, race = race, faction = UnitFactionGroup and UnitFactionGroup("player") or nil,
+		addon = LZ.version, interface = C.InterfaceVersion(), lang = LZ.lang,
+		start = t, stop = t, saved = t, played = 0, resumes = 0,
+		time = { combat = 0, afk = 0, rest = 0, dead = 0, taxi = 0, instance = 0 },
+		level = { from = lvl, to = lvl, ups = {} },
+		xp = { total = 0, kills = 0, quests = 0, explore = 0, other = 0, killsN = 0 },
+		money = { start = m, stop = m, income = 0, spent = 0, gain = {}, spend = {} },
+		quests = { accepted = {}, done = {}, abandoned = {} },
+		loot = { n = 0, value = 0, q = {}, items = {}, notable = {} },
+		combat = {
+			dmg = 0, dmgPet = 0, hits = 0, crits = 0, maxHit = 0, spells = {},
+			heal = 0, over = 0, maxHeal = 0, heals = {},
+			taken = 0, maxTaken = 0, takenBy = {}, healTaken = 0, env = {},
+			swings = { n = 0, hit = 0, crit = 0, miss = 0, dodge = 0, parry = 0, block = 0, glance = 0 },
+			swingsTaken = { n = 0, hit = 0, crit = 0, miss = 0, dodge = 0, parry = 0, block = 0 },
+			casts = {}, castN = 0, buffs = {}, buffN = 0, debuffs = {}, debuffN = 0, buffsGiven = 0,
+			interrupts = 0, dispels = 0,
+		},
+		kills = { n = 0, normal = 0, elite = 0, rare = 0, rareelite = 0, boss = 0, players = 0, blows = 0, mobs = {} },
+		bosses = {}, wipes = 0,
+		deaths = {}, deathN = 0,
+		move = { foot = 0, mount = 0, swim = 0, taxi = 0, ghost = 0, steps = 0, jumps = 0 },
+		prof = { skills = {}, ups = 0, crafted = {}, gathered = {}, learned = {} },
+		spellsLearned = {},
+		explore = { found = {}, zones = {} },
+		runs = {},
+		rep = {},
+	}
+end
+
+----------------------------------------------------------------------
+-- Experience
+----------------------------------------------------------------------
+local function readXP()
+	if UnitXP and UnitXPMax then return UnitXP("player") or 0, UnitXPMax("player") or 0 end
+	return 0, 0
+end
+
+on("PLAYER_XP_UPDATE", function(unit)
+	if unit and unit ~= "player" then return end
+	local cur, max = readXP()
+	local gained
+	if max == rt.xpMax and cur >= rt.xp then
+		gained = cur - rt.xp
+	else
+		gained = (rt.xpMax - rt.xp) + cur -- level-up: rest of the old bar + start of the new one
+	end
+	rt.xp, rt.xpMax = cur, max
+	if gained <= 0 then return end
+	s.xp.total = s.xp.total + gained
+	if rt.run then rt.run.xp = (rt.run.xp or 0) + gained end
+end)
+
+on("PLAYER_LEVEL_UP", function(level)
+	level = tonumber(level) or playerLevel()
+	push(s.level.ups, { l = level, t = time() }, LIMIT.levelUps)
+	s.level.to = level
+end)
+
+on("CHAT_MSG_COMBAT_XP_GAIN", function(msg)
+	if type(msg) ~= "string" then return end
+	if rt.pKillXP then
+		local _, amount = msg:match(rt.pKillXP)
+		if amount then
+			s.xp.kills = s.xp.kills + (tonumber(amount) or 0)
+			s.xp.killsN = s.xp.killsN + 1
+			return
+		end
+	end
+	-- "You gain %d experience." right after a quest turn-in when the event had no XP value
+	if rt.pXP and rt.questWaitXP and now() - rt.questWaitXP.at < 3 then
+		local amount = tonumber(msg:match(rt.pXP))
+		if amount then
+			rt.questWaitXP.e.xp = amount
+			s.xp.quests = s.xp.quests + amount
+			rt.questWaitXP = nil
+		end
+	end
+end)
+
+on("TIME_PLAYED_MSG", function(total) s.playedTotal = tonumber(total) or s.playedTotal end)
+
+----------------------------------------------------------------------
+-- Gold: every change is booked to the window that was open at that moment
+----------------------------------------------------------------------
+local function within(key, sec) return rt[key] and (now() - rt[key]) <= sec end
+
+local function moneySource()
+	if rt.lootOpen or within("lootClosed", 1.5) or within("moneyMsg", 1) then return "loot" end
+	if within("questAt", 2) then return "quest" end
+	if rt.merchant then return "vendor" end
+	if rt.mail then return "mail" end
+	if rt.auction then return "auction" end
+	if rt.trainer then return "trainer" end
+	if rt.taxiMap or within("taxiClosed", 3) then return "taxi" end
+	if rt.trade or within("tradeClosed", 2) then return "trade" end
+	return "other"
+end
+
+on("PLAYER_MONEY", function()
+	local m = money()
+	local d = m - (rt.money or m)
+	rt.money = m
+	if d == 0 then return end
+	local src = moneySource()
+	if d > 0 then
+		s.money.income = s.money.income + d
+		add(s.money.gain, src, d)
+	else
+		s.money.spent = s.money.spent - d
+		add(s.money.spend, src, -d)
+	end
+	if rt.run then rt.run.money = (rt.run.money or 0) + d end
+end)
+
+on("CHAT_MSG_MONEY", function() rt.moneyMsg = now() end)
+on("MERCHANT_SHOW", function() rt.merchant = true end)
+on("MERCHANT_CLOSED", function() rt.merchant = false end)
+on("MAIL_SHOW", function() rt.mail = true end)
+on("MAIL_CLOSED", function() rt.mail = false end)
+on("AUCTION_HOUSE_SHOW", function() rt.auction = true end)
+on("AUCTION_HOUSE_CLOSED", function() rt.auction = false end)
+on("TRAINER_SHOW", function() rt.trainer = true end)
+on("TRAINER_CLOSED", function() rt.trainer = false end)
+on("TAXIMAP_OPENED", function() rt.taxiMap = true end)
+on("TAXIMAP_CLOSED", function() rt.taxiMap = false; rt.taxiClosed = now() end)
+on("TRADE_SHOW", function() rt.trade = true end)
+on("TRADE_CLOSED", function() rt.trade = false; rt.tradeClosed = now() end)
+
+----------------------------------------------------------------------
+-- Quests
+----------------------------------------------------------------------
+local function questInfoFromLog(questID)
+	if not (_G.GetNumQuestLogEntries and _G.GetQuestLogTitle) then return nil end
+	local n = GetNumQuestLogEntries() or 0
+	for i = 1, n do
+		local title, level, _, isHeader, _, _, _, id = GetQuestLogTitle(i)
+		if not isHeader and id == questID then return title, level end
+	end
+end
+
+local function questTitle(questID)
+	if not questID then return nil end
+	local cached = rt.qtitle[questID]
+	if cached then return cached end
+	local title
+	local QL = _G.C_QuestLog
+	if QL and QL.GetTitleForQuestID then
+		local ok, v = pcall(QL.GetTitleForQuestID, questID)
+		if ok and type(v) == "string" and v ~= "" then title = v end
+	end
+	if not title and QL and QL.GetQuestInfo then
+		local ok, v = pcall(QL.GetQuestInfo, questID)
+		if ok and type(v) == "string" and v ~= "" then title = v end
+	end
+	if not title then title = questInfoFromLog(questID) end
+	if title then rt.qtitle[questID] = title end
+	return title
+end
+
+on("QUEST_ACCEPTED", function(a, b)
+	local questID = (type(b) == "number" and b > 0) and b or a -- Classic: (logIndex, questID), newer: (questID)
+	if type(questID) ~= "number" then return end
+	local title, level = questInfoFromLog(questID)
+	title = title or questTitle(questID)
+	if title then rt.qtitle[questID] = title end
+	push(s.quests.accepted, { id = questID, title = title, lvl = level, t = time() }, LIMIT.accepted)
+end)
+
+-- The reward window knows the title for sure.
+on("QUEST_COMPLETE", function()
+	local id = _G.GetQuestID and GetQuestID()
+	local title = _G.GetTitleText and GetTitleText()
+	if id and id > 0 and type(title) == "string" and title ~= "" then rt.qtitle[id] = title end
+end)
+
+on("QUEST_TURNED_IN", function(questID, xp, cash)
+	questID = tonumber(questID)
+	local e = { id = questID, title = questTitle(questID), xp = tonumber(xp), money = tonumber(cash), t = time(), zone = zoneName() }
+	push(s.quests.done, e, LIMIT.done)
+	rt.questAt = now()
+	if e.xp then
+		s.xp.quests = s.xp.quests + e.xp
+	else
+		rt.questWaitXP = { e = e, at = now() }
+	end
+end)
+
+-- The name is only known while the quest is selected for abandoning, not afterwards.
+local function onSetAbandon()
+	rt.abandonName = _G.GetAbandonQuestName and GetAbandonQuestName() or nil
+end
+
+local function onAbandon()
+	if not s or not mod.enabled then return end
+	local title = rt.abandonName or (_G.GetAbandonQuestName and GetAbandonQuestName())
+	rt.abandonName = nil
+	if type(title) ~= "string" or title == "" then return end
+	push(s.quests.abandoned, { title = title, t = time() }, LIMIT.abandoned)
+end
+
+----------------------------------------------------------------------
+-- Loot (and what professions produced)
+----------------------------------------------------------------------
+local lootPatterns -- { pattern, kind }
+
+local function buildLootPatterns()
+	lootPatterns = {}
+	local function addP(name, kind)
+		local p = pattern(_G[name])
+		if p then lootPatterns[#lootPatterns + 1] = { p, kind } end
+	end
+	-- multiples first: the plain pattern would also swallow "...x2" lines
+	addP("LOOT_ITEM_CREATED_SELF_MULTIPLE", "created")
+	addP("LOOT_ITEM_CREATED_SELF", "created")
+	addP("LOOT_ITEM_SELF_MULTIPLE", "loot")
+	addP("LOOT_ITEM_SELF", "loot")
+	addP("LOOT_ITEM_PUSHED_SELF_MULTIPLE", "pushed")
+	addP("LOOT_ITEM_PUSHED_SELF", "pushed")
+end
+
+-- gathering spell name -> kind
+local GATHER_SPELLS = { herb = { 2366, 2368, 3570, 11993 }, mining = { 2575, 2576, 3564, 10248 }, skinning = { 8613, 8617, 8618, 10768 } }
+local gatherNames
+
+local function buildGatherNames()
+	gatherNames = {}
+	for kind, ids in pairs(GATHER_SPELLS) do
+		for _, id in ipairs(ids) do
+			local n = C.GetSpellName(id)
+			if n then gatherNames[n] = kind end
+		end
+	end
+end
+
+local function lootKind()
+	if rt.lootOpen or within("lootClosed", 1.5) then return rt.lootKind end
+	return nil
+end
+
+local function bookItem(list, id, link, count)
+	local e = list[id]
+	if not e then
+		e = { name = itemName(link), q = LZ.QualityFromLink(link), n = 0 }
+		list[id] = e
+	end
+	e.n = e.n + count
+	return e
+end
+
+on("CHAT_MSG_LOOT", function(msg)
+	if type(msg) ~= "string" or not lootPatterns then return end
+	local kind, link, count
+	for _, p in ipairs(lootPatterns) do
+		local a, b = msg:match(p[1])
+		if a then kind, link, count = p[2], a, tonumber(b) or 1; break end
+	end
+	if not kind then return end
+	local id = LZ.ItemID(link)
+	if not id then return end
+	local q = LZ.QualityFromLink(link) or 1
+
+	if kind == "created" then
+		bookItem(s.prof.crafted, id, link, count)
+		return
+	end
+
+	local gk = (kind == "loot") and lootKind() or nil
+	if gk and gk ~= "mob" then
+		s.prof.gathered[gk] = s.prof.gathered[gk] or {}
+		bookItem(s.prof.gathered[gk], id, link, count)
+	end
+
+	local L = s.loot
+	local e = bookItem(L.items, id, link, count)
+	if e.v == nil then
+		local v = C.GetSellPrice(link)
+		if v and v > 0 then e.v = v end
+	end
+	if kind == "pushed" then e.p = (e.p or 0) + count end
+	L.n = L.n + count
+	add(L.q, q, count)
+	L.value = L.value + (e.v or 0) * count
+	if q >= 2 then
+		push(L.notable, { id = id, name = e.name, q = q, n = count, t = time(), zone = zoneName(),
+			src = (kind == "pushed") and "quest" or (gk ~= "mob" and gk) or rt.lootSrc }, LIMIT.notable)
+	end
+	if rt.run then rt.run.loot = (rt.run.loot or 0) + count end
+end)
+
+on("LOOT_OPENED", function()
+	rt.lootOpen = true
+	rt.lootSrc = nil
+	if rt.gatherAt and now() - rt.gatherAt < 3 then
+		rt.lootKind = rt.gatherKind
+	elseif _G.IsFishingLoot and IsFishingLoot() then
+		rt.lootKind = "fishing"
+	else
+		rt.lootKind = "mob"
+		if UnitExists and UnitExists("target") and UnitIsDead and UnitIsDead("target") then rt.lootSrc = UnitName("target") end
+	end
+	rt.gatherAt = nil
+end)
+
+on("LOOT_CLOSED", function()
+	rt.lootOpen = false
+	rt.lootClosed = now()
+end)
+
+----------------------------------------------------------------------
+-- Professions and skills
+----------------------------------------------------------------------
+local function readSkills()
+	local out = {}
+	if _G.GetNumSkillLines and _G.GetSkillLineInfo then
+		local header = ""
+		for i = 1, GetNumSkillLines() or 0 do
+			local name, isHeader, _, rank, _, _, maxRank = GetSkillLineInfo(i)
+			if name then
+				if isHeader then
+					header = name
+				elseif (maxRank or 0) > 1 then
+					out[name] = { rank = rank or 0, max = maxRank or 0, h = header }
+				end
+			end
+		end
+	elseif _G.GetProfessions and _G.GetProfessionInfo then
+		for _, idx in pairs({ GetProfessions() }) do
+			if type(idx) == "number" then
+				local name, _, rank, maxRank = GetProfessionInfo(idx)
+				if name then out[name] = { rank = rank or 0, max = maxRank or 0, h = "prof" } end
+			end
+		end
+	end
+	return out
+end
+
+local function snapshotSkills(initial)
+	local skills = s.prof.skills
+	local n = 0
+	for _ in pairs(skills) do n = n + 1 end
+	for name, info in pairs(readSkills()) do
+		local e = skills[name]
+		if e then
+			e.b, e.m = info.rank, info.max
+		elseif n < LIMIT.skills then
+			skills[name] = { h = info.h, a = info.rank, b = info.rank, m = info.max }
+			n = n + 1
+		end
+	end
+end
+
+on("CHAT_MSG_SKILL", function(msg)
+	if type(msg) ~= "string" or not rt.pSkill then return end
+	local name, rank = msg:match(rt.pSkill)
+	rank = tonumber(rank)
+	if not name or not rank then return end
+	s.prof.ups = s.prof.ups + 1
+	local e = s.prof.skills[name]
+	if e then
+		e.b = math.max(e.b or 0, rank)
+	else
+		s.prof.skills[name] = { a = rank - 1, b = rank }
+	end
+end)
+
+on("CHAT_MSG_SYSTEM", function(msg)
+	if type(msg) ~= "string" then return end
+	if rt.pRecipe then
+		local what = msg:match(rt.pRecipe)
+		if what then push(s.prof.learned, { name = LZ.Strip(what), t = time() }, LIMIT.learned); return end
+	end
+	for _, p in ipairs(rt.pSpell or {}) do
+		local what = msg:match(p)
+		if what then push(s.spellsLearned, { name = LZ.Strip(what), t = time() }, LIMIT.learned); return end
+	end
+end)
+
+----------------------------------------------------------------------
+-- Exploration and zones
+----------------------------------------------------------------------
+local function discovered(name, xp)
+	name = LZ.Strip(name)
+	if not name or name == "" then return end
+	local last = rt.lastFound
+	if last and last.name == name and now() - last.at < 10 then
+		if xp and not last.e.xp then
+			last.e.xp = xp
+			s.xp.explore = s.xp.explore + xp
+		end
+		return
+	end
+	local e = { name = name, xp = xp, zone = zoneName(), t = time() }
+	push(s.explore.found, e, LIMIT.found)
+	if xp then s.xp.explore = s.xp.explore + xp end
+	rt.lastFound = { name = name, at = now(), e = e }
+end
+
+local function checkDiscovery(msg)
+	if type(msg) ~= "string" then return end
+	if rt.pExploredXP then
+		local name, xp = msg:match(rt.pExploredXP)
+		if name then discovered(name, tonumber(xp)); return end
+	end
+	if rt.pExplored then
+		local name = msg:match(rt.pExplored)
+		if name then discovered(name, nil) end
+	end
+end
+
+on("CHAT_MSG_SYSTEM", checkDiscovery)
+-- newer clients: (messageType, message), older: (message)
+on("UI_INFO_MESSAGE", function(a, b) checkDiscovery(type(b) == "string" and b or a) end)
+
+local function zoneEntry(zone)
+	local zones = s.explore.zones
+	local e = zones[zone]
+	if not e then
+		e = { sec = 0, subs = {} }
+		zones[zone] = e
+	end
+	return e
+end
+
+local function noteSubzone()
+	local sub = _G.GetSubZoneText and GetSubZoneText() or ""
+	if sub == "" then return end
+	local e = zoneEntry(zoneName())
+	if e.subs[sub] then return end
+	local n = 0
+	for _ in pairs(e.subs) do n = n + 1 end
+	if n < LIMIT.subs then e.subs[sub] = true end
+end
+
+on("ZONE_CHANGED", noteSubzone)
+on("ZONE_CHANGED_INDOORS", noteSubzone)
+
+----------------------------------------------------------------------
+-- Dungeons, raids, battlegrounds
+----------------------------------------------------------------------
+local function groupSize()
+	if _G.GetNumGroupMembers then return GetNumGroupMembers() or 0 end
+	if _G.GetNumRaidMembers and GetNumRaidMembers() > 0 then return GetNumRaidMembers() end
+	if _G.GetNumPartyMembers then return GetNumPartyMembers() + 1 end
+	return 0
+end
+
+local function closeRun()
+	if rt.run then
+		rt.run.stop = time()
+		rt.run = nil
+	end
+end
+
+local function checkInstance()
+	if not s or not _G.GetInstanceInfo then return end
+	local name, kind, _, diffName, maxPlayers, _, _, instanceID = GetInstanceInfo()
+	local inside = kind and kind ~= "none" and name and name ~= ""
+	if not inside then closeRun(); return end
+	if rt.run and rt.run.name == name then return end
+	closeRun()
+	-- back into the same instance shortly after leaving (ghost run, quick port out): same run
+	local last = s.runs[#s.runs]
+	if last and last.name == name and last.stop and time() - last.stop < 600 then
+		last.stop = nil
+		rt.run = last
+		return
+	end
+	local run = { name = name, kind = kind, diff = (diffName ~= "" and diffName) or nil, size = maxPlayers,
+		id = instanceID, start = time(), kills = 0, bosses = {}, wipes = 0, deaths = 0, xp = 0, money = 0, loot = 0,
+		group = groupSize() }
+	push(s.runs, run, LIMIT.runs)
+	rt.run = run
+end
+
+on("PLAYER_ENTERING_WORLD", function() LZ.After(1, checkInstance) end)
+on("ZONE_CHANGED_NEW_AREA", function() LZ.After(1, checkInstance); noteSubzone() end)
+
+on("GROUP_ROSTER_UPDATE", function()
+	if rt.run then rt.run.group = math.max(rt.run.group or 0, groupSize()) end
+end)
+
+on("ENCOUNTER_START", function(id, name)
+	rt.encounter = { name = name, at = now() }
+end)
+
+on("ENCOUNTER_END", function(id, name, diff, size, success)
+	local started = rt.encounter and rt.encounter.at
+	rt.encounter = nil
+	if success == 1 or success == true then
+		push(s.bosses, { name = name, t = time(), inst = rt.run and rt.run.name or zoneName(),
+			sec = started and math.floor(now() - started) or nil }, LIMIT.bosses)
+		if rt.run then push(rt.run.bosses, name, 30) end
+	else
+		s.wipes = s.wipes + 1
+		if rt.run then rt.run.wipes = rt.run.wipes + 1 end
+	end
+end)
+
+----------------------------------------------------------------------
+-- Deaths
+----------------------------------------------------------------------
+on("PLAYER_DEAD", function()
+	s.deathN = s.deathN + 1
+	local hit = rt.lastHit
+	if hit and now() - hit.at > 20 then hit = nil end
+	push(s.deaths, { t = time(), zone = zoneName(), sub = _G.GetSubZoneText and GetSubZoneText() or nil,
+		by = hit and hit.by or nil, spell = hit and hit.spell or nil, lvl = playerLevel(),
+		inst = rt.run and rt.run.name or nil }, LIMIT.deaths)
+	if rt.run then rt.run.deaths = rt.run.deaths + 1 end
+end)
+
+----------------------------------------------------------------------
+-- Reputation
+----------------------------------------------------------------------
+on("CHAT_MSG_COMBAT_FACTION_CHANGE", function(msg)
+	if type(msg) ~= "string" then return end
+	local faction, amount
+	if rt.pRepUp then faction, amount = msg:match(rt.pRepUp) end
+	local sign = 1
+	if not faction and rt.pRepDown then
+		faction, amount = msg:match(rt.pRepDown)
+		sign = -1
+	end
+	amount = tonumber(amount)
+	if faction and amount then add(s.rep, faction, sign * amount) end
+end)
+
+----------------------------------------------------------------------
+-- Mob classification (normal / elite / rare / boss) by GUID
+----------------------------------------------------------------------
+local classByGUID, classCount = {}, 0
+
+local function cacheUnit(unit)
+	if not (UnitExists and UnitExists(unit)) or (UnitIsPlayer and UnitIsPlayer(unit)) then return end
+	local guid = UnitGUID(unit)
+	if not guid or classByGUID[guid] then return end
+	local c = UnitClassification and UnitClassification(unit) or "normal"
+	if c == "worldboss" then c = "boss" end
+	if c ~= "boss" and UnitLevel and UnitLevel(unit) == -1 and _G.IsInInstance and IsInInstance() then c = "boss" end
+	if classCount > 3000 then wipe(classByGUID); classCount = 0 end
+	classByGUID[guid] = c
+	classCount = classCount + 1
+end
+
+on("PLAYER_TARGET_CHANGED", function() cacheUnit("target") end)
+on("UPDATE_MOUSEOVER_UNIT", function() cacheUnit("mouseover") end)
+on("NAME_PLATE_UNIT_ADDED", function(unit) if unit then cacheUnit(unit) end end)
+on("INSTANCE_ENCOUNTER_ENGAGE_UNIT", function()
+	for i = 1, 5 do
+		local u = "boss" .. i
+		if UnitExists and UnitExists(u) then
+			local guid = UnitGUID(u)
+			if guid then classByGUID[guid] = "boss" end
+		end
+	end
+end)
+
+----------------------------------------------------------------------
+-- Combat log
+----------------------------------------------------------------------
+local MINE = _G.COMBATLOG_OBJECT_AFFILIATION_MINE or 0x1
+local GROUP = (_G.COMBATLOG_OBJECT_AFFILIATION_MINE or 0x1) + (_G.COMBATLOG_OBJECT_AFFILIATION_PARTY or 0x2) + (_G.COMBATLOG_OBJECT_AFFILIATION_RAID or 0x4)
+local FRIENDLY = _G.COMBATLOG_OBJECT_REACTION_FRIENDLY or 0x10
+local TYPE_PLAYER = _G.COMBATLOG_OBJECT_TYPE_PLAYER or 0x400
+local TYPE_NPC = _G.COMBATLOG_OBJECT_TYPE_NPC or 0x800
+local PETS = (_G.COMBATLOG_OBJECT_TYPE_PET or 0x1000) + (_G.COMBATLOG_OBJECT_TYPE_GUARDIAN or 0x2000)
+
+local tagged, taggedCount = {}, 0
+local MELEE = { "Nahkampf", "Melee" }
+
+local function has(flags, mask) return flags and band and band(flags, mask) ~= 0 end
+
+local function tag(guid, flags)
+	if tagged[guid] or not guid then return end
+	if has(flags, FRIENDLY) then return end
+	if taggedCount > 3000 then wipe(tagged); taggedCount = 0 end
+	tagged[guid] = true
+	taggedCount = taggedCount + 1
+end
+
+local function dealt(cb, spell, amount, crit, pet)
+	if pet then cb.dmgPet = cb.dmgPet + amount end
+	cb.dmg = cb.dmg + amount
+	cb.hits = cb.hits + 1
+	if crit then cb.crits = cb.crits + 1 end
+	local e = cb.spells[spell]
+	if not e then
+		e = { 0, 0, 0 } -- amount, hits, crits
+		cb.spells[spell] = e
+	end
+	e[1], e[2] = e[1] + amount, e[2] + 1
+	if crit then e[3] = e[3] + 1 end
+	if amount > cb.maxHit then
+		cb.maxHit, cb.maxHitSpell, cb.maxHitCrit = amount, spell, crit and true or nil
+	end
+end
+
+local function healed(cb, spell, amount, over, crit)
+	local eff = math.max(0, amount - (over or 0))
+	cb.heal = cb.heal + eff
+	cb.over = cb.over + (over or 0)
+	local e = cb.heals[spell]
+	if not e then
+		e = { 0, 0, 0 } -- effective, casts, overheal
+		cb.heals[spell] = e
+	end
+	e[1], e[2], e[3] = e[1] + eff, e[2] + 1, e[3] + (over or 0)
+	if eff > cb.maxHeal then cb.maxHeal, cb.maxHealSpell = eff, spell end
+end
+
+local function taken(cb, by, spell, amount)
+	cb.taken = cb.taken + amount
+	if by then add(cb.takenBy, by, amount) end
+	if amount > cb.maxTaken then cb.maxTaken, cb.maxTakenBy, cb.maxTakenSpell = amount, by, spell end
+	rt.lastHit = { by = by, spell = spell, at = now() }
+end
+
+local function countKill(guid, name, flags)
+	tagged[guid] = nil
+	taggedCount = taggedCount - 1
+	local K = s.kills
+	if has(flags, TYPE_PLAYER) then
+		K.players = K.players + 1
+		return
+	end
+	if not has(flags, TYPE_NPC) then return end
+	local c = classByGUID[guid]
+	if rt.encounter and rt.encounter.name == name then c = "boss" end
+	if c ~= "elite" and c ~= "rare" and c ~= "rareelite" and c ~= "boss" then c = "normal" end
+	K.n = K.n + 1
+	K[c] = K[c] + 1
+	local key = npcID(guid) or name or "?"
+	local e = K.mobs[key]
+	if not e then
+		e = { name = name, n = 0, c = c }
+		K.mobs[key] = e
+	end
+	e.n = e.n + 1
+	if rt.run then rt.run.kills = rt.run.kills + 1 end
+end
+
+local SWING_RESULT = { MISS = "miss", DODGE = "dodge", PARRY = "parry", BLOCK = "block", ABSORB = "miss", RESIST = "miss", EVADE = "miss", IMMUNE = "miss", DEFLECT = "miss", REFLECT = "miss" }
+
+local function processCombatLog()
+	local _, sub, _, srcGUID, srcName, srcFlags, _, dstGUID, dstName, dstFlags, _,
+		a12, a13, a14, a15, a16, a17, a18, a19, a20, a21 = CombatLogGetCurrentEventInfo()
+	local cb = s.combat
+	local me = rt.guid
+	local fromMe = srcGUID == me
+	local fromPet = not fromMe and has(srcFlags, MINE) and has(srcFlags, PETS)
+	local toMe = dstGUID == me
+
+	if sub == "UNIT_DIED" then
+		if tagged[dstGUID] then countKill(dstGUID, dstName, dstFlags) end
+		return
+	elseif sub == "PARTY_KILL" then
+		if fromMe or fromPet then s.kills.blows = s.kills.blows + 1 end
+		return
+	end
+
+	if sub == "SWING_DAMAGE" then
+		local amount, crit, glancing = a12 or 0, a18, a19
+		if fromMe or fromPet then
+			if fromMe then
+				local sw = cb.swings
+				sw.n, sw.hit = sw.n + 1, sw.hit + 1
+				if crit then sw.crit = sw.crit + 1 end
+				if glancing then sw.glance = sw.glance + 1 end
+			end
+			dealt(cb, P(MELEE), amount, crit, fromPet)
+			tag(dstGUID, dstFlags)
+		elseif has(srcFlags, GROUP) then
+			tag(dstGUID, dstFlags)
+		end
+		if toMe then
+			local st = cb.swingsTaken
+			st.n, st.hit = st.n + 1, st.hit + 1
+			if crit then st.crit = st.crit + 1 end
+			taken(cb, srcName, P(MELEE), amount)
+		end
+		return
+	elseif sub == "SWING_MISSED" then
+		local r = SWING_RESULT[a12 or ""] or "miss"
+		if fromMe then
+			local sw = cb.swings
+			sw.n = sw.n + 1
+			sw[r] = (sw[r] or 0) + 1
+			tag(dstGUID, dstFlags)
+		end
+		if toMe then
+			local st = cb.swingsTaken
+			st.n = st.n + 1
+			st[r] = (st[r] or 0) + 1
+		end
+		return
+	elseif sub == "SPELL_DAMAGE" or sub == "SPELL_PERIODIC_DAMAGE" or sub == "RANGE_DAMAGE" or sub == "DAMAGE_SHIELD" or sub == "DAMAGE_SPLIT" then
+		local spell, amount, crit = a13 or "?", a15 or 0, a21
+		if fromMe or fromPet then
+			dealt(cb, spell, amount, crit, fromPet)
+			tag(dstGUID, dstFlags)
+		elseif has(srcFlags, GROUP) then
+			tag(dstGUID, dstFlags)
+		end
+		if toMe then taken(cb, srcName, spell, amount) end
+		return
+	elseif sub == "ENVIRONMENTAL_DAMAGE" then
+		if toMe then
+			local kind, amount = a12 or "?", a13 or 0
+			add(cb.env, kind, amount)
+			taken(cb, nil, kind, amount)
+		end
+		return
+	elseif sub == "SPELL_HEAL" or sub == "SPELL_PERIODIC_HEAL" then
+		local spell, amount, over, crit = a13 or "?", a15 or 0, a16 or 0, a18
+		if fromMe then healed(cb, spell, amount, over, crit) end
+		if toMe then cb.healTaken = cb.healTaken + math.max(0, amount - over) end
+		return
+	elseif sub == "SPELL_CAST_SUCCESS" then
+		if fromMe and a13 then
+			cb.castN = cb.castN + 1
+			add(cb.casts, a13, 1)
+		end
+		return
+	elseif sub == "SPELL_AURA_APPLIED" then
+		local spell, auraType = a13, a15
+		if toMe and spell then
+			if auraType == "BUFF" then
+				cb.buffN = cb.buffN + 1
+				add(cb.buffs, spell, 1)
+			else
+				cb.debuffN = cb.debuffN + 1
+				add(cb.debuffs, spell, 1)
+			end
+		elseif fromMe and auraType == "BUFF" and not toMe then
+			cb.buffsGiven = cb.buffsGiven + 1
+		end
+		return
+	elseif sub == "SPELL_INTERRUPT" then
+		if fromMe or fromPet then cb.interrupts = cb.interrupts + 1 end
+		return
+	elseif sub == "SPELL_DISPEL" or sub == "SPELL_STOLEN" then
+		if fromMe or fromPet then cb.dispels = cb.dispels + 1 end
+		return
+	elseif sub == "SPELL_MISSED" or sub == "RANGE_MISSED" or sub == "SPELL_PERIODIC_MISSED" then
+		if fromMe or fromPet or has(srcFlags, GROUP) then tag(dstGUID, dstFlags) end
+		return
+	end
+end
+
+local clFrame
+local clErrors = 0
+
+local function onCombatLog()
+	if not s then return end
+	local ok, err = pcall(processCombatLog)
+	if not ok then
+		clErrors = clErrors + 1
+		if clErrors >= 5 then
+			s.combat.err = tostring(err):sub(1, 200)
+			if clFrame then clFrame:UnregisterAllEvents() end
+		end
+	end
+end
+
+local function startCombatLog()
+	if not _G.CombatLogGetCurrentEventInfo or not band then
+		s.combat.err = "no combat log API"
+		return
+	end
+	clFrame = clFrame or CreateFrame("Frame")
+	clFrame:SetScript("OnEvent", onCombatLog)
+	clErrors = 0
+	pcall(clFrame.RegisterEvent, clFrame, "COMBAT_LOG_EVENT_UNFILTERED")
+end
+
+----------------------------------------------------------------------
+-- Player-only unit events (own frame: RegisterUnitEvent keeps it cheap)
+----------------------------------------------------------------------
+local unitFrame
+
+local function onUnitEvent(_, event, unit, castGUID, spellID)
+	if not s then return end
+	if event == "UNIT_SPELLCAST_SUCCEEDED" then
+		local name = C.GetSpellName(spellID)
+		local kind = name and gatherNames and gatherNames[name]
+		if kind then rt.gatherKind, rt.gatherAt = kind, now() end
+	end
+end
+
+local function startUnitEvents()
+	unitFrame = unitFrame or CreateFrame("Frame")
+	unitFrame:SetScript("OnEvent", onUnitEvent)
+	if unitFrame.RegisterUnitEvent then
+		pcall(unitFrame.RegisterUnitEvent, unitFrame, "UNIT_SPELLCAST_SUCCEEDED", "player")
+	else
+		pcall(unitFrame.RegisterEvent, unitFrame, "UNIT_SPELLCAST_SUCCEEDED")
+	end
+end
+
+----------------------------------------------------------------------
+-- Ticker: time categories, zone time and distance
+----------------------------------------------------------------------
+local ticker
+
+local function tick()
+	if not s then return end
+	local t = now()
+	local dt = t - (rt.last or t)
+	rt.last = t
+	if dt <= 0 or dt > 5 then return end -- loading screens and freezes do not count
+
+	local tm = s.time
+	if UnitIsAFK and UnitIsAFK("player") then tm.afk = tm.afk + dt end
+	if UnitAffectingCombat and UnitAffectingCombat("player") then tm.combat = tm.combat + dt end
+	if IsResting and IsResting() then tm.rest = tm.rest + dt end
+	local dead = UnitIsDeadOrGhost and UnitIsDeadOrGhost("player")
+	if dead then tm.dead = tm.dead + dt end
+	local taxi = UnitOnTaxi and UnitOnTaxi("player")
+	if taxi then tm.taxi = tm.taxi + dt end
+	if rt.run then tm.instance = tm.instance + dt end
+
+	local z = zoneEntry(zoneName())
+	z.sec = z.sec + dt
+
+	local speed = GetUnitSpeed and GetUnitSpeed("player") or 0
+	if speed > 0 and dt <= 2 then
+		local mv = s.move
+		local mode
+		if taxi then mode = "taxi"
+		elseif dead then mode = "ghost"
+		elseif IsSwimming and IsSwimming() then mode = "swim"
+		elseif IsMounted and IsMounted() then mode = "mount"
+		else mode = "foot" end
+		mv[mode] = mv[mode] + speed * dt
+		if mode == "foot" or mode == "ghost" then
+			-- estimate: about 2.9 steps per second when running, 2 when walking
+			mv.steps = mv.steps + dt * (speed >= 4 and 2.9 or 2.0)
+		end
+	end
+end
+
+local function startTicker()
+	if ticker then return end
+	rt.last = now()
+	if _G.C_Timer and C_Timer.NewTicker then
+		ticker = C_Timer.NewTicker(TICK, tick)
+	else
+		local f = CreateFrame("Frame")
+		local acc = 0
+		f:SetScript("OnUpdate", function(_, e)
+			acc = acc + (e or 0)
+			if acc >= TICK then acc = 0; tick() end
+		end)
+		ticker = { Cancel = function() f:SetScript("OnUpdate", nil) end }
+	end
+end
+
+local function stopTicker()
+	if ticker then ticker:Cancel(); ticker = nil end
+end
+
+local function onJump()
+	if not s or not mod.enabled then return end
+	if IsSwimming and IsSwimming() then return end
+	if IsFlying and IsFlying() then return end
+	s.move.jumps = s.move.jumps + 1
+end
+
+----------------------------------------------------------------------
+-- Lifecycle
+----------------------------------------------------------------------
+local function buildPatterns()
+	buildLootPatterns()
+	buildGatherNames()
+	rt.pKillXP = pattern(_G.COMBATLOG_XPGAIN_FIRSTPERSON, true)   -- open end: rested/group bonus text follows
+	rt.pXP = pattern(_G.COMBATLOG_XPGAIN_FIRSTPERSON_UNNAMED, true)
+	rt.pSkill = pattern(_G.SKILL_RANK_UP)
+	rt.pRecipe = pattern(_G.ERR_LEARN_RECIPE_S)
+	rt.pSpell = { pattern(_G.ERR_LEARN_SPELL_S), pattern(_G.ERR_LEARN_ABILITY_S) }
+	rt.pExploredXP = pattern(_G.ERR_ZONE_EXPLORED_XP)
+	rt.pExplored = pattern(_G.ERR_ZONE_EXPLORED)
+	rt.pRepUp = pattern(_G.FACTION_STANDING_INCREASED)
+	rt.pRepDown = pattern(_G.FACTION_STANDING_DECREASED)
+end
+
+function mod:OnInit()
+	LZ.gdb.sessionLog = LZ.gdb.sessionLog or {}
+	if not self.hooked then
+		self.hooked = true
+		if _G.hooksecurefunc then
+			if _G.JumpOrAscendStart then hooksecurefunc("JumpOrAscendStart", onJump) end
+			if _G.SetAbandonQuest then hooksecurefunc("SetAbandonQuest", onSetAbandon) end
+			if _G.AbandonQuest then hooksecurefunc("AbandonQuest", onAbandon) end
+			local QL = _G.C_QuestLog
+			if QL and QL.SetAbandonQuest then hooksecurefunc(QL, "SetAbandonQuest", onSetAbandon) end
+			if QL and QL.AbandonQuest then hooksecurefunc(QL, "AbandonQuest", onAbandon) end
+		end
+	end
+end
+
+function mod:OnEnable()
+	buildPatterns()
+	local list = LZ.gdb.sessionLog
+	if not s then
+		local last = list[#list]
+		local window = (tonumber(self.opt.resumeMinutes) or 15) * 60
+		if last and last.v == VERSION and last.char == LZ.charKey and last.saved and (time() - last.saved) <= window then
+			s = last -- /reload or quick relog: same session continues
+			s.resumes = (s.resumes or 0) + 1
+		else
+			s = newSession()
+			push(list, s, MAX_SESSIONS)
+		end
+	end
+	rt.guid = UnitGUID and UnitGUID("player")
+	rt.loginAt = time()
+	rt.playedBefore = s.played or 0
+	rt.money = money()
+	rt.xp, rt.xpMax = readXP()
+	rt.qtitle = rt.qtitle or {}
+	snapshotSkills(true)
+	startCombatLog()
+	startUnitEvents()
+	startTicker()
+	LZ.After(1, checkInstance)
+end
+
+-- Brings the session table up to date. Safe to call any time (also for the report).
+function mod:Update()
+	if not s then return end
+	tick()
+	local t = time()
+	s.stop, s.saved = t, t
+	s.played = rt.playedBefore + (t - (rt.loginAt or t))
+	s.level.to = playerLevel()
+	s.money.stop = money()
+	s.addon = LZ.version
+	local x = s.xp
+	x.other = math.max(0, x.total - x.kills - x.quests - x.explore)
+end
+
+function mod:Save()
+	if not s then return end
+	self:Update()
+	snapshotSkills()
+	if rt.run then rt.run.stop = time() end
+	for id, e in pairs(s.loot.items) do
+		if e.v == nil then
+			local v = C.GetSellPrice(id)
+			if v and v > 0 then
+				e.v = v
+				s.loot.value = s.loot.value + v * e.n
+			end
+		end
+	end
+	local cb = s.combat
+	trimMap(cb.spells, LIMIT.spells, byFirst)
+	trimMap(cb.heals, LIMIT.heals, byFirst)
+	trimMap(cb.casts, LIMIT.casts, byNumber)
+	trimMap(cb.buffs, LIMIT.auras, byNumber)
+	trimMap(cb.debuffs, LIMIT.auras, byNumber)
+	trimMap(cb.takenBy, LIMIT.takenBy, byNumber)
+	trimMap(s.kills.mobs, LIMIT.mobs, byN)
+	trimMap(s.loot.items, LIMIT.items, byN)
+	trimMap(s.prof.crafted, LIMIT.crafted, byN)
+	for _, g in pairs(s.prof.gathered) do trimMap(g, LIMIT.gathered, byN) end
+	trimMap(s.explore.zones, LIMIT.zones, bySec)
+	trimMap(s.rep, LIMIT.rep, function(v) return math.abs(v or 0) end)
+	for k, v in pairs(s.time) do s.time[k] = round(v) end
+	for k, v in pairs(s.move) do s.move[k] = round(v, 1) end
+	for _, z in pairs(s.explore.zones) do z.sec = round(z.sec) end
+end
+
+function mod:OnLogout() self:Save() end
+
+function mod:OnDisable()
+	self:Save()
+	stopTicker()
+	if clFrame then clFrame:UnregisterAllEvents() end
+	if unitFrame then unitFrame:UnregisterAllEvents() end
+	rt.run = nil
+	s = nil
+end
+
+-- For other modules and tests.
+function mod:Current() return s end
+
+----------------------------------------------------------------------
+-- In-game report
+----------------------------------------------------------------------
+local function perHour(v, sec)
+	if not sec or sec < 600 then return 0 end -- shorter sessions give silly rates
+	return v * 3600 / sec
+end
+
+local function topOf(map, n, value)
+	local keys = {}
+	for k in pairs(map) do keys[#keys + 1] = k end
+	table.sort(keys, function(a, b) return value(map[a]) > value(map[b]) end)
+	local out = {}
+	for i = 1, math.min(n, #keys) do out[i] = keys[i] end
+	return out
+end
+
+local function countOf(t)
+	local n = 0
+	for _ in pairs(t or {}) do n = n + 1 end
+	return n
+end
+
+function mod:Summary()
+	if not s then return "-" end
+	self:Update()
+	return string.format("%s · %s XP · %d %s", LZ.Duration(s.played), LZ.Num(s.xp.total), s.kills.n, T("Kills", "kills"))
+end
+
+function mod:TooltipLines()
+	if not s then return nil end
+	return { T("Sitzung: ", "Session: ") .. self:Summary() }
+end
+
+function mod:Report()
+	local lines = {}
+	local function head(text) lines[#lines + 1] = ""; lines[#lines + 1] = LZ.Color("ffd100", text) end
+	local function line(text) lines[#lines + 1] = text end
+	if not s then
+		line(T("Keine laufende Sitzung.", "No session running."))
+	else
+		self:Update()
+		local sec = s.played
+		lines[1] = LZ.Color("ffd100", string.format(T("Aktuelle Sitzung – seit %s", "Current session – since %s"), date("%H:%M", s.start)))
+		line(string.format(T("Spielzeit %s · im Kampf %s · AFK %s", "Play time %s · in combat %s · AFK %s"),
+			LZ.Duration(sec), LZ.Duration(s.time.combat), LZ.Duration(s.time.afk)))
+
+		head(T("Erfahrung und Gold", "Experience and gold"))
+		local lvl = s.level.from == s.level.to and tostring(s.level.to) or (s.level.from .. " → " .. s.level.to)
+		local rate = perHour(s.xp.total, sec)
+		line(string.format(T("Stufe %s · %s XP", "Level %s · %s XP"), lvl, LZ.Num(s.xp.total)) .. (rate > 0 and string.format(" (%s/h)", LZ.Num(rate)) or ""))
+		line(string.format(T("aus Kills %s · Quests %s · Entdecken %s", "from kills %s · quests %s · exploring %s"),
+			LZ.Num(s.xp.kills), LZ.Num(s.xp.quests), LZ.Num(s.xp.explore)))
+		local net = money() - s.money.start
+		line(string.format(T("Gold netto %s · eingenommen %s · ausgegeben %s", "Gold net %s · earned %s · spent %s"),
+			LZ.FormatMoney(net), LZ.FormatMoney(s.money.income), LZ.FormatMoney(s.money.spent)))
+
+		head(T("Quests und Beute", "Quests and loot"))
+		line(string.format(T("%d abgeschlossen · %d angenommen · %d abgebrochen", "%d completed · %d accepted · %d abandoned"),
+			#s.quests.done, #s.quests.accepted, #s.quests.abandoned))
+		line(string.format(T("%s Gegenstände · Händlerwert %s", "%s items · vendor value %s"), LZ.Num(s.loot.n), LZ.FormatMoney(s.loot.value)))
+
+		head(T("Kampf", "Combat"))
+		local K = s.kills
+		line(string.format(T("%d Gegner besiegt (%d Elite, %d selten, %d Bosse) · %d Todesstöße", "%d enemies killed (%d elite, %d rare, %d bosses) · %d killing blows"),
+			K.n, K.elite + K.rareelite, K.rare + K.rareelite, math.max(K.boss, #s.bosses), K.blows))
+		local cb = s.combat
+		line(string.format(T("Schaden %s · Heilung %s · erlitten %s · Tode %d", "Damage %s · healing %s · taken %s · deaths %d"),
+			LZ.Num(cb.dmg), LZ.Num(cb.heal), LZ.Num(cb.taken), s.deathN))
+		line(string.format(T("%s Hiebe · %s Zauber · %s Buffs erhalten", "%s swings · %s spells · %s buffs received"),
+			LZ.Num(cb.swings.n), LZ.Num(cb.castN), LZ.Num(cb.buffN)))
+		if cb.err then line(LZ.Color("ff8080", T("Kampflog nicht verfügbar: ", "Combat log not available: ") .. cb.err)) end
+
+		head(T("Unterwegs", "Travel"))
+		local mv = s.move
+		line(string.format(T("%s zu Fuß (≈ %s Schritte) · %s beritten · %s geschwommen · %s Flugroute", "%s on foot (≈ %s steps) · %s mounted · %s swum · %s flight path"),
+			km(mv.foot + mv.ghost), LZ.Num(mv.steps), km(mv.mount), km(mv.swim), km(mv.taxi)))
+		line(string.format(T("%s Sprünge · %d Gebiete entdeckt", "%s jumps · %d areas discovered"), LZ.Num(mv.jumps), #s.explore.found))
+
+		local skillLines = {}
+		for name, e in pairs(s.prof.skills) do
+			if (e.b or 0) > (e.a or 0) then skillLines[#skillLines + 1] = string.format("%s %d → %d", name, e.a or 0, e.b or 0) end
+		end
+		if #skillLines > 0 then
+			head(T("Fertigkeiten", "Skills"))
+			table.sort(skillLines)
+			line(table.concat(skillLines, " · "))
+		end
+
+		if #s.runs > 0 then
+			head(T("Dungeons und Schlachtzüge", "Dungeons and raids"))
+			for _, r in ipairs(s.runs) do
+				line(string.format(T("%s: %d Kills, %d Bosse", "%s: %d kills, %d bosses"), r.name or "?", r.kills or 0, #(r.bosses or {})))
+			end
+		end
+
+		local mobs = topOf(s.kills.mobs, 5, byN)
+		if #mobs > 0 then
+			head(T("Häufigste Gegner", "Most killed"))
+			for _, k in ipairs(mobs) do
+				local e = s.kills.mobs[k]
+				line(string.format("%s ×%d", e.name or "?", e.n))
+			end
+		end
+	end
+	head(T("Gespeicherte Sitzungen", "Stored sessions"))
+	line(string.format(T("%d im Spiel gespeichert. Leeroyzan übernimmt sie nach dem Ausloggen dauerhaft und fasst sie zusammen.",
+		"%d stored in the game. Leeroyzan imports them after you log out, keeps them and summarizes them."), #(LZ.gdb.sessionLog or {})))
+	return table.concat(lines, "\n")
+end
+
+mod:Command({ "sitzung", "session" }, function(self) LZ.UI:Show(self.name) end,
+	{ "sitzung", "Laufende Sitzung anzeigen", "show the current session" })
