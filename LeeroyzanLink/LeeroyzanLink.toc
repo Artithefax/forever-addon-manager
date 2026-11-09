@@ -1,0 +1,34 @@
+## Interface: 16001, 16000
+## Title: Leeroyzan Link
+## Title-deDE: Leeroyzan Link
+## Notes: Companion addon for the Leeroyzan addon manager: session log for Leeroyzan, error log, load status, profiles, update hints - plus extra tools (alt overview, checklists, AH prices, loot log and more).
+## Notes-deDE: Begleit-Addon zum Addon-Manager Leeroyzan: Sitzungsprotokoll fuer Leeroyzan, Fehlerprotokoll, Ladestatus, Profile, Update-Hinweise - dazu Zusatzwerkzeuge (Twink-Uebersicht, Checklisten, AH-Preise, Beute-Tagebuch u.v.m.).
+## Author: Artithefax
+## Version: 0.2.0
+## IconTexture: Interface\Icons\Ability_Warrior_Charge
+## SavedVariables: LeeroyzanLinkDB
+## Category: Utility
+
+Core\Compat.lua
+Core\Core.lua
+Core\Bridge.lua
+Data.lua
+
+Modules\ErrorLog.lua
+Modules\LoadStatus.lua
+Modules\Memory.lua
+Modules\Profiles.lua
+Modules\Wishlist.lua
+Modules\Updates.lua
+Modules\Session.lua
+
+Modules\LeeroyMode.lua
+Modules\Alts.lua
+Modules\Tasks.lua
+Modules\Prices.lua
+Modules\LootLog.lua
+Modules\Automation.lua
+Modules\Screenshots.lua
+Modules\Notes.lua
+
+Core\UI.lua

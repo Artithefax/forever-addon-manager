@@ -16,6 +16,7 @@ Funktionen:
   - Download-Listen (.lzlist oder Textcode für Discord/SMS) teilen: nur Verweise, keine Dateien
   - CurseForge direkt im Manager durchsuchen (nur WoW-Addons) und installieren
   - WTF-Ordner sichern und wiederherstellen, automatisches Backup vor Updates
+  - Spielsitzungen aus dem Begleit-Addon Leeroyzan Link übernehmen, dauerhaft speichern und zusammenfassen
   - Warnung, wenn WoW läuft; Drag & Drop (mit tkinterdnd2); Logdatei
 
 Läuft mit der Python-Standardbibliothek; tkinterdnd2 ist optional (Drag & Drop).
@@ -59,7 +60,7 @@ except Exception:                      # noqa – Paket fehlt oder Tk-Erweiterun
     HAS_DND = False
 
 APP_NAME = "Leeroyzan"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 USER_AGENT = f"Leeroyzan/{APP_VERSION}"
 
 # Selbst-Update über GitHub-Releases dieses Repos
@@ -1629,6 +1630,1139 @@ def cleanup_self_update() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Leeroyzan Link: Spielsitzungen aus dem Begleit-Addon übernehmen und zusammenfassen
+#
+# Das Addon schreibt jede Sitzung in seine SavedVariables (LeeroyzanLinkDB.global.sessionLog,
+# die neuesten 30). WoW speichert die Datei beim Ausloggen und bei /reload. Leeroyzan liest sie
+# nur (schreibt nie hinein) und legt jede Sitzung dauerhaft als JSON in Leeroyzan-Data/sessions ab.
+# --------------------------------------------------------------------------- #
+
+LINK_ADDON = "LeeroyzanLink"
+LINK_DB = "LeeroyzanLinkDB"
+SESSION_FORMAT = 2
+YARD_M = 0.9144
+
+
+class LuaParseError(ValueError):
+    pass
+
+
+_LUA_NUM = re.compile(r"-?(?:0[xX][0-9a-fA-F]+|(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)")
+_LUA_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_LUA_ESC = {"n": 10, "t": 9, "r": 13, "a": 7, "b": 8, "f": 12, "v": 11, "\\": 92, '"': 34, "'": 39, "\n": 10}
+
+
+class _LuaReader:
+    """Liest Lua-Tabellen, wie WoW sie in SavedVariables schreibt (nur Daten, kein Code)."""
+
+    def __init__(self, text: str):
+        self.s, self.i, self.n = text, 0, len(text)
+
+    def fail(self, what: str):
+        line = self.s.count("\n", 0, self.i) + 1
+        raise LuaParseError(f"{what} (Zeile {line})")
+
+    def ws(self):
+        s, i, n = self.s, self.i, self.n
+        while i < n:
+            c = s[i]
+            if c in " \t\r\n﻿":
+                i += 1
+            elif s.startswith("--", i):
+                if s.startswith("--[[", i):
+                    end = s.find("]]", i + 4)
+                    i = n if end < 0 else end + 2
+                else:
+                    end = s.find("\n", i)
+                    i = n if end < 0 else end + 1
+            else:
+                break
+        self.i = i
+
+    def peek(self) -> str:
+        return self.s[self.i] if self.i < self.n else ""
+
+    def expect(self, c: str):
+        self.ws()
+        if self.peek() != c:
+            self.fail(f"'{c}' erwartet")
+        self.i += 1
+
+    def string(self) -> str:
+        s, q = self.s, self.s[self.i]
+        i = self.i + 1
+        out = bytearray()
+        start = i
+        while True:
+            if i >= self.n:
+                self.fail("Text ohne Ende")
+            c = s[i]
+            if c == q:
+                out += s[start:i].encode("utf-8")
+                self.i = i + 1
+                return out.decode("utf-8", "replace")
+            if c == "\\":
+                out += s[start:i].encode("utf-8")
+                e = s[i + 1] if i + 1 < self.n else ""
+                if e.isdigit():
+                    j = i + 1
+                    while j < self.n and j < i + 4 and s[j].isdigit():
+                        j += 1
+                    out.append(int(s[i + 1:j]) & 0xFF)
+                    i = j
+                else:
+                    out.append(_LUA_ESC.get(e, ord(e) if e and ord(e) < 128 else 63))
+                    i += 2
+                start = i
+            else:
+                i += 1
+
+    def value(self):
+        self.ws()
+        c = self.peek()
+        if c == "{":
+            return self.table()
+        if c in "\"'":
+            return self.string()
+        m = _LUA_NUM.match(self.s, self.i)
+        if m and m.group():
+            self.i = m.end()
+            t = m.group()
+            if t.lower().startswith(("0x", "-0x")):
+                return int(t, 16)
+            if re.fullmatch(r"-?\d+", t):
+                return int(t)
+            return float(t)
+        m = _LUA_NAME.match(self.s, self.i)
+        if m:
+            self.i = m.end()
+            word = m.group()
+            if word in ("true", "false"):
+                return word == "true"
+            if word == "nil":
+                return None
+            if word in ("inf", "nan"):
+                return 0
+        self.fail("Wert erwartet")
+
+    def table(self):
+        self.i += 1
+        d: dict = {}
+        pos = 1
+        while True:
+            self.ws()
+            c = self.peek()
+            if c == "}":
+                self.i += 1
+                break
+            if c == "":
+                self.fail("Tabelle ohne Ende")
+            if c == "[":
+                self.i += 1
+                k = self.value()
+                self.expect("]")
+                self.expect("=")
+                d[k] = self.value()
+            else:
+                m = _LUA_NAME.match(self.s, self.i)
+                j = m.end() if m else self.i
+                while j < self.n and self.s[j] in " \t\r\n":
+                    j += 1
+                if m and m.group() not in ("true", "false", "nil") and self.s.startswith("=", j) \
+                        and not self.s.startswith("==", j):
+                    self.i = j + 1
+                    d[m.group()] = self.value()
+                else:
+                    d[pos] = self.value()
+                    pos += 1
+            self.ws()
+            if self.peek() in (",", ";"):
+                self.i += 1
+        if d and all(isinstance(k, int) for k in d) and sorted(d) == list(range(1, len(d) + 1)):
+            return [d[k] for k in range(1, len(d) + 1)]
+        return d
+
+
+def parse_lua_savedvariables(text: str) -> dict:
+    """Liefert {Variablenname: Wert} aus einer SavedVariables-Datei."""
+    r = _LuaReader(text)
+    out = {}
+    while True:
+        r.ws()
+        if r.i >= r.n:
+            return out
+        m = _LUA_NAME.match(r.s, r.i)
+        if not m:
+            r.fail("Variablenname erwartet")
+        r.i = m.end()
+        r.expect("=")
+        out[m.group()] = r.value()
+
+
+# ----- Werte robust lesen ------------------------------------------------- #
+def _num(v, default=0):
+    if isinstance(v, bool):
+        return default
+    if isinstance(v, (int, float)):
+        return v
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def _int(v, default=0) -> int:
+    return int(round(_num(v, default)))
+
+
+def _text(v) -> str:
+    return v if isinstance(v, str) else ("" if v is None else str(v))
+
+
+def _map(v) -> dict:
+    if isinstance(v, dict):
+        return {str(k): x for k, x in v.items()}
+    if isinstance(v, list):
+        return {str(i + 1): x for i, x in enumerate(v)}
+    return {}
+
+
+def _list(v) -> list:
+    if isinstance(v, list):
+        return v
+    if isinstance(v, dict):
+        try:
+            return [v[k] for k in sorted(v, key=lambda k: _num(k))]
+        except TypeError:
+            return list(v.values())
+    return []
+
+
+def _counts(v) -> dict:
+    return {k: _num(x) for k, x in _map(v).items() if _num(x)}
+
+
+def _items(v) -> dict:
+    out = {}
+    for k, e in _map(v).items():
+        e = _map(e)
+        if _int(e.get("n")) <= 0:
+            continue
+        out[k] = {"name": _text(e.get("name")) or f"#{k}", "q": _int(e.get("q"), 1), "n": _int(e.get("n")),
+                  "v": _int(e.get("v")), "p": _int(e.get("p"))}
+    return out
+
+
+def normalize_session(raw, flavor: str = "", account: str = "") -> dict | None:
+    """Bringt eine Sitzung aus dem Addon in eine feste Form (JSON-tauglich, alle Felder vorhanden)."""
+    r = _map(raw)
+    char = _text(r.get("char"))
+    start = _int(r.get("start"))
+    if not char or start <= 0:
+        return None
+    g = lambda key: _map(r.get(key))   # noqa: E731
+    tm, lv, xp, mo, qu, lo, cb, ki, mv, pr, ex = (g(k) for k in (
+        "time", "level", "xp", "money", "quests", "loot", "combat", "kills", "move", "prof", "explore"))
+    name, _, realm = char.partition("-")
+    s = {
+        "format": SESSION_FORMAT,
+        "id": _text(r.get("id")) or f"{char}:{start}",
+        "char": char, "name": _text(r.get("name")) or name, "realm": _text(r.get("realm")) or realm,
+        "class": _text(r.get("class")), "race": _text(r.get("race")), "faction": _text(r.get("faction")),
+        "addon": _text(r.get("addon")), "interface": _int(r.get("interface")),
+        "flavor": flavor, "account": account,
+        "start": start, "stop": max(start, _int(r.get("stop"), start)), "saved": _int(r.get("saved")),
+        "played": _int(r.get("played")), "resumes": _int(r.get("resumes")),
+        "playedTotal": _int(r.get("playedTotal")),
+        "time": {k: _int(tm.get(k)) for k in ("combat", "afk", "rest", "dead", "taxi", "instance")},
+        "level": {"from": _int(lv.get("from")), "to": _int(lv.get("to")),
+                  "ups": [{"l": _int(_map(u).get("l")), "t": _int(_map(u).get("t"))} for u in _list(lv.get("ups"))]},
+        "xp": {k: _int(xp.get(k)) for k in ("total", "kills", "quests", "explore", "other", "killsN")},
+        "money": {"start": _int(mo.get("start")), "stop": _int(mo.get("stop")), "income": _int(mo.get("income")),
+                  "spent": _int(mo.get("spent")), "gain": _counts(mo.get("gain")), "spend": _counts(mo.get("spend"))},
+        "quests": {
+            "accepted": [{"id": _int(_map(q).get("id")), "title": _text(_map(q).get("title")),
+                          "lvl": _int(_map(q).get("lvl")), "t": _int(_map(q).get("t"))} for q in _list(qu.get("accepted"))],
+            "done": [{"id": _int(_map(q).get("id")), "title": _text(_map(q).get("title")),
+                      "xp": _int(_map(q).get("xp")), "money": _int(_map(q).get("money")),
+                      "t": _int(_map(q).get("t")), "zone": _text(_map(q).get("zone"))} for q in _list(qu.get("done"))],
+            "abandoned": [{"title": _text(_map(q).get("title")), "t": _int(_map(q).get("t"))}
+                          for q in _list(qu.get("abandoned"))],
+        },
+        "loot": {"n": _int(lo.get("n")), "value": _int(lo.get("value")),
+                 "q": {str(_int(k) if str(k).lstrip("-").isdigit() else k): _int(v) for k, v in _map(lo.get("q")).items()},
+                 "items": _items(lo.get("items")),
+                 "notable": [{"id": _int(_map(e).get("id")), "name": _text(_map(e).get("name")),
+                              "q": _int(_map(e).get("q"), 2), "n": _int(_map(e).get("n"), 1),
+                              "t": _int(_map(e).get("t")), "zone": _text(_map(e).get("zone")),
+                              "src": _text(_map(e).get("src"))} for e in _list(lo.get("notable"))]},
+        "combat": {
+            **{k: _int(cb.get(k)) for k in ("dmg", "dmgPet", "hits", "crits", "maxHit", "heal", "over", "maxHeal",
+                                             "taken", "maxTaken", "healTaken", "castN", "buffN", "debuffN",
+                                             "buffsGiven", "interrupts", "dispels")},
+            **{k: _text(cb.get(k)) for k in ("maxHitSpell", "maxHealSpell", "maxTakenBy", "maxTakenSpell", "err")},
+            "maxHitCrit": bool(cb.get("maxHitCrit")),
+            "spells": {k: [_int(x) for x in (_list(v) + [0, 0, 0])[:3]] for k, v in _map(cb.get("spells")).items()},
+            "heals": {k: [_int(x) for x in (_list(v) + [0, 0, 0])[:3]] for k, v in _map(cb.get("heals")).items()},
+            "casts": _counts(cb.get("casts")), "buffs": _counts(cb.get("buffs")), "debuffs": _counts(cb.get("debuffs")),
+            "takenBy": _counts(cb.get("takenBy")), "env": _counts(cb.get("env")),
+            "swings": {k: _int(_map(cb.get("swings")).get(k))
+                       for k in ("n", "hit", "crit", "miss", "dodge", "parry", "block", "glance")},
+            "swingsTaken": {k: _int(_map(cb.get("swingsTaken")).get(k))
+                            for k in ("n", "hit", "crit", "miss", "dodge", "parry", "block")},
+        },
+        "kills": {**{k: _int(ki.get(k)) for k in ("n", "normal", "elite", "rare", "rareelite", "boss", "players", "blows")},
+                  "mobs": {k: {"name": _text(_map(e).get("name")) or "?", "n": _int(_map(e).get("n")),
+                               "c": _text(_map(e).get("c")) or "normal"} for k, e in _map(ki.get("mobs")).items()}},
+        "bosses": [{"name": _text(_map(b).get("name")), "t": _int(_map(b).get("t")), "inst": _text(_map(b).get("inst")),
+                    "sec": _int(_map(b).get("sec"))} for b in _list(r.get("bosses"))],
+        "wipes": _int(r.get("wipes")),
+        "deaths": [{k: (_int(_map(d).get(k)) if k in ("t", "lvl") else _text(_map(d).get(k)))
+                    for k in ("t", "zone", "sub", "by", "spell", "lvl", "inst")} for d in _list(r.get("deaths"))],
+        "deathN": _int(r.get("deathN")),
+        "move": {k: _num(mv.get(k)) for k in ("foot", "mount", "swim", "taxi", "ghost", "steps", "jumps")},
+        "prof": {
+            "skills": {k: {"h": _text(_map(e).get("h")), "a": _int(_map(e).get("a")), "b": _int(_map(e).get("b")),
+                           "m": _int(_map(e).get("m"))} for k, e in _map(pr.get("skills")).items()},
+            "ups": _int(pr.get("ups")),
+            "crafted": _items(pr.get("crafted")),
+            "gathered": {k: _items(v) for k, v in _map(pr.get("gathered")).items() if _items(v)},
+            "learned": [_text(_map(e).get("name")) for e in _list(pr.get("learned")) if _map(e).get("name")],
+        },
+        "spellsLearned": [_text(_map(e).get("name")) for e in _list(r.get("spellsLearned")) if _map(e).get("name")],
+        "explore": {
+            "found": [{"name": _text(_map(e).get("name")), "xp": _int(_map(e).get("xp")), "zone": _text(_map(e).get("zone")),
+                       "t": _int(_map(e).get("t"))} for e in _list(ex.get("found"))],
+            "zones": {k: {"sec": _int(_map(z).get("sec")), "subs": sorted(str(x) for x in _map(_map(z).get("subs")))}
+                      for k, z in _map(ex.get("zones")).items()},
+        },
+        "runs": [{"name": _text(_map(x).get("name")), "kind": _text(_map(x).get("kind")), "diff": _text(_map(x).get("diff")),
+                  "size": _int(_map(x).get("size")), "start": _int(_map(x).get("start")), "stop": _int(_map(x).get("stop")),
+                  "kills": _int(_map(x).get("kills")), "bosses": [_text(b) for b in _list(_map(x).get("bosses"))],
+                  "wipes": _int(_map(x).get("wipes")), "deaths": _int(_map(x).get("deaths")), "xp": _int(_map(x).get("xp")),
+                  "money": _int(_map(x).get("money")), "loot": _int(_map(x).get("loot")), "group": _int(_map(x).get("group"))}
+                 for x in _list(r.get("runs"))],
+        "rep": _counts(r.get("rep")),
+        "legacy": False,
+    }
+    # Spielzeit fehlt (z. B. Absturz vor dem ersten Speichern): Zeitraum nehmen
+    if s["played"] <= 0:
+        s["played"] = max(0, s["stop"] - s["start"])
+    return s
+
+
+def legacy_session(raw, flavor: str = "", account: str = "") -> dict | None:
+    """Sitzungen aus Leeroyzan Link 0.1 (nur Dauer, Gold, XP, Kills)."""
+    r = _map(raw)
+    s = normalize_session({"char": r.get("char"), "start": r.get("start"),
+                           "stop": _int(r.get("start")) + _int(r.get("duration")),
+                           "saved": _int(r.get("start")) + _int(r.get("duration")),
+                           "played": r.get("duration"), "level": {"from": r.get("level"), "to": r.get("level")},
+                           "xp": {"total": r.get("xp")}, "kills": {"n": r.get("kills"), "normal": r.get("kills")}},
+                          flavor, account)
+    if s:
+        s["legacy"] = True
+        s["money"]["stop"] = s["money"]["start"] + _int(r.get("money"))
+        s["money"]["net"] = _int(r.get("money"))
+    return s
+
+
+def session_net_money(s: dict) -> int:
+    m = s.get("money", {})
+    if "net" in m:
+        return _int(m["net"])
+    return _int(m.get("stop")) - _int(m.get("start"))
+
+
+# ----- Dateien ------------------------------------------------------------ #
+def link_savedvariables(root: str, flavor: str) -> list[Path]:
+    """Alle SavedVariables-Dateien des Addons in dieser Spielversion (eine pro WoW-Account)."""
+    base = Path(root) / flavor / "WTF" / "Account"
+    if not root or not flavor or not base.is_dir():
+        return []
+    return sorted(p for p in base.glob(f"*/SavedVariables/{LINK_ADDON}.lua") if p.is_file())
+
+
+def link_signature(root: str, flavor: str) -> tuple:
+    out = []
+    for p in link_savedvariables(root, flavor):
+        try:
+            st = p.stat()
+            out.append((str(p), st.st_size, st.st_mtime_ns))
+        except OSError:
+            pass
+    return tuple(out)
+
+
+def sessions_dir(flavor: str) -> Path:
+    name = re.sub(r"[^A-Za-z0-9]+", "", flavor) or "wow"
+    return config_dir() / "sessions" / name
+
+
+def _safe_name(text: str) -> str:
+    return re.sub(r"[^\w.-]+", "_", text, flags=re.UNICODE).strip("_")[:60] or "char"
+
+
+def session_path(flavor: str, s: dict) -> Path:
+    stamp = datetime.fromtimestamp(s["start"]).strftime("%Y%m%d-%H%M%S")
+    return sessions_dir(flavor) / f"{stamp}_{_safe_name(s['char'])}.json"
+
+
+def read_link_db(path: Path) -> dict:
+    text = path.read_text(encoding="utf-8", errors="replace")
+    db = parse_lua_savedvariables(text).get(LINK_DB)
+    return db if isinstance(db, dict) else {}
+
+
+def sessions_in_db(db: dict, flavor: str = "", account: str = "") -> list[dict]:
+    g = _map(db.get("global"))
+    out = []
+    for raw in _list(g.get("sessionLog")):
+        if _int(_map(raw).get("v")) >= SESSION_FORMAT:
+            s = normalize_session(raw, flavor, account)
+            if s:
+                out.append(s)
+    for raw in _list(g.get("sessions")):          # alte Version 0.1
+        s = legacy_session(raw, flavor, account)
+        if s:
+            out.append(s)
+    return out
+
+
+_SESSION_CACHE: dict[str, tuple[int, dict]] = {}     # Pfad -> (Änderungszeit, Sitzung)
+
+
+def load_sessions(flavor: str) -> list[dict]:
+    """Alle gespeicherten Sitzungen dieser Spielversion, neueste zuerst (unveränderte Dateien aus dem Cache)."""
+    out = []
+    d = sessions_dir(flavor)
+    if not d.is_dir():
+        return out
+    for p in d.glob("*.json"):
+        key = str(p)
+        try:
+            mtime = p.stat().st_mtime_ns
+            cached = _SESSION_CACHE.get(key)
+            if cached and cached[0] == mtime:
+                s = cached[1]
+            else:
+                s = json.loads(p.read_text(encoding="utf-8"))
+                _SESSION_CACHE[key] = (mtime, s)
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(s, dict) and s.get("char") and s.get("start"):
+            s["_file"] = key
+            out.append(s)
+    out.sort(key=lambda s: s.get("start", 0), reverse=True)
+    return out
+
+
+def save_session(flavor: str, s: dict) -> Path:
+    p = session_path(flavor, s)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(".tmp")
+    data = {k: v for k, v in s.items() if not k.startswith("_")}
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+    tmp.replace(p)
+    return p
+
+
+def _deleted_file(flavor: str) -> Path:
+    return sessions_dir(flavor) / "deleted.txt"
+
+
+def deleted_session_ids(flavor: str) -> set[str]:
+    try:
+        return {l.strip() for l in _deleted_file(flavor).read_text(encoding="utf-8").splitlines() if l.strip()}
+    except OSError:
+        return set()
+
+
+def delete_session(flavor: str, s: dict) -> None:
+    """Entfernt eine Sitzung aus dem Archiv und merkt sich die ID, damit sie nicht wieder importiert wird."""
+    p = Path(s.get("_file") or session_path(flavor, s))
+    p.unlink(missing_ok=True)
+    f = _deleted_file(flavor)
+    f.parent.mkdir(parents=True, exist_ok=True)
+    with open(f, "a", encoding="utf-8") as fh:
+        fh.write(s["id"] + "\n")
+
+
+def import_link_sessions(root: str, flavor: str) -> dict:
+    """Übernimmt neue und fortgesetzte Sitzungen aus allen Accounts. Schreibt nie in WoW-Dateien."""
+    result = {"new": [], "updated": [], "errors": [], "files": 0}
+    deleted = deleted_session_ids(flavor)
+    for path in link_savedvariables(root, flavor):
+        account = path.parent.parent.name
+        try:
+            db = read_link_db(path)
+        except (OSError, LuaParseError) as e:
+            result["errors"].append(f"{path.name} ({account}): {e}")
+            continue
+        result["files"] += 1
+        for s in sessions_in_db(db, flavor, account):
+            if s["id"] in deleted:
+                continue
+            target = session_path(flavor, s)
+            old = None
+            if target.is_file():
+                try:
+                    old = json.loads(target.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    old = None
+            if old is not None:
+                if s["legacy"] and not old.get("legacy"):
+                    continue                      # nie eine volle Sitzung durch die alte Kurzform ersetzen
+                if (s["saved"], s["played"]) <= (_int(old.get("saved")), _int(old.get("played"))):
+                    continue
+            s["imported"] = int(time.time())
+            if old is not None and old.get("imported_first"):
+                s["imported_first"] = old["imported_first"]
+            else:
+                s["imported_first"] = s["imported"]
+            save_session(flavor, s)
+            (result["updated"] if old is not None else result["new"]).append(s)
+    return result
+
+
+# ----- Addon mitliefern und installieren ---------------------------------- #
+def bundled_link_dir() -> Path | None:
+    """Mitgeliefertes Addon: in der .exe (PyInstaller) oder neben leeroyzan.py."""
+    bases = [Path(getattr(sys, "_MEIPASS", "")), app_dir()] if getattr(sys, "frozen", False) else [Path(__file__).resolve().parent]
+    for base in bases:
+        d = base / LINK_ADDON
+        if (d / f"{LINK_ADDON}.toc").is_file():
+            return d
+    return None
+
+
+def link_version(folder: Path | None) -> str:
+    if not folder:
+        return ""
+    meta = parse_toc(folder / f"{LINK_ADDON}.toc") if (folder / f"{LINK_ADDON}.toc").is_file() else {}
+    return clean_wow_text(meta.get("version", ""))
+
+
+def installed_link_dir(root: str, flavor: str) -> Path | None:
+    for base in (addons_dir(root, flavor), disabled_dir(root, flavor)):
+        d = base / LINK_ADDON
+        if (d / f"{LINK_ADDON}.toc").is_file():
+            return d
+    return None
+
+
+def install_link_addon(root: str, flavor: str) -> str:
+    """Kopiert das mitgelieferte Addon in den AddOns-Ordner. Data.lua (schreibt Leeroyzan) bleibt erhalten."""
+    src = bundled_link_dir()
+    if not src:
+        raise RuntimeError(tr("Diese Leeroyzan-Version enthält das Addon nicht."))
+    current = installed_link_dir(root, flavor)
+    dest = current or (addons_dir(root, flavor) / LINK_ADDON)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    keep = None
+    if (dest / "Data.lua").is_file():
+        keep = (dest / "Data.lua").read_bytes()
+    tmp = dest.parent / f".{LINK_ADDON}.new"
+    shutil.rmtree(tmp, ignore_errors=True)
+    shutil.copytree(src, tmp)
+    if keep is not None:
+        (tmp / "Data.lua").write_bytes(keep)
+    old = dest.parent / f".{LINK_ADDON}.old"
+    shutil.rmtree(old, ignore_errors=True)
+    if dest.exists():
+        dest.rename(old)
+    tmp.rename(dest)
+    shutil.rmtree(old, ignore_errors=True)
+    return link_version(dest)
+
+
+# ----- Formatieren --------------------------------------------------------- #
+def fmt_int(n) -> str:
+    v = _int(n)
+    out = f"{abs(v):,}".replace(",", "." if LANG == "de" else ",")
+    return ("-" if v < 0 else "") + out
+
+
+def fmt_money(copper, sign: bool = False) -> str:
+    c = _int(copper)
+    neg = c < 0
+    c = abs(c)
+    g, rest = divmod(c, 10000)
+    sv, k = divmod(rest, 100)
+    unit_c = "k" if LANG == "de" else "c"
+    parts = [f"{fmt_int(g)}g" if g else "", f"{sv}s" if sv else "", f"{k}{unit_c}" if k else ""]
+    out = " ".join(p for p in parts if p) or f"0{unit_c}"
+    if neg:
+        return "−" + out
+    return ("+" + out) if sign and c else out
+
+
+def fmt_dur(sec) -> str:
+    sec = max(0, _int(sec))
+    h, rest = divmod(sec, 3600)
+    m = rest // 60
+    if h:
+        return tr("{0} h {1:02d} min", h, m)
+    if m:
+        return tr("{0} min", m)
+    return tr("{0} s", sec)
+
+
+def fmt_dist(yards) -> str:
+    m = _num(yards) * YARD_M
+    if m < 1000:
+        return f"{fmt_int(m)} m"
+    v = f"{m / 1000:.1f}"
+    return (v.replace(".", ",") if LANG == "de" else v) + " km"
+
+
+def plural(n, one: str, many: str) -> str:
+    """tr(one) für genau 1, sonst tr(many, n) – one/many sind deutsche Texte mit {0}."""
+    return tr(one, fmt_int(n)) if _int(n) == 1 else tr(many, fmt_int(n))
+
+
+def fmt_pct(part, whole) -> str:
+    whole = _num(whole)
+    return f"{round(100 * _num(part) / whole)} %" if whole > 0 else "–"
+
+
+WEEKDAYS = {"de": ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"],
+            "en": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]}
+
+
+def fmt_day(ts) -> str:
+    d = datetime.fromtimestamp(_int(ts))
+    return f"{WEEKDAYS.get(LANG, WEEKDAYS['en'])[d.weekday()]}, {d.strftime(tr('%d.%m.%Y'))}"
+
+
+def fmt_clock(ts) -> str:
+    return datetime.fromtimestamp(_int(ts)).strftime("%H:%M")
+
+
+QUALITY_NAMES = ["Schlecht", "Gewöhnlich", "Ungewöhnlich", "Selten", "Episch", "Legendär", "Artefakt"]
+QUALITY_COLORS = ["#9d9d9d", "#f3f0e8", "#1eff00", "#3d9bff", "#c27cff", "#ff8000", "#e6cc80"]
+MONEY_SOURCES = {"loot": "Beute", "quest": "Quests", "vendor": "Händler", "mail": "Post", "auction": "Auktionshaus",
+                 "trainer": "Lehrer", "taxi": "Flugmeister", "trade": "Handel", "other": "Sonstiges"}
+GATHER_KINDS = {"herb": "Kräuterkunde", "mining": "Bergbau", "skinning": "Kürschnerei", "fishing": "Angeln"}
+INSTANCE_KINDS = {"party": "Dungeon", "raid": "Schlachtzug", "pvp": "Schlachtfeld", "arena": "Arena",
+                  "scenario": "Szenario"}
+ENV_KINDS = {"Falling": "Sturz", "Drowning": "Ertrinken", "Fatigue": "Erschöpfung", "Fire": "Feuer",
+             "Lava": "Lava", "Slime": "Schleim"}
+CLASS_NAMES = {"WARRIOR": "Krieger", "PALADIN": "Paladin", "HUNTER": "Jäger", "ROGUE": "Schurke", "PRIEST": "Priester",
+               "SHAMAN": "Schamane", "MAGE": "Magier", "WARLOCK": "Hexenmeister", "DRUID": "Druide",
+               "DEATHKNIGHT": "Todesritter", "MONK": "Mönch", "DEMONHUNTER": "Dämonenjäger", "EVOKER": "Rufer"}
+
+
+def skill_group(header: str) -> str:
+    """prof | weapon | other – aus der (deutschen oder englischen) Überschrift im Fertigkeitenfenster."""
+    h = header.lower()
+    if h == "prof" or "beruf" in h or "profession" in h or "sekund" in h or "secondary" in h or "trade" in h:
+        return "prof"
+    if "waffe" in h or "weapon" in h:
+        return "weapon"
+    return "other"
+
+
+def _top(d: dict, n: int, key=lambda v: v):
+    return sorted(d.items(), key=lambda kv: key(kv[1]), reverse=True)[:n]
+
+
+def session_title(s: dict) -> str:
+    return tr("{0} · {1} – {2}", fmt_day(s["start"]), fmt_clock(s["start"]), fmt_clock(s["stop"]))
+
+
+def session_headline(s: dict) -> str:
+    """Kurzfassung für Hinweise: Charakter · Dauer · XP · Gold · Kills."""
+    parts = [s.get("name") or s["char"], fmt_dur(s["played"])]
+    if s["xp"]["total"]:
+        parts.append(tr("{0} XP", fmt_int(s["xp"]["total"])))
+    parts.append(fmt_money(session_net_money(s), sign=True))
+    if s["kills"]["n"]:
+        parts.append(plural(s["kills"]["n"], "{0} Kill", "{0} Kills"))
+    if s["quests"]["done"]:
+        parts.append(plural(len(s["quests"]["done"]), "{0} Quest", "{0} Quests"))
+    return " · ".join(parts)
+
+
+def _summary_sentence(s: dict) -> str:
+    """Die Sitzung in zwei, drei Sätzen."""
+    x, k, mv = s["xp"], s["kills"], s["move"]
+    progress = []
+    if x["total"]:
+        progress.append(tr("{0} Erfahrung gesammelt", fmt_int(x["total"])))
+    net = session_net_money(s)
+    if net > 0:
+        progress.append(tr("{0} verdient", fmt_money(net)))
+    elif net < 0:
+        progress.append(tr("{0} ausgegeben", fmt_money(-net)))
+    if s["quests"]["done"]:
+        n = len(s["quests"]["done"])
+        progress.append(tr("1 Quest abgeschlossen") if n == 1 else tr("{0} Quests abgeschlossen", n))
+    if progress:
+        out = [tr("In {0} Spielzeit hast du {1}.", fmt_dur(s["played"]), _join_and(progress))]
+    else:
+        out = [tr("Du warst {0} im Spiel.", fmt_dur(s["played"]))]
+
+    action = []
+    if k["n"]:
+        special = []
+        if k["elite"] + k["rareelite"]:
+            special.append(tr("{0} Elite", k["elite"] + k["rareelite"]))
+        if k["rare"] + k["rareelite"]:
+            special.append(tr("{0} seltene", k["rare"] + k["rareelite"]))
+        bosses = max(k["boss"], len(s["bosses"]))
+        if bosses:
+            special.append(tr("1 Boss") if bosses == 1 else tr("{0} Bosse", bosses))
+        action.append(tr("{0} Gegner besiegt", fmt_int(k["n"])) +
+                      (tr(" (darunter {0})", _join_and(special)) if special else ""))
+    walked = mv["foot"] + mv["ghost"]
+    if walked * YARD_M >= 50:
+        action.append(tr("{0} zu Fuß zurückgelegt (≈ {1} Schritte)", fmt_dist(walked), fmt_int(mv["steps"])))
+    if s["explore"]["found"]:
+        n = len(s["explore"]["found"])
+        action.append(tr("1 Gebiet entdeckt") if n == 1 else tr("{0} Gebiete entdeckt", n))
+    if s["runs"]:
+        n = len(s["runs"])
+        action.append(tr("1 Instanz besucht") if n == 1 else tr("{0} Instanzen besucht", n))
+    if action:
+        out.append(tr("Du hast {0}.", _join_and(action)))
+
+    lv = s["level"]
+    if lv["to"] > lv["from"] > 0:
+        out.append(tr("Du bist von Stufe {0} auf {1} aufgestiegen.", lv["from"], lv["to"]))
+    if s["deathN"] == 1:
+        out.append(tr("Du bist einmal gestorben."))
+    elif s["deathN"] > 1:
+        out.append(tr("Du bist {0}-mal gestorben.", s["deathN"]))
+    return " ".join(out)
+
+
+def _join_and(parts: list[str]) -> str:
+    if len(parts) <= 1:
+        return "".join(parts)
+    return ", ".join(parts[:-1]) + tr(" und ") + parts[-1]
+
+
+def session_report(s: dict) -> list[tuple[str, str]]:
+    """Ausführliche Zusammenfassung einer Sitzung als (Text, Tag)-Teile für ein Text-Feld."""
+    P: list[tuple[str, str]] = []
+    add = lambda text, tag="": P.append((text, tag))   # noqa: E731
+
+    def head(text):
+        add("\n" + text + "\n", "head")
+
+    def line(text, tag=""):
+        add(text + "\n", tag)
+
+    def pairs(items, tag=""):
+        items = [i for i in items if i]
+        if items:
+            line(" · ".join(items), tag)
+
+    cls = tr(CLASS_NAMES.get(s["class"], s["class"].title())) if s["class"] else ""
+    add(session_title(s) + "\n", "title")
+    who = s["name"] or s["char"]
+    lv = s["level"]
+    level = (tr("Stufe {0}", lv["to"]) if lv["from"] in (0, lv["to"]) else tr("Stufe {0} → {1}", lv["from"], lv["to"]))
+    pairs([who, cls, level, s["realm"]])
+    if s["legacy"]:
+        line(tr("Aufgezeichnet mit Leeroyzan Link 0.1 – nur Dauer, Erfahrung, Gold und Kills."), "dim")
+    if s["resumes"]:
+        line(tr("Fortgesetzt nach {0}× /reload oder kurzem Ausloggen.", s["resumes"]), "dim")
+
+    head(tr("Zusammenfassung"))
+    line(_summary_sentence(s))
+    hl = _highlights(s)
+    if hl:
+        for h in hl:
+            add("★ ", "hl")
+            line(h)
+
+    head(tr("Zeit"))
+    t = s["time"]
+    pairs([tr("Spielzeit {0}", fmt_dur(s["played"])), tr("im Kampf {0}", fmt_dur(t["combat"])) if t["combat"] else "",
+           tr("AFK {0}", fmt_dur(t["afk"])) if t["afk"] else "", tr("ausgeruht {0}", fmt_dur(t["rest"])) if t["rest"] else "",
+           tr("in Instanzen {0}", fmt_dur(t["instance"])) if t["instance"] else "",
+           tr("Flugroute {0}", fmt_dur(t["taxi"])) if t["taxi"] else "", tr("tot {0}", fmt_dur(t["dead"])) if t["dead"] else ""])
+    if s["playedTotal"]:
+        line(tr("Gesamtspielzeit des Charakters: {0}", fmt_dur(s["playedTotal"])), "dim")
+
+    x = s["xp"]
+    if x["total"] or lv["ups"]:
+        head(tr("Erfahrung"))
+        per_h = x["total"] * 3600 / s["played"] if s["played"] >= 300 else 0
+        pairs([tr("{0} XP", fmt_int(x["total"])), tr("{0} pro Stunde", fmt_int(per_h)) if per_h else ""])
+        pairs([tr("Kills {0} ({1})", fmt_int(x["kills"]), fmt_pct(x["kills"], x["total"])) if x["kills"] else "",
+               tr("Quests {0} ({1})", fmt_int(x["quests"]), fmt_pct(x["quests"], x["total"])) if x["quests"] else "",
+               tr("Entdecken {0} ({1})", fmt_int(x["explore"]), fmt_pct(x["explore"], x["total"])) if x["explore"] else "",
+               tr("Sonstiges {0}", fmt_int(x["other"])) if x["other"] else ""], "dim")
+        if lv["ups"]:
+            line(tr("Stufenaufstiege: {0}", ", ".join(tr("{0} um {1}", u["l"], fmt_clock(u["t"])) for u in lv["ups"])))
+
+    m = s["money"]
+    net = session_net_money(s)
+    head(tr("Gold"))
+    if s["legacy"]:
+        line(tr("netto {0}", fmt_money(net, sign=True)))
+    else:
+        pairs([tr("{0} → {1}", fmt_money(m["start"]), fmt_money(m["stop"])), tr("netto {0}", fmt_money(net, sign=True))])
+        if m["gain"]:
+            line(tr("Einnahmen {0}: {1}", fmt_money(m["income"]), ", ".join(
+                f"{tr(MONEY_SOURCES.get(k, k))} {fmt_money(v)}" for k, v in _top(m["gain"], 9))), "dim")
+        if m["spend"]:
+            line(tr("Ausgaben {0}: {1}", fmt_money(m["spent"]), ", ".join(
+                f"{tr(MONEY_SOURCES.get(k, k))} {fmt_money(v)}" for k, v in _top(m["spend"], 9))), "dim")
+
+    q = s["quests"]
+    if q["done"] or q["accepted"] or q["abandoned"]:
+        head(tr("Quests"))
+        pairs([tr("{0} abgeschlossen", len(q["done"])), tr("{0} angenommen", len(q["accepted"])),
+               tr("{0} abgebrochen", len(q["abandoned"])) if q["abandoned"] else ""])
+        for e in q["done"]:
+            add("✓ ", "ok")
+            reward = [tr("{0} XP", fmt_int(e["xp"])) if e["xp"] else "", fmt_money(e["money"]) if e["money"] else ""]
+            reward = [r for r in reward if r]
+            line((e["title"] or tr("Quest {0}", e["id"])) + (f"  ({', '.join(reward)})" if reward else ""))
+        open_q = [e for e in q["accepted"] if e["id"] not in {d["id"] for d in q["done"]}]
+        if open_q:
+            line(tr("Neu angenommen: {0}", ", ".join(e["title"] or tr("Quest {0}", e["id"]) for e in open_q)), "dim")
+        if q["abandoned"]:
+            line(tr("Abgebrochen: {0}", ", ".join(e["title"] for e in q["abandoned"])), "dim")
+
+    lo = s["loot"]
+    if lo["n"]:
+        head(tr("Beute"))
+        pairs([plural(lo["n"], "{0} Gegenstand", "{0} Gegenstände"), tr("Händlerwert {0}", fmt_money(lo["value"])) if lo["value"] else ""])
+        by_q = []
+        for qi in range(len(QUALITY_NAMES)):
+            n = lo["q"].get(str(qi))
+            if n:
+                by_q.append(f"{fmt_int(n)} {tr(QUALITY_NAMES[qi]).lower()}")
+        if by_q:
+            line(", ".join(by_q), "dim")
+        if lo["notable"]:
+            add(tr("Besondere Beute: "))
+            for i, e in enumerate(lo["notable"][-12:]):
+                if i:
+                    add(", ")
+                add(f"[{e['name']}]", f"q{min(max(e['q'], 0), 6)}")
+                if e["n"] > 1:
+                    add(f" ×{e['n']}")
+            add("\n")
+        common = _top(lo["items"], 8, key=lambda e: e["n"])
+        if common:
+            add(tr("Am häufigsten: "), "dim")
+            for i, (_, e) in enumerate(common):
+                if i:
+                    add(", ", "dim")
+                add(e["name"], f"q{min(max(e['q'], 0), 6)}")
+                add(f" ×{fmt_int(e['n'])}", "dim")
+            add("\n")
+
+    cb = s["combat"]
+    k = s["kills"]
+    if k["n"] or cb["dmg"] or cb["taken"] or s["deathN"]:
+        head(tr("Gegner"))
+        bosses = max(k["boss"], len(s["bosses"]))
+        pairs([tr("{0} besiegt", fmt_int(k["n"])), tr("{0} normal", fmt_int(k["normal"])),
+               tr("{0} Elite", fmt_int(k["elite"] + k["rareelite"])) if k["elite"] + k["rareelite"] else "",
+               tr("{0} selten", fmt_int(k["rare"] + k["rareelite"])) if k["rare"] + k["rareelite"] else "",
+               plural(bosses, "{0} Boss", "{0} Bosse") if bosses else "",
+               tr("{0} Spieler", k["players"]) if k["players"] else "",
+               tr("{0} Todesstöße", fmt_int(k["blows"])) if k["blows"] else ""])
+        if s["bosses"]:
+            line(tr("Bosse: {0}", ", ".join(b["name"] for b in s["bosses"])))
+        mobs = _top(k["mobs"], 10, key=lambda e: e["n"])
+        if mobs:
+            labels = {"elite": tr("Elite"), "rare": tr("selten"), "rareelite": tr("seltene Elite"), "boss": tr("Boss")}
+            line(tr("Am häufigsten: {0}", ", ".join(
+                f"{e['name']} ×{e['n']}" + (f" ({labels[e['c']]})" if e["c"] in labels else "") for _, e in mobs)), "dim")
+
+        if not cb["err"] and (cb["dmg"] or cb["taken"] or cb["heal"]):
+            head(tr("Kampf"))
+            dps = cb["dmg"] / s["time"]["combat"] if s["time"]["combat"] >= 10 else 0
+            pairs([tr("Schaden {0}", fmt_int(cb["dmg"])) + (tr(" (davon Begleiter {0})", fmt_int(cb["dmgPet"])) if cb["dmgPet"] else ""),
+                   tr("{0} DPS im Kampf", fmt_int(dps)) if dps else "",
+                   tr("Krit-Rate {0}", fmt_pct(cb["crits"], cb["hits"])) if cb["hits"] else ""])
+            if cb["maxHit"]:
+                line(tr("Größter Treffer: {0} mit {1}{2}", fmt_int(cb["maxHit"]), cb["maxHitSpell"] or "?",
+                        tr(" (kritisch)") if cb["maxHitCrit"] else ""), "dim")
+            if cb["heal"] or cb["over"]:
+                pairs([tr("Heilung {0}", fmt_int(cb["heal"])), tr("Überheilung {0}", fmt_int(cb["over"])) if cb["over"] else "",
+                       tr("größte Heilung {0} ({1})", fmt_int(cb["maxHeal"]), cb["maxHealSpell"]) if cb["maxHeal"] else ""])
+            pairs([tr("erlittener Schaden {0}", fmt_int(cb["taken"])), tr("erhaltene Heilung {0}", fmt_int(cb["healTaken"])) if cb["healTaken"] else "",
+                   tr("härtester Treffer {0} von {1}", fmt_int(cb["maxTaken"]), cb["maxTakenBy"] or tr(ENV_KINDS.get(cb["maxTakenSpell"], cb["maxTakenSpell"]) or "?"))
+                   if cb["maxTaken"] else ""])
+            if cb["env"]:
+                line(tr("Umgebung: {0}", ", ".join(f"{tr(ENV_KINDS.get(kk, kk))} {fmt_int(v)}" for kk, v in _top(cb["env"], 6))), "dim")
+            sw, st = cb["swings"], cb["swingsTaken"]
+            if sw["n"]:
+                pairs([tr("{0} Hiebe", fmt_int(sw["n"])), tr("{0} Treffer", fmt_int(sw["hit"])), tr("{0} kritisch", fmt_int(sw["crit"])),
+                       tr("{0} verfehlt", fmt_int(sw["miss"])) if sw["miss"] else "", tr("{0} ausgewichen", fmt_int(sw["dodge"])) if sw["dodge"] else "",
+                       tr("{0} pariert", fmt_int(sw["parry"])) if sw["parry"] else "", tr("{0} geblockt", fmt_int(sw["block"])) if sw["block"] else "",
+                       tr("{0} gestreift", fmt_int(sw["glance"])) if sw["glance"] else ""])
+            if st["n"]:
+                avoided = st["miss"] + st["dodge"] + st["parry"]
+                pairs([tr("{0} Hiebe eingesteckt", fmt_int(st["n"])), tr("{0} abgewehrt ({1})", fmt_int(avoided), fmt_pct(avoided, st["n"])) if avoided else "",
+                       tr("{0} kritisch", fmt_int(st["crit"])) if st["crit"] else ""], )
+            top_dmg = _top(cb["spells"], 6, key=lambda v: v[0])
+            if top_dmg:
+                line(tr("Schaden nach Fähigkeit: {0}", ", ".join(
+                    f"{name} {fmt_int(v[0])} ({fmt_pct(v[0], cb['dmg'])})" for name, v in top_dmg)), "dim")
+            if cb["castN"]:
+                line(plural(cb["castN"], "1 Zauber gewirkt", "{0} Zauber gewirkt") + ": " + ", ".join(
+                    f"{name} ×{fmt_int(n)}" for name, n in _top(cb["casts"], 8)), "dim")
+            if cb["buffN"]:
+                line(plural(cb["buffN"], "{0} Buff erhalten", "{0} Buffs erhalten") + ": " + ", ".join(
+                    f"{name} ×{fmt_int(n)}" for name, n in _top(cb["buffs"], 8)), "dim")
+            if cb["debuffN"]:
+                line(plural(cb["debuffN"], "{0} Schwächung erlitten", "{0} Schwächungen erlitten") + ": " + ", ".join(
+                    f"{name} ×{fmt_int(n)}" for name, n in _top(cb["debuffs"], 6)), "dim")
+            pairs([tr("{0} Buffs auf andere", fmt_int(cb["buffsGiven"])) if cb["buffsGiven"] else "",
+                   tr("{0} Unterbrechungen", cb["interrupts"]) if cb["interrupts"] else "",
+                   tr("{0} Bannungen", cb["dispels"]) if cb["dispels"] else ""], )
+        elif cb["err"]:
+            line(tr("Kampfdaten waren im Spiel nicht verfügbar ({0}).", cb["err"]), "dim")
+        if s["deathN"]:
+            line(tr("Tode: {0}", s["deathN"]), "warn")
+            for d in s["deaths"]:
+                where = d["inst"] or d["zone"] or "?"
+                if d["sub"] and not d["inst"]:
+                    where += f" ({d['sub']})"
+                cause = d["by"] or tr(ENV_KINDS.get(d["spell"], d["spell"] or "")) or tr("unbekannt")
+                if d["by"] and d["spell"]:
+                    cause += f" – {d['spell']}"
+                line(tr("✝ {0}  {1}, durch {2}", fmt_clock(d["t"]), where, cause), "dim")
+
+    mv = s["move"]
+    if any(mv[kk] for kk in ("foot", "mount", "swim", "taxi", "ghost", "jumps")):
+        head(tr("Unterwegs"))
+        walked = mv["foot"] + mv["ghost"]
+        pairs([tr("{0} zu Fuß", fmt_dist(walked)) + (tr(" (≈ {0} Schritte)", fmt_int(mv["steps"])) if mv["steps"] else "") if walked else "",
+               tr("{0} beritten", fmt_dist(mv["mount"])) if mv["mount"] else "",
+               tr("{0} geschwommen", fmt_dist(mv["swim"])) if mv["swim"] else "",
+               tr("{0} Flugroute", fmt_dist(mv["taxi"])) if mv["taxi"] else "",
+               tr("{0} Sprünge", fmt_int(mv["jumps"])) if mv["jumps"] else ""])
+        if mv["ghost"]:
+            line(tr("Davon als Geist: {0}", fmt_dist(mv["ghost"])), "dim")
+
+    pr = s["prof"]
+    profs = [(n, e) for n, e in pr["skills"].items() if skill_group(e["h"]) == "prof"]
+    raised = [(n, e) for n, e in pr["skills"].items() if e["b"] > e["a"]]
+    if profs or raised or pr["crafted"] or pr["gathered"] or pr["learned"]:
+        head(tr("Berufe und Fertigkeiten"))
+        for n, e in sorted(raised, key=lambda kv: kv[1]["b"] - kv[1]["a"], reverse=True):
+            add(f"{n} {e['a']} → {e['b']}", "")
+            add(f"  (+{e['b'] - e['a']}{'/' + str(e['m']) if e['m'] else ''})\n", "ok")
+        rest = [f"{n} {e['b']}/{e['m']}" for n, e in sorted(profs) if e["b"] <= e["a"]]
+        if rest:
+            line(tr("Unverändert: {0}", ", ".join(rest)), "dim")
+        if pr["crafted"]:
+            line(tr("Hergestellt: {0}", ", ".join(f"{e['name']} ×{fmt_int(e['n'])}" for _, e in _top(pr["crafted"], 10, key=lambda e: e["n"]))))
+        for kind, items in pr["gathered"].items():
+            line(tr("{0}: {1}", tr(GATHER_KINDS.get(kind, kind)),
+                    ", ".join(f"{e['name']} ×{fmt_int(e['n'])}" for _, e in _top(items, 10, key=lambda e: e["n"]))))
+        if pr["learned"]:
+            line(tr("Neue Rezepte: {0}", ", ".join(pr["learned"])), "dim")
+    if s["spellsLearned"]:
+        line(tr("Neue Zauber und Fähigkeiten: {0}", ", ".join(s["spellsLearned"])), "dim")
+
+    ex = s["explore"]
+    if ex["found"] or ex["zones"]:
+        head(tr("Entdeckt und bereist"))
+        if ex["found"]:
+            xp_found = sum(e["xp"] for e in ex["found"])
+            line(plural(len(ex["found"]), "{0} neues Gebiet", "{0} neue Gebiete") + (tr(" (+{0} XP)", fmt_int(xp_found)) if xp_found else "") + ": "
+                 + ", ".join(e["name"] for e in ex["found"]))
+        zones = _top(ex["zones"], 10, key=lambda z: z["sec"])
+        if zones:
+            line(tr("Zonen: {0}", ", ".join(f"{name} {fmt_dur(z['sec'])}" for name, z in zones if z["sec"] >= 30) or "–"), "dim")
+
+    if s["runs"]:
+        head(tr("Dungeons und Schlachtzüge"))
+        for r in s["runs"]:
+            kind = tr(INSTANCE_KINDS.get(r["kind"], r["kind"] or "Instanz"))
+            dur = fmt_dur((r["stop"] or s["stop"]) - r["start"]) if r["start"] else ""
+            details = [kind + (f", {r['diff']}" if r["diff"] else "") + (tr(", {0} Spieler", r["group"]) if r["group"] > 1 else ""),
+                       f"{fmt_clock(r['start'])}–{fmt_clock(r['stop'] or s['stop'])}" if r["start"] else "", dur]
+            add(r["name"] or "?", "hl")
+            line("  " + " · ".join(d for d in details if d), "dim")
+            pairs([plural(r["kills"], "{0} Kill", "{0} Kills"), tr("Bosse: {0}", ", ".join(r["bosses"])) if r["bosses"] else "",
+                   plural(r["wipes"], "{0} Wipe", "{0} Wipes") if r["wipes"] else "",
+                   plural(r["deaths"], "{0} Tod", "{0} Tode") if r["deaths"] else "",
+                   tr("{0} XP", fmt_int(r["xp"])) if r["xp"] else "",
+                   plural(r["loot"], "{0} Gegenstand", "{0} Gegenstände") if r["loot"] else ""])
+
+    if s["rep"]:
+        head(tr("Ruf"))
+        line(", ".join(f"{name} {'+' if v > 0 else ''}{fmt_int(v)}" for name, v in _top(s["rep"], 12, key=abs)))
+    return P
+
+
+def _highlights(s: dict) -> list[str]:
+    out = []
+    cb, k, lo = s["combat"], s["kills"], s["loot"]
+    if lo["notable"]:
+        best = max(lo["notable"], key=lambda e: (e["q"], e["t"]))
+        if best["q"] >= 3:
+            out.append(tr("Beste Beute: [{0}] ({1})", best["name"], tr(QUALITY_NAMES[min(best["q"], 6)])))
+    if s["bosses"]:
+        out.append(tr("Boss besiegt: {0}", ", ".join(dict.fromkeys(b["name"] for b in s["bosses"]))))
+    if s["level"]["ups"]:
+        out.append(tr("Stufe {0} erreicht", s["level"]["ups"][-1]["l"]))
+    if cb["maxHit"] >= 100:
+        out.append(tr("Größter Treffer {0} ({1})", fmt_int(cb["maxHit"]), cb["maxHitSpell"] or "?"))
+    if k["mobs"]:
+        name, e = max(k["mobs"].items(), key=lambda kv: kv[1]["n"])
+        if e["n"] >= 5:
+            out.append(tr("Lieblingsgegner: {0} ×{1}", e["name"], e["n"]))
+    return out[:4]
+
+
+# ----- Mehrere Sitzungen zusammenfassen ----------------------------------- #
+def aggregate_sessions(sessions: list[dict]) -> dict:
+    tot = {"n": len(sessions), "played": 0, "xp": 0, "net": 0, "income": 0, "spent": 0, "quests": 0, "kills": 0,
+           "elite": 0, "rare": 0, "boss": 0, "blows": 0, "deaths": 0, "dmg": 0, "heal": 0, "taken": 0, "loot": 0,
+           "value": 0, "walked": 0, "mount": 0, "swim": 0, "taxi": 0, "steps": 0, "jumps": 0, "found": 0, "runs": 0,
+           "levels": 0, "skillups": 0, "combat": 0, "afk": 0, "first": 0, "last": 0,
+           "chars": {}, "mobs": {}, "zones": {}, "items": {}, "bosses": {}, "days": {}}
+    for s in sessions:
+        k, cb, mv, lo = s["kills"], s["combat"], s["move"], s["loot"]
+        tot["played"] += s["played"]
+        tot["xp"] += s["xp"]["total"]
+        net = session_net_money(s)
+        tot["net"] += net
+        tot["income"] += s["money"]["income"]
+        tot["spent"] += s["money"]["spent"]
+        tot["quests"] += len(s["quests"]["done"])
+        tot["kills"] += k["n"]
+        tot["elite"] += k["elite"] + k["rareelite"]
+        tot["rare"] += k["rare"] + k["rareelite"]
+        tot["boss"] += max(k["boss"], len(s["bosses"]))
+        tot["blows"] += k["blows"]
+        tot["deaths"] += s["deathN"]
+        tot["dmg"] += cb["dmg"]
+        tot["heal"] += cb["heal"]
+        tot["taken"] += cb["taken"]
+        tot["loot"] += lo["n"]
+        tot["value"] += lo["value"]
+        tot["walked"] += mv["foot"] + mv["ghost"]
+        tot["mount"] += mv["mount"]
+        tot["swim"] += mv["swim"]
+        tot["taxi"] += mv["taxi"]
+        tot["steps"] += mv["steps"]
+        tot["jumps"] += mv["jumps"]
+        tot["found"] += len(s["explore"]["found"])
+        tot["runs"] += len(s["runs"])
+        tot["levels"] += max(0, s["level"]["to"] - s["level"]["from"]) if s["level"]["from"] else 0
+        tot["skillups"] += sum(max(0, e["b"] - e["a"]) for e in s["prof"]["skills"].values())
+        tot["combat"] += s["time"]["combat"]
+        tot["afk"] += s["time"]["afk"]
+        tot["first"] = min(tot["first"] or s["start"], s["start"])
+        tot["last"] = max(tot["last"], s["stop"])
+        c = tot["chars"].setdefault(s["char"], {"n": 0, "played": 0, "xp": 0, "net": 0, "kills": 0, "level": 0,
+                                                "class": s["class"], "name": s["name"] or s["char"]})
+        c["n"] += 1
+        c["played"] += s["played"]
+        c["xp"] += s["xp"]["total"]
+        c["net"] += net
+        c["kills"] += k["n"]
+        c["level"] = max(c["level"], s["level"]["to"])
+        for key, e in k["mobs"].items():
+            m = tot["mobs"].setdefault(e["name"], 0)
+            tot["mobs"][e["name"]] = m + e["n"]
+        for name, z in s["explore"]["zones"].items():
+            tot["zones"][name] = tot["zones"].get(name, 0) + z["sec"]
+        for key, e in lo["items"].items():
+            it = tot["items"].setdefault(key, {"name": e["name"], "q": e["q"], "n": 0})
+            it["n"] += e["n"]
+        for b in s["bosses"]:
+            tot["bosses"][b["name"]] = tot["bosses"].get(b["name"], 0) + 1
+        day = datetime.fromtimestamp(s["start"]).strftime("%Y-%m-%d")
+        tot["days"][day] = tot["days"].get(day, 0) + s["played"]
+    return tot
+
+
+def overview_report(sessions: list[dict], label: str) -> list[tuple[str, str]]:
+    P: list[tuple[str, str]] = []
+    add = lambda text, tag="": P.append((text, tag))   # noqa: E731
+
+    def head(text):
+        add("\n" + text + "\n", "head")
+
+    def line(text, tag=""):
+        add(text + "\n", tag)
+
+    def pairs(items, tag=""):
+        items = [i for i in items if i]
+        if items:
+            line(" · ".join(items), tag)
+
+    a = aggregate_sessions(sessions)
+    add(tr("Gesamt – {0}", label) + "\n", "title")
+    if not sessions:
+        line(tr("Noch keine Sitzungen."), "dim")
+        return P
+    pairs([plural(a["n"], "{0} Sitzung", "{0} Sitzungen"), tr("{0} bis {1}", datetime.fromtimestamp(a["first"]).strftime(tr("%d.%m.%Y")),
+                                              datetime.fromtimestamp(a["last"]).strftime(tr("%d.%m.%Y"))),
+           plural(len(a["days"]), "{0} Spieltag", "{0} Spieltage")], "dim")
+
+    head(tr("Zeit"))
+    avg = a["played"] / a["n"]
+    pairs([tr("Spielzeit {0}", fmt_dur(a["played"])), tr("Ø {0} pro Sitzung", fmt_dur(avg)),
+           tr("im Kampf {0}", fmt_dur(a["combat"])) if a["combat"] else "", tr("AFK {0}", fmt_dur(a["afk"])) if a["afk"] else ""])
+    if a["days"]:
+        best_day, sec = max(a["days"].items(), key=lambda kv: kv[1])
+        line(tr("Längster Spieltag: {0} mit {1}", fmt_day(datetime.strptime(best_day, "%Y-%m-%d").timestamp()), fmt_dur(sec)), "dim")
+
+    head(tr("Fortschritt"))
+    hours = a["played"] / 3600 if a["played"] >= 600 else 0
+    pairs([tr("{0} XP", fmt_int(a["xp"])) + (tr(" ({0}/h)", fmt_int(a["xp"] / hours)) if hours else ""),
+           plural(a["levels"], "{0} Stufe", "{0} Stufen") if a["levels"] else "",
+           plural(a["quests"], "{0} Quest", "{0} Quests"),
+           tr("{0} Fertigkeitspunkte", fmt_int(a["skillups"])) if a["skillups"] else "",
+           plural(a["found"], "{0} neues Gebiet", "{0} neue Gebiete") if a["found"] else ""])
+    pairs([tr("Gold netto {0}", fmt_money(a["net"], sign=True)) + (tr(" ({0}/h)", fmt_money(a["net"] / hours)) if hours and a["net"] > 0 else ""),
+           tr("eingenommen {0}", fmt_money(a["income"])) if a["income"] else "", tr("ausgegeben {0}", fmt_money(a["spent"])) if a["spent"] else ""])
+
+    head(tr("Kampf"))
+    pairs([tr("{0} besiegt", fmt_int(a["kills"])), tr("{0} Elite", fmt_int(a["elite"])) if a["elite"] else "",
+           tr("{0} selten", a["rare"]) if a["rare"] else "",
+           plural(a["boss"], "{0} Boss", "{0} Bosse") if a["boss"] else "",
+           plural(a["deaths"], "{0} Tod", "{0} Tode")])
+    pairs([tr("Schaden {0}", fmt_int(a["dmg"])) if a["dmg"] else "", tr("Heilung {0}", fmt_int(a["heal"])) if a["heal"] else "",
+           tr("erlitten {0}", fmt_int(a["taken"])) if a["taken"] else "",
+           plural(a["runs"], "{0} Instanz", "{0} Instanzen") if a["runs"] else ""], "dim")
+    if a["mobs"]:
+        line(tr("Am häufigsten: {0}", ", ".join(f"{n} ×{fmt_int(c)}" for n, c in _top(a["mobs"], 8))), "dim")
+    if a["bosses"]:
+        line(tr("Bosse: {0}", ", ".join(f"{n} ×{c}" if c > 1 else n for n, c in _top(a["bosses"], 12))), "dim")
+
+    head(tr("Beute und Wege"))
+    pairs([tr("{0} Gegenstände", fmt_int(a["loot"])), tr("Händlerwert {0}", fmt_money(a["value"])) if a["value"] else ""])
+    pairs([tr("{0} zu Fuß (≈ {1} Schritte)", fmt_dist(a["walked"]), fmt_int(a["steps"])) if a["walked"] else "",
+           tr("{0} beritten", fmt_dist(a["mount"])) if a["mount"] else "", tr("{0} geschwommen", fmt_dist(a["swim"])) if a["swim"] else "",
+           tr("{0} Flugroute", fmt_dist(a["taxi"])) if a["taxi"] else "", tr("{0} Sprünge", fmt_int(a["jumps"])) if a["jumps"] else ""])
+    if a["zones"]:
+        line(tr("Zonen: {0}", ", ".join(f"{n} {fmt_dur(sec)}" for n, sec in _top(a["zones"], 8))), "dim")
+
+    if len(a["chars"]) > 1 or sessions:
+        head(tr("Charaktere"))
+        for char, c in sorted(a["chars"].items(), key=lambda kv: kv[1]["played"], reverse=True):
+            cls = tr(CLASS_NAMES.get(c["class"], c["class"].title())) if c["class"] else ""
+            add(c["name"], "hl")
+            line("  " + " · ".join(x for x in (cls, tr("Stufe {0}", c["level"]) if c["level"] else "",
+                                               plural(c["n"], "{0} Sitzung", "{0} Sitzungen"), fmt_dur(c["played"]),
+                                               tr("{0} XP", fmt_int(c["xp"])), fmt_money(c["net"], sign=True),
+                                               tr("{0} Kills", fmt_int(c["kills"]))) if x), "dim")
+    return P
+
+
+def report_plain_text(parts: list[tuple[str, str]]) -> str:
+    return "".join(t for t, _ in parts).strip() + "\n"
+
+
+# --------------------------------------------------------------------------- #
 # Theme (Braun/Gold im Stil eines Fantasy-MMO-Interfaces)
 # --------------------------------------------------------------------------- #
 
@@ -2008,6 +3142,7 @@ class App(BaseTk):
         if self.cfg.get("check_on_start") and self.sources():
             self.after(700, lambda: self.check_updates(silent=True))
         cleanup_self_update()
+        self.after(10000, self._watch_sessions)
         self.after(900, self._report_self_update)
         if self.cfg.get("self_update_mode") != "off":
             self.after(1500, lambda: self.check_manager_update(silent=True))
@@ -2069,6 +3204,8 @@ class App(BaseTk):
             return "break"
         if self.current_page == "updates":
             self.check_updates()
+        elif self.current_page == "sessions":
+            self.import_sessions(manual=True)
         else:
             self.refresh()
         return "break"
@@ -2082,7 +3219,8 @@ class App(BaseTk):
 
     # ----- Aufbau ---------------------------------------------------------- #
     PAGES = [("addons", "Meine Addons"), ("discover", "Entdecken"), ("updates", "Updates"),
-             ("share", "Teilen"), ("sets", "Sets & Backups"), ("settings", "Einstellungen")]
+             ("sessions", "Sitzungen"), ("share", "Teilen"), ("sets", "Sets & Backups"),
+             ("settings", "Einstellungen")]
     TREE_SHOWN = ("status", "name", "version", "source", "update")
 
     def _build_ui(self):
@@ -2129,6 +3267,19 @@ class App(BaseTk):
         self.share_info = tk.StringVar()
         self.import_preview = tk.StringVar()
         self.recv_file_var = tk.StringVar()
+        # Sitzungen
+        self.sess_char_var = tk.StringVar()
+        self.sess_period_var = tk.StringVar()
+        self.sess_period = "all"
+        self.link_state_var = tk.StringVar()
+        self.sessions_all: list[dict] = []
+        self.sessions_shown: list[dict] = []
+        self._sess_parts: list = []
+        self._sess_rows: list[dict] = []
+        self._sess_sig = None
+        self._sess_pending: dict[str, dict] = {}
+        self._sess_importing = False
+        self._link_hint_shown = False
         self.sort_col, self.sort_rev = "name", False
         self.open_groups: set[str] = set()
         self.group_members: dict[str, list[str]] = {}
@@ -2187,6 +3338,7 @@ class App(BaseTk):
         self._page_addons()
         self._page_discover()
         self._page_updates()
+        self._page_sessions()
         self._page_share()
         self._page_sets()
         self._page_settings()
@@ -2580,6 +3732,11 @@ class App(BaseTk):
             self.refresh_recv_files()
         elif key == "updates":
             self.refresh_updates_page()
+        elif key == "sessions":
+            self.refresh_sessions_page()
+            if not self._sess_importing and self.root_path and self.flavor \
+                    and link_signature(self.root_path, self.flavor) != self._sess_sig:
+                self.import_sessions()
 
     # --- Meine Addons --------------------------------------------------------- #
     def _page_addons(self):
@@ -3045,6 +4202,359 @@ class App(BaseTk):
                                     open_in_explorer(BACKUP_DIR))).pack(side="right")
         self._w_check(bbox, tr("Vor Updates automatisch sichern"), self.auto_backup_var).pack(anchor="w", pady=(10, 0))
 
+    # --- Sitzungen -------------------------------------------------------------- #
+    SESSION_PERIODS = [("all", "Alle Zeiträume"), ("today", "Heute"), ("week", "Letzte 7 Tage"),
+                       ("month", "Letzte 30 Tage")]
+
+    def _page_sessions(self):
+        t = THEME
+        page, head = self._page("sessions", tr("Leeroyzan Link"), tr("Spielsitzungen"))
+        right = ttk.Frame(head)
+        right.pack(side="right", anchor="s")
+        ttk.Button(right, text=tr("Jetzt einlesen"), command=lambda: self.import_sessions(manual=True)).pack(side="right")
+        pcb = ttk.Combobox(right, textvariable=self.sess_period_var, state="readonly", width=16,
+                           values=[tr(label) for _, label in self.SESSION_PERIODS])
+        pcb.pack(side="right", padx=(0, 8))
+        pcb.bind("<<ComboboxSelected>>", lambda e: self._sess_filter_changed())
+        self.sess_period_var.set(tr(dict(self.SESSION_PERIODS)[self.sess_period]))
+        self.sess_char_cb = ttk.Combobox(right, textvariable=self.sess_char_var, state="readonly", width=22)
+        self.sess_char_cb.pack(side="right", padx=(0, 8))
+        self.sess_char_cb.bind("<<ComboboxSelected>>", lambda e: self.refresh_sessions_page())
+
+        link = self._card_box(page, pady=(12, 0))
+        row = ttk.Frame(link, style="Panel.TFrame")
+        row.pack(fill="x")
+        # wraplength < 300: _fit_wraps lässt das Feld in Ruhe, die Breite rechnet _wrap_link_label (Knopf daneben)
+        self.link_label = ttk.Label(row, textvariable=self.link_state_var, style="Panel.TLabel", wraplength=280,
+                                    justify="left")
+        self.link_label.pack(side="left", fill="x", expand=True)
+        self.link_btn = ttk.Button(row, style="Primary.TButton", command=self.install_link)
+        row.bind("<Configure>", lambda e: self._wrap_link_label(e.width))
+
+        body = ttk.Frame(page)
+        body.pack(fill="both", expand=True, pady=(12, 0))
+        left = ttk.Frame(body, width=496)
+        left.pack(side="left", fill="y")
+        left.pack_propagate(False)
+        frame, self.sess_tree = self._list(left, (("when", tr("Datum")), ("char", tr("Charakter")), ("dur", tr("Dauer")),
+                                                  ("xp", tr("XP")), ("gold", tr("Gold"))),
+                                           (134, 104, 78, 66, 92), stretch=("char",))
+        frame.pack(fill="both", expand=True)
+        self.sess_tree.tag_configure("total", foreground=t["gold"], font=self.fonts["bold"])
+        self.sess_tree.bind("<<TreeviewSelect>>", lambda e: self._sess_show())
+        brow = ttk.Frame(left)
+        brow.pack(fill="x", pady=(8, 0))
+        ttk.Button(brow, text=tr("Text kopieren"), command=self.copy_session_text).pack(side="left")
+        ttk.Button(brow, text=tr("Löschen"), style="Danger.TButton", command=self.delete_selected_session).pack(
+            side="left", padx=(6, 0))
+        ttk.Button(brow, text=tr("Ordner öffnen"), command=self.open_sessions_folder).pack(side="right")
+
+        box = self._card_box(body, pady=(0, 0), side="left", fill="both", expand=True, padx=(14, 0))
+        tf, txt = self._text(box)
+        tf.pack(fill="both", expand=True)
+        txt.configure(spacing1=1, spacing3=1, padx=14, pady=10)
+        txt.tag_configure("title", foreground=t["gold"], font=self.fonts["card"], spacing3=2)
+        txt.tag_configure("hl", foreground=t["gold"])
+        txt.tag_configure("ok", foreground=t["ok"])
+        txt.tag_configure("warn", foreground=t["warn"])
+        for i, color in enumerate(QUALITY_COLORS):
+            txt.tag_configure(f"q{i}", foreground=color)
+        self.sess_text = txt
+
+    def _wrap_link_label(self, width: int | None = None):
+        try:
+            width = width or self.link_label.master.winfo_width()
+            btn = self.link_btn.winfo_reqwidth() + 16 if self.link_btn.winfo_manager() else 0
+            self.link_label.configure(wraplength=max(240, width - btn - 8))
+        except tk.TclError:
+            pass
+
+    def _char_label(self, char: str) -> str:
+        """Name, bei gleichen Namen auf mehreren Realms mit Realm."""
+        name, _, realm = char.partition("-")
+        same = [c for c in {s["char"] for s in self.sessions_all} if c.partition("-")[0] == name]
+        return f"{name} ({realm})" if len(same) > 1 and realm else name
+
+    def _sess_filter_changed(self):
+        label = self.sess_period_var.get()
+        self.sess_period = next((k for k, l in self.SESSION_PERIODS if tr(l) == label), "all")
+        self.refresh_sessions_page()
+
+    def refresh_sessions_page(self, select: str = ""):
+        """Liste neu aufbauen. select: Sitzungs-ID oder "total"."""
+        if getattr(self, "sess_tree", None) is None or not self.sess_tree.winfo_exists():
+            return
+        self.sessions_all = load_sessions(self.flavor) if self.flavor else []
+        chars = sorted({s["char"] for s in self.sessions_all}, key=str.lower)
+        labels = {c: self._char_label(c) for c in chars}
+        all_label = tr("Alle Charaktere")
+        self.sess_char_cb["values"] = [all_label] + [labels[c] for c in chars]
+        if self.sess_char_var.get() not in self.sess_char_cb["values"]:
+            self.sess_char_var.set(all_label)
+        want = next((c for c in chars if labels[c] == self.sess_char_var.get()), "")
+        now = datetime.now()
+        cutoff = {"today": now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp(),
+                  "week": now.timestamp() - 7 * 86400, "month": now.timestamp() - 30 * 86400}.get(self.sess_period, 0)
+        shown = [s for s in self.sessions_all if (not want or s["char"] == want) and s["start"] >= cutoff]
+        self.sessions_shown = shown
+
+        tree = self.sess_tree
+        if not select:
+            cur = tree.selection()
+            if cur:
+                select = "total" if cur[0] == "total" else next(
+                    (s["id"] for i, s in enumerate(self._sess_rows) if f"s{i}" == cur[0]), "")
+        self._sess_rows = shown
+        tree.delete(*tree.get_children())
+        tree.insert("", "end", iid="total", tags=("total",), values=(
+            tr("Σ Gesamt"), plural(len(shown), "{0} Sitzung", "{0} Sitzungen"),
+            fmt_dur(sum(s["played"] for s in shown)), fmt_int(sum(s["xp"]["total"] for s in shown)),
+            fmt_money(sum(session_net_money(s) for s in shown), sign=True)))
+        target = "total"
+        for i, s in enumerate(shown):
+            tags = ["odd"] if i % 2 else []
+            if s.get("legacy"):
+                tags.append("dim")
+            tree.insert("", "end", iid=f"s{i}", tags=tuple(tags), values=(
+                datetime.fromtimestamp(s["start"]).strftime(tr("%d.%m.%Y  %H:%M")), labels.get(s["char"], s["char"]),
+                fmt_dur(s["played"]), fmt_int(s["xp"]["total"]), fmt_money(session_net_money(s), sign=True)))
+            if select == s["id"]:
+                target = f"s{i}"
+        if not select and shown:
+            target = "s0"                      # ohne Auswahl: die neueste Sitzung
+        tree.selection_set(target)
+        tree.see(target)
+        self._sess_show()
+
+    def _sess_selected(self) -> dict | None:
+        sel = self.sess_tree.selection()
+        if not sel or sel[0] == "total":
+            return None
+        try:
+            return self._sess_rows[int(sel[0][1:])]
+        except (ValueError, IndexError):
+            return None
+
+    def _sess_show(self):
+        if not self.sessions_all:
+            parts = [(tr("Noch keine Sitzungen") + "\n", "title"),
+                     ("\n" + tr("So funktioniert es") + "\n", "head"),
+                     (tr("Leeroyzan Link zeichnet im Spiel jede Sitzung auf: Spielzeit, Erfahrung, Gold, Quests, Beute, "
+                         "Kampf (Schaden, Heilung, Hiebe, Zauber, Buffs, Tode), Strecke und Schritte, Berufe, entdeckte "
+                         "Gebiete, Dungeons und Schlachtzüge sowie besiegte Gegner, Elite und Bosse.") + "\n\n", ""),
+                     (tr("Sobald du dich ausloggst, schreibt WoW die Daten. Leeroyzan übernimmt sie dann automatisch, "
+                         "speichert sie dauerhaft und fasst jede Sitzung hier zusammen.") + "\n\n", ""),
+                     (tr("Ein /reload oder kurzes Ausloggen (unter 15 Minuten) mit demselben Charakter zählt zur selben "
+                         "Sitzung. Im Spiel zeigt /lz sitzung die laufende Sitzung.") + "\n", "dim")]
+        else:
+            s = self._sess_selected()
+            if s is None:
+                who = self.sess_char_var.get() or tr("Alle Charaktere")
+                period = tr(dict(self.SESSION_PERIODS)[self.sess_period])
+                parts = overview_report(self.sessions_shown, f"{who}, {period}")
+            else:
+                parts = session_report(s)
+        self._sess_parts = parts
+        self._set_text(self.sess_text, parts=parts)
+        self.sess_text.yview_moveto(0)
+
+    def copy_session_text(self):
+        if self._sess_parts:
+            self._clip(report_plain_text(self._sess_parts), tr("Zusammenfassung kopiert."))
+
+    def delete_selected_session(self):
+        s = self._sess_selected()
+        if s is None:
+            self.set_status(tr("Bitte eine einzelne Sitzung auswählen."))
+            return
+        if not self.ask(tr("Sitzung vom {0} ({1}) aus Leeroyzan löschen? Sie wird danach auch nicht mehr aus dem "
+                           "Spiel übernommen.", fmt_day(s["start"]) + " " + fmt_clock(s["start"]), s["name"] or s["char"]),
+                        yes=tr("Löschen"), no=tr("Abbrechen")):
+            return
+        try:
+            delete_session(self.flavor, s)
+        except OSError as e:
+            self.error(tr("Konnte nicht gelöscht werden:\n{0}", e))
+            return
+        self.refresh_sessions_page(select="total")
+        self.set_status(tr("Sitzung gelöscht."))
+
+    def open_sessions_folder(self):
+        if not self.flavor:
+            return
+        d = sessions_dir(self.flavor)
+        d.mkdir(parents=True, exist_ok=True)
+        open_in_explorer(d)
+
+    def show_session(self, sid: str):
+        self.sess_char_var.set("")
+        self.sess_period = "all"
+        self.sess_period_var.set(tr(dict(self.SESSION_PERIODS)["all"]))
+        self.show_page("sessions")
+        self.refresh_sessions_page(select=sid)
+
+    # Übernahme aus dem Spiel ----------------------------------------------------- #
+    def import_sessions(self, manual: bool = False):
+        """Liest die SavedVariables des Addons (im Hintergrund) und übernimmt neue Sitzungen."""
+        if not self.root_path or not self.flavor:
+            if manual:
+                self.ready(modifies=False)
+            return
+        if self._sess_importing:
+            return
+        self._sess_importing = True
+        root, flavor = self.root_path, self.flavor
+        sig = link_signature(root, flavor)
+        pending_before = bool(self._sess_pending)
+
+        def work():
+            res = import_link_sessions(root, flavor)
+            res["running"] = bool(running_wow(root, flavor)) if (res["new"] or res["updated"] or pending_before) else False
+            return res
+
+        def done(res, err):
+            self._sess_importing = False
+            if err:
+                log.error("Sitzungen einlesen: %s", err)
+                if manual:
+                    self.error(tr("Sitzungen konnten nicht eingelesen werden:\n{0}", err))
+                return
+            if flavor != self.flavor:
+                return
+            self._sess_sig = sig
+            changed = res["new"] + res["updated"]
+            for s in changed:
+                self._sess_pending[s["id"]] = s
+            if res["errors"]:
+                log.warning("Leeroyzan Link: %s", "; ".join(res["errors"]))
+            if changed:
+                log.info("Sitzungen übernommen: %d neu, %d aktualisiert", len(res["new"]), len(res["updated"]))
+                if self.current_page == "sessions":
+                    self.refresh_sessions_page()
+            if self._sess_pending and not res["running"]:
+                self._announce_sessions()
+            elif manual:
+                if res["errors"] and not changed:
+                    self.warn(tr("Die Daten von Leeroyzan Link konnten nicht gelesen werden:\n{0}", "\n".join(res["errors"])))
+                elif res["files"] == 0:
+                    self.info(tr("Noch keine Daten von Leeroyzan Link gefunden. WoW schreibt sie beim Ausloggen und bei /reload."))
+                elif not changed:
+                    self.info(tr("Keine neuen Sitzungen."))
+                else:
+                    self.info(tr("{0} übernommen. WoW läuft noch – die laufende Sitzung wird nach dem Ausloggen ergänzt.",
+                                 plural(len(changed), "{0} Sitzung", "{0} Sitzungen")))
+
+        self.run_quiet(work, done)
+
+    def _watch_sessions(self):
+        """Alle 10 s: Hat WoW die Datei neu geschrieben? Ist das Spiel inzwischen beendet?"""
+        try:
+            if self.root_path and self.flavor and not self._sess_importing:
+                if link_signature(self.root_path, self.flavor) != self._sess_sig:
+                    self.import_sessions()
+                elif self._sess_pending:
+                    root, flavor = self.root_path, self.flavor
+
+                    def check(running, err):
+                        if not err and not running and flavor == self.flavor:
+                            self._announce_sessions()
+                    self.run_quiet(lambda: running_wow(root, flavor), check)
+        except (OSError, tk.TclError) as e:
+            log.warning("Sitzungen beobachten: %s", e)
+        finally:
+            self.after(10000, self._watch_sessions)
+
+    def _announce_sessions(self):
+        """Hinweis nach Spielende: Die Sitzung ist gespeichert und zusammengefasst."""
+        pending = sorted(self._sess_pending.values(), key=lambda s: s["start"])
+        self._sess_pending.clear()
+        if not pending:
+            return
+        last = pending[-1]
+        if len(pending) == 1:
+            text = tr("Sitzung gespeichert: {0}", session_headline(last))
+        else:
+            text = tr("{0} Sitzungen gespeichert. Zuletzt: {1}", len(pending), session_headline(last))
+        self.notify(text, "ok", [(tr("Zusammenfassung ansehen"), lambda sid=last["id"]: self.show_session(sid))],
+                    timeout=180000)
+        self.set_status(text)
+
+    # Addon installieren ------------------------------------------------------------ #
+    def update_link_state(self) -> bool:
+        """Zeigt, ob Leeroyzan Link installiert und aktuell ist. True = installiert, aber veraltet."""
+        if getattr(self, "link_btn", None) is None or not self.link_btn.winfo_exists():
+            return False
+        bundled = link_version(bundled_link_dir())
+        btn = ""
+        outdated = False
+        if not self.root_path or not self.flavor:
+            text = tr("Wähle zuerst den WoW-Ordner – dann zeigt Leeroyzan hier deine Spielsitzungen.")
+        else:
+            inst = installed_link_dir(self.root_path, self.flavor)
+            have = link_version(inst)
+            newer = bool(bundled) and (not have or parse_version(bundled) > parse_version(have))
+            if not inst:
+                text = tr("Leeroyzan Link ist in dieser Spielversion nicht installiert. Das Addon zeichnet deine "
+                          "Sitzungen im Spiel auf – ohne es bleibt diese Seite leer.")
+                btn = tr("Leeroyzan Link {0} installieren", bundled) if bundled else ""
+            elif newer:
+                outdated = True
+                text = tr("Leeroyzan Link {0} ist installiert. Version {1} liegt Leeroyzan bei und zeichnet die ganze "
+                          "Sitzung auf (Quests, Beute, Kampf, Strecke, Berufe, Instanzen …).", have or "?", bundled)
+                btn = tr("Auf {0} aktualisieren", bundled)
+            else:
+                text = tr("Leeroyzan Link {0} ist installiert. Nach dem Ausloggen übernimmt Leeroyzan jede Sitzung "
+                          "automatisch und fasst sie hier zusammen.", have or "?")
+                times = []
+                for f in link_savedvariables(self.root_path, self.flavor):
+                    try:
+                        times.append(f.stat().st_mtime)
+                    except OSError:
+                        pass
+                if times:
+                    text += " " + tr("Daten zuletzt geschrieben: {0}.",
+                                     datetime.fromtimestamp(max(times)).strftime(tr("%d.%m.%Y  %H:%M")))
+            if inst is not None and inst.parent == disabled_dir(self.root_path, self.flavor):
+                text += " " + tr("Das Addon ist zurzeit deaktiviert – aktiviere es unter „Meine Addons“.")
+        self.link_state_var.set(text)
+        if btn:
+            self.link_btn.configure(text=btn)
+            self.link_btn.pack(side="right", padx=(12, 0), before=self.link_label)
+        else:
+            self.link_btn.pack_forget()
+        self.after_idle(self._wrap_link_label)
+        return outdated
+
+    def install_link(self):
+        if not self.ready(modifies=True):
+            return
+        root, flavor = self.root_path, self.flavor
+
+        def done(version):
+            log.info("Leeroyzan Link %s installiert (%s)", version, flavor)
+            self.dismiss("link")
+            self.refresh()
+            self.update_link_state()
+            self.notify(tr("Leeroyzan Link {0} ist installiert. Starte WoW neu (oder logge dich neu ein), damit das "
+                           "Addon geladen wird.", version), "ok", timeout=30000)
+
+        self.run_bg(tr("Installiere Leeroyzan Link"), lambda: install_link_addon(root, flavor), done)
+
+    def _sessions_flavor_changed(self):
+        self._sess_sig = None
+        self._sess_pending.clear()
+        outdated = self.update_link_state()
+        if outdated and not self._link_hint_shown:
+            self._link_hint_shown = True
+            inst = installed_link_dir(self.root_path, self.flavor)
+            self.notify(tr("Leeroyzan Link {0} ist verfügbar (installiert: {1}). Die neue Version zeichnet ganze "
+                           "Spielsitzungen für Leeroyzan auf.", link_version(bundled_link_dir()), link_version(inst) or "?"),
+                        "update", [(tr("Aktualisieren"), self.install_link),
+                                   (tr("Sitzungen"), lambda: self.show_page("sessions"))], key="link")
+        if self.current_page == "sessions":
+            self.refresh_sessions_page()
+        self.import_sessions()
+
     # --- Einstellungen ---------------------------------------------------------------- #
     def _page_settings(self):
         page, _ = self._page("settings", tr("Einstellungen"), tr("Leeroyzan einrichten"))
@@ -3180,6 +4690,8 @@ class App(BaseTk):
         self.update_game_info()
         self.render()
         self.reload_sets()
+        self.sess_char_var.set("")
+        self.update_link_state()
         self.show_page(page)
 
     def settings_dialog(self):
@@ -3764,6 +5276,7 @@ class App(BaseTk):
         self.update_game_info()
         self.reload_sets()
         self.refresh()
+        self._sessions_flavor_changed()
 
     # ----- Anzeige --------------------------------------------------------- #
     def refresh(self):
@@ -6593,6 +8106,539 @@ TRANSLATIONS["en"] = {
         " – will be installed automatically as soon as it is ready.",
     "Lade Manager {0}":
         "Downloading manager {0}",
+    # Leeroyzan Link: Spielsitzungen
+    "Diese Leeroyzan-Version enthält das Addon nicht.":
+        "This Leeroyzan version does not include the addon.",
+    "{0} h {1:02d} min":
+        "{0} h {1:02d} min",
+    "{0} min":
+        "{0} min",
+    "{0} s":
+        "{0} s",
+    "{0} · {1} – {2}":
+        "{0} · {1} – {2}",
+    "{0} XP":
+        "{0} XP",
+    "{0} Erfahrung gesammelt":
+        "gained {0} experience",
+    "{0} verdient":
+        "earned {0}",
+    "{0} ausgegeben":
+        "spent {0}",
+    "1 Quest abgeschlossen":
+        "completed 1 quest",
+    "{0} Quests abgeschlossen":
+        "completed {0} quests",
+    "In {0} Spielzeit hast du {1}.":
+        "In {0} of play you {1}.",
+    "Du warst {0} im Spiel.":
+        "You played for {0}.",
+    "{0} Elite":
+        "{0} elite",
+    "{0} seltene":
+        "{0} rare",
+    "1 Boss":
+        "1 boss",
+    "{0} Bosse":
+        "{0} bosses",
+    "{0} Gegner besiegt":
+        "defeated {0} enemies",
+    " (darunter {0})":
+        " (including {0})",
+    "{0} zu Fuß zurückgelegt (≈ {1} Schritte)":
+        "walked {0} (≈ {1} steps)",
+    "1 Gebiet entdeckt":
+        "discovered 1 area",
+    "{0} Gebiete entdeckt":
+        "discovered {0} areas",
+    "1 Instanz besucht":
+        "visited 1 instance",
+    "{0} Instanzen besucht":
+        "visited {0} instances",
+    "Du hast {0}.":
+        "You {0}.",
+    "Du bist von Stufe {0} auf {1} aufgestiegen.":
+        "You went from level {0} to {1}.",
+    "Du bist einmal gestorben.":
+        "You died once.",
+    "Du bist {0}-mal gestorben.":
+        "You died {0} times.",
+    " und ":
+        " and ",
+    "Stufe {0}":
+        "Level {0}",
+    "Stufe {0} → {1}":
+        "Level {0} → {1}",
+    "Aufgezeichnet mit Leeroyzan Link 0.1 – nur Dauer, Erfahrung, Gold und Kills.":
+        "Recorded with Leeroyzan Link 0.1 – duration, experience, gold and kills only.",
+    "Fortgesetzt nach {0}× /reload oder kurzem Ausloggen.":
+        "Continued after {0}× /reload or a short logout.",
+    "Zusammenfassung":
+        "Summary",
+    "Zeit":
+        "Time",
+    "Spielzeit {0}":
+        "Play time {0}",
+    "im Kampf {0}":
+        "in combat {0}",
+    "AFK {0}":
+        "AFK {0}",
+    "ausgeruht {0}":
+        "resting {0}",
+    "in Instanzen {0}":
+        "in instances {0}",
+    "Flugroute {0}":
+        "flight paths {0}",
+    "tot {0}":
+        "dead {0}",
+    "Gesamtspielzeit des Charakters: {0}":
+        "Character's total play time: {0}",
+    "Erfahrung":
+        "Experience",
+    "{0} pro Stunde":
+        "{0} per hour",
+    "Kills {0} ({1})":
+        "Kills {0} ({1})",
+    "Quests {0} ({1})":
+        "Quests {0} ({1})",
+    "Entdecken {0} ({1})":
+        "Exploring {0} ({1})",
+    "Sonstiges {0}":
+        "Other {0}",
+    "Stufenaufstiege: {0}":
+        "Level-ups: {0}",
+    "{0} um {1}":
+        "{0} at {1}",
+    "Gold":
+        "Gold",
+    "netto {0}":
+        "net {0}",
+    "{0} → {1}":
+        "{0} → {1}",
+    "Einnahmen {0}: {1}":
+        "Income {0}: {1}",
+    "Ausgaben {0}: {1}":
+        "Expenses {0}: {1}",
+    "Quests":
+        "Quests",
+    "{0} abgeschlossen":
+        "{0} completed",
+    "{0} angenommen":
+        "{0} accepted",
+    "{0} abgebrochen":
+        "{0} abandoned",
+    "Quest {0}":
+        "Quest {0}",
+    "Neu angenommen: {0}":
+        "Newly accepted: {0}",
+    "Abgebrochen: {0}":
+        "Abandoned: {0}",
+    "Beute":
+        "Loot",
+    "Händlerwert {0}":
+        "vendor value {0}",
+    "Besondere Beute: ":
+        "Notable loot: ",
+    "Am häufigsten: ":
+        "Most frequent: ",
+    "Gegner":
+        "Enemies",
+    "{0} besiegt":
+        "{0} defeated",
+    "{0} normal":
+        "{0} normal",
+    "{0} selten":
+        "{0} rare",
+    "{0} Spieler":
+        "{0} players",
+    "{0} Todesstöße":
+        "{0} killing blows",
+    "Bosse: {0}":
+        "Bosses: {0}",
+    "Elite":
+        "elite",
+    "selten":
+        "rare",
+    "seltene Elite":
+        "rare elite",
+    "Boss":
+        "boss",
+    "Am häufigsten: {0}":
+        "Most frequent: {0}",
+    "Kampf":
+        "Combat",
+    "Schaden {0}":
+        "Damage {0}",
+    " (davon Begleiter {0})":
+        " (pet {0})",
+    "{0} DPS im Kampf":
+        "{0} DPS in combat",
+    "Krit-Rate {0}":
+        "crit rate {0}",
+    "Größter Treffer: {0} mit {1}{2}":
+        "Biggest hit: {0} with {1}{2}",
+    " (kritisch)":
+        " (critical)",
+    "Heilung {0}":
+        "Healing {0}",
+    "Überheilung {0}":
+        "overhealing {0}",
+    "größte Heilung {0} ({1})":
+        "biggest heal {0} ({1})",
+    "erlittener Schaden {0}":
+        "Damage taken {0}",
+    "erhaltene Heilung {0}":
+        "healing received {0}",
+    "härtester Treffer {0} von {1}":
+        "hardest hit {0} by {1}",
+    "Umgebung: {0}":
+        "Environment: {0}",
+    "{0} Hiebe":
+        "{0} swings",
+    "{0} Treffer":
+        "{0} hits",
+    "{0} kritisch":
+        "{0} critical",
+    "{0} verfehlt":
+        "{0} missed",
+    "{0} ausgewichen":
+        "{0} dodged",
+    "{0} pariert":
+        "{0} parried",
+    "{0} geblockt":
+        "{0} blocked",
+    "{0} gestreift":
+        "{0} glancing",
+    "{0} Hiebe eingesteckt":
+        "{0} swings taken",
+    "{0} abgewehrt ({1})":
+        "{0} avoided ({1})",
+    "Schaden nach Fähigkeit: {0}":
+        "Damage by ability: {0}",
+    "{0} Buffs auf andere":
+        "{0} buffs on others",
+    "{0} Unterbrechungen":
+        "{0} interrupts",
+    "{0} Bannungen":
+        "{0} dispels",
+    "Kampfdaten waren im Spiel nicht verfügbar ({0}).":
+        "Combat data was not available in the game ({0}).",
+    "Tode: {0}":
+        "Deaths: {0}",
+    "unbekannt":
+        "unknown",
+    "✝ {0}  {1}, durch {2}":
+        "✝ {0}  {1}, by {2}",
+    "Unterwegs":
+        "Travel",
+    "{0} zu Fuß":
+        "{0} on foot",
+    " (≈ {0} Schritte)":
+        " (≈ {0} steps)",
+    "{0} beritten":
+        "{0} mounted",
+    "{0} geschwommen":
+        "{0} swum",
+    "{0} Flugroute":
+        "{0} by flight path",
+    "{0} Sprünge":
+        "{0} jumps",
+    "Davon als Geist: {0}":
+        "As a ghost: {0}",
+    "Berufe und Fertigkeiten":
+        "Professions and skills",
+    "Unverändert: {0}":
+        "Unchanged: {0}",
+    "Hergestellt: {0}":
+        "Crafted: {0}",
+    "{0}: {1}":
+        "{0}: {1}",
+    "Neue Rezepte: {0}":
+        "New recipes: {0}",
+    "Neue Zauber und Fähigkeiten: {0}":
+        "New spells and abilities: {0}",
+    "Entdeckt und bereist":
+        "Discovered and visited",
+    " (+{0} XP)":
+        " (+{0} XP)",
+    "Zonen: {0}":
+        "Zones: {0}",
+    "Dungeons und Schlachtzüge":
+        "Dungeons and raids",
+    ", {0} Spieler":
+        ", {0} players",
+    "Ruf":
+        "Reputation",
+    "Beste Beute: [{0}] ({1})":
+        "Best loot: [{0}] ({1})",
+    "Boss besiegt: {0}":
+        "Boss defeated: {0}",
+    "Stufe {0} erreicht":
+        "Reached level {0}",
+    "Größter Treffer {0} ({1})":
+        "Biggest hit {0} ({1})",
+    "Lieblingsgegner: {0} ×{1}":
+        "Favorite enemy: {0} ×{1}",
+    "Gesamt – {0}":
+        "Total – {0}",
+    "Noch keine Sitzungen.":
+        "No sessions yet.",
+    "{0} bis {1}":
+        "{0} to {1}",
+    "%d.%m.%Y":
+        "%Y-%m-%d",
+    "Ø {0} pro Sitzung":
+        "avg. {0} per session",
+    "Längster Spieltag: {0} mit {1}":
+        "Longest day: {0} with {1}",
+    "Fortschritt":
+        "Progress",
+    " ({0}/h)":
+        " ({0}/h)",
+    "{0} Stufen":
+        "{0} levels",
+    "{0} Quests":
+        "{0} quests",
+    "{0} Fertigkeitspunkte":
+        "{0} skill points",
+    "Gold netto {0}":
+        "Gold net {0}",
+    "eingenommen {0}":
+        "earned {0}",
+    "ausgegeben {0}":
+        "spent {0}",
+    "erlitten {0}":
+        "taken {0}",
+    "{0} Instanzen":
+        "{0} instances",
+    "Beute und Wege":
+        "Loot and travel",
+    "{0} Gegenstände":
+        "{0} items",
+    "{0} zu Fuß (≈ {1} Schritte)":
+        "{0} on foot (≈ {1} steps)",
+    "Charaktere":
+        "Characters",
+    "{0} Kills":
+        "{0} kills",
+    "Leeroyzan Link":
+        "Leeroyzan Link",
+    "Spielsitzungen":
+        "Play sessions",
+    "Jetzt einlesen":
+        "Read now",
+    "Datum":
+        "Date",
+    "Charakter":
+        "Character",
+    "Dauer":
+        "Duration",
+    "XP":
+        "XP",
+    "Text kopieren":
+        "Copy text",
+    "Alle Charaktere":
+        "All characters",
+    "Σ Gesamt":
+        "Σ Total",
+    "Noch keine Sitzungen":
+        "No sessions yet",
+    "So funktioniert es":
+        "How it works",
+    "Leeroyzan Link zeichnet im Spiel jede Sitzung auf: Spielzeit, Erfahrung, Gold, Quests, Beute, Kampf (Schaden, Heilung, Hiebe, Zauber, Buffs, Tode), Strecke und Schritte, Berufe, entdeckte Gebiete, Dungeons und Schlachtzüge sowie besiegte Gegner, Elite und Bosse.":
+        "Leeroyzan Link records every session in the game: play time, experience, gold, quests, loot, combat (damage, healing, swings, spells, buffs, deaths), distance and steps, professions, discovered areas, dungeons and raids, and defeated enemies, elites and bosses.",
+    "Sobald du dich ausloggst, schreibt WoW die Daten. Leeroyzan übernimmt sie dann automatisch, speichert sie dauerhaft und fasst jede Sitzung hier zusammen.":
+        "As soon as you log out, WoW writes the data. Leeroyzan then imports it automatically, keeps it and summarizes every session here.",
+    "Ein /reload oder kurzes Ausloggen (unter 15 Minuten) mit demselben Charakter zählt zur selben Sitzung. Im Spiel zeigt /lz sitzung die laufende Sitzung.":
+        "A /reload or a short logout (under 15 minutes) with the same character counts as the same session. In the game, /lz session shows the current session.",
+    "Zusammenfassung kopiert.":
+        "Summary copied.",
+    "Bitte eine einzelne Sitzung auswählen.":
+        "Please select a single session.",
+    "Sitzung vom {0} ({1}) aus Leeroyzan löschen? Sie wird danach auch nicht mehr aus dem Spiel übernommen.":
+        "Delete the session from {0} ({1}) from Leeroyzan? It will not be imported from the game again.",
+    "Konnte nicht gelöscht werden:\n{0}":
+        "Could not be deleted:\n{0}",
+    "Sitzung gelöscht.":
+        "Session deleted.",
+    "Sitzungen konnten nicht eingelesen werden:\n{0}":
+        "Sessions could not be read:\n{0}",
+    "Die Daten von Leeroyzan Link konnten nicht gelesen werden:\n{0}":
+        "The Leeroyzan Link data could not be read:\n{0}",
+    "Noch keine Daten von Leeroyzan Link gefunden. WoW schreibt sie beim Ausloggen und bei /reload.":
+        "No Leeroyzan Link data found yet. WoW writes it when you log out and on /reload.",
+    "Keine neuen Sitzungen.":
+        "No new sessions.",
+    "{0} übernommen. WoW läuft noch – die laufende Sitzung wird nach dem Ausloggen ergänzt.":
+        "{0} imported. WoW is still running – the current session will be completed after you log out.",
+    "Sitzung gespeichert: {0}":
+        "Session saved: {0}",
+    "{0} Sitzungen gespeichert. Zuletzt: {1}":
+        "{0} sessions saved. Latest: {1}",
+    "Zusammenfassung ansehen":
+        "View summary",
+    "Wähle zuerst den WoW-Ordner – dann zeigt Leeroyzan hier deine Spielsitzungen.":
+        "Choose the WoW folder first – then Leeroyzan shows your play sessions here.",
+    "Leeroyzan Link ist in dieser Spielversion nicht installiert. Das Addon zeichnet deine Sitzungen im Spiel auf – ohne es bleibt diese Seite leer.":
+        "Leeroyzan Link is not installed for this game version. The addon records your sessions in the game – without it this page stays empty.",
+    "Leeroyzan Link {0} installieren":
+        "Install Leeroyzan Link {0}",
+    "Leeroyzan Link {0} ist installiert. Version {1} liegt Leeroyzan bei und zeichnet die ganze Sitzung auf (Quests, Beute, Kampf, Strecke, Berufe, Instanzen …).":
+        "Leeroyzan Link {0} is installed. Version {1} comes with Leeroyzan and records the whole session (quests, loot, combat, distance, professions, instances …).",
+    "Auf {0} aktualisieren":
+        "Update to {0}",
+    "Leeroyzan Link {0} ist installiert. Nach dem Ausloggen übernimmt Leeroyzan jede Sitzung automatisch und fasst sie hier zusammen.":
+        "Leeroyzan Link {0} is installed. After you log out, Leeroyzan imports every session automatically and summarizes it here.",
+    "Daten zuletzt geschrieben: {0}.":
+        "Data last written: {0}.",
+    "Das Addon ist zurzeit deaktiviert – aktiviere es unter „Meine Addons“.":
+        "The addon is currently disabled – enable it under \"My addons\".",
+    "Leeroyzan Link {0} ist installiert. Starte WoW neu (oder logge dich neu ein), damit das Addon geladen wird.":
+        "Leeroyzan Link {0} is installed. Restart WoW (or log in again) so the addon gets loaded.",
+    "Installiere Leeroyzan Link":
+        "Installing Leeroyzan Link",
+    "Leeroyzan Link {0} ist verfügbar (installiert: {1}). Die neue Version zeichnet ganze Spielsitzungen für Leeroyzan auf.":
+        "Leeroyzan Link {0} is available (installed: {1}). The new version records whole play sessions for Leeroyzan.",
+    "Aktualisieren":
+        "Update",
+    "Sitzungen":
+        "Sessions",
+    "Alle Zeiträume":
+        "All time",
+    "Heute":
+        "Today",
+    "Letzte 7 Tage":
+        "Last 7 days",
+    "Letzte 30 Tage":
+        "Last 30 days",
+    "{0} Kill":
+        "{0} kill",
+    "{0} Quest":
+        "{0} quest",
+    "{0} Gegenstand":
+        "{0} item",
+    "{0} Boss":
+        "{0} boss",
+    "1 Zauber gewirkt":
+        "1 spell cast",
+    "{0} Zauber gewirkt":
+        "{0} spells cast",
+    "{0} Buff erhalten":
+        "{0} buff received",
+    "{0} Buffs erhalten":
+        "{0} buffs received",
+    "{0} Schwächung erlitten":
+        "{0} debuff taken",
+    "{0} Schwächungen erlitten":
+        "{0} debuffs taken",
+    "{0} neues Gebiet":
+        "{0} new area",
+    "{0} neue Gebiete":
+        "{0} new areas",
+    "{0} Wipe":
+        "{0} wipe",
+    "{0} Wipes":
+        "{0} wipes",
+    "{0} Tod":
+        "{0} death",
+    "{0} Tode":
+        "{0} deaths",
+    "{0} Sitzung":
+        "{0} session",
+    "{0} Sitzungen":
+        "{0} sessions",
+    "{0} Spieltag":
+        "{0} day played",
+    "{0} Spieltage":
+        "{0} days played",
+    "{0} Stufe":
+        "{0} level",
+    "{0} Instanz":
+        "{0} instance",
+    "Schlecht":
+        "Poor",
+    "Gewöhnlich":
+        "Common",
+    "Ungewöhnlich":
+        "Uncommon",
+    "Selten":
+        "Rare",
+    "Episch":
+        "Epic",
+    "Legendär":
+        "Legendary",
+    "Artefakt":
+        "Artifact",
+    "Händler":
+        "Vendor",
+    "Post":
+        "Mail",
+    "Auktionshaus":
+        "Auction house",
+    "Lehrer":
+        "Trainer",
+    "Flugmeister":
+        "Flight master",
+    "Handel":
+        "Trade",
+    "Sonstiges":
+        "Other",
+    "Kräuterkunde":
+        "Herbalism",
+    "Bergbau":
+        "Mining",
+    "Kürschnerei":
+        "Skinning",
+    "Angeln":
+        "Fishing",
+    "Dungeon":
+        "Dungeon",
+    "Schlachtzug":
+        "Raid",
+    "Schlachtfeld":
+        "Battleground",
+    "Arena":
+        "Arena",
+    "Szenario":
+        "Scenario",
+    "Sturz":
+        "Falling",
+    "Ertrinken":
+        "Drowning",
+    "Erschöpfung":
+        "Fatigue",
+    "Feuer":
+        "Fire",
+    "Lava":
+        "Lava",
+    "Schleim":
+        "Slime",
+    "Krieger":
+        "Warrior",
+    "Paladin":
+        "Paladin",
+    "Jäger":
+        "Hunter",
+    "Schurke":
+        "Rogue",
+    "Priester":
+        "Priest",
+    "Schamane":
+        "Shaman",
+    "Magier":
+        "Mage",
+    "Hexenmeister":
+        "Warlock",
+    "Druide":
+        "Druid",
+    "Todesritter":
+        "Death Knight",
+    "Mönch":
+        "Monk",
+    "Dämonenjäger":
+        "Demon Hunter",
+    "Rufer":
+        "Evoker",
 }
 
 
