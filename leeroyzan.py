@@ -61,7 +61,7 @@ except Exception:                      # noqa – Paket fehlt oder Tk-Erweiterun
     HAS_DND = False
 
 APP_NAME = "Leeroyzan"
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.4.1"
 USER_AGENT = f"Leeroyzan/{APP_VERSION}"
 
 # Selbst-Update über GitHub-Releases dieses Repos
@@ -1592,7 +1592,24 @@ def apply_script_update(new_script: Path) -> None:
     shutil.copy2(cur, cur.with_suffix(".py.bak"))
     os.replace(new_script, cur)
     flags = 0x00000008 if os.name == "nt" else 0          # losgelöst starten
-    subprocess.Popen([sys.executable, str(cur), *sys.argv[1:]], close_fds=True, creationflags=flags)
+    subprocess.Popen([sys.executable, str(cur), *sys.argv[1:]], close_fds=True, creationflags=flags,
+                     env=clean_child_env())
+
+
+def clean_child_env() -> dict:
+    """Umgebung für Prozesse, die (über Umwege) wieder Leeroyzan.exe starten.
+
+    Die .exe entpackt sich beim Start in einen Temp-Ordner (_MEI…) und legt dessen Pfad in Umgebungsvariablen
+    ab. Erbt die neue Version diese Variablen, hält sie sich für einen Teil der alten und sucht python312.dll im
+    längst gelöschten Ordner der alten – „Failed to load Python DLL“. Deshalb ohne diese Variablen starten."""
+    env = dict(os.environ)
+    mei = str(getattr(sys, "_MEIPASS", "") or "")
+    for key in list(env):
+        if key.startswith("_PYI_") or key in ("_MEIPASS2", "_PYIBoot_SPLASH") or \
+                (mei and env[key].startswith(mei)):
+            env.pop(key, None)
+    env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    return env
 
 
 def launch_replacer(new_exe: Path) -> None:
@@ -1634,8 +1651,9 @@ start "" "{old_exe}"
 (goto) 2>nul & del "%~f0"
 """
     bat.write_text(script, encoding="utf-8")
-    # CREATE_NO_WINDOW: eigene, unsichtbare Konsole für das Skript und alles, was es aufruft
-    subprocess.Popen(["cmd", "/c", str(bat)], close_fds=True, creationflags=0x08000000)
+    # CREATE_NO_WINDOW: eigene, unsichtbare Konsole für das Skript und alles, was es aufruft.
+    # Saubere Umgebung: sonst startet die neue Version mit den Temp-Pfaden der alten (siehe clean_child_env).
+    subprocess.Popen(["cmd", "/c", str(bat)], close_fds=True, creationflags=0x08000000, env=clean_child_env())
 
 
 def cleanup_self_update() -> None:
@@ -6311,7 +6329,8 @@ class App(BaseTk):
             return
         try:
             flags = 0x00000008 | 0x00000200 if sys.platform.startswith("win") else 0  # losgelöst
-            subprocess.Popen([str(exe)], cwd=str(exe.parent), close_fds=True, creationflags=flags)
+            subprocess.Popen([str(exe)], cwd=str(exe.parent), close_fds=True, creationflags=flags,
+                             env=clean_child_env())
         except OSError as e:
             self.error(tr("WoW konnte nicht gestartet werden:\n{0}", e))
             return
