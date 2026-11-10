@@ -60,7 +60,7 @@ except Exception:                      # noqa – Paket fehlt oder Tk-Erweiterun
     HAS_DND = False
 
 APP_NAME = "Leeroyzan"
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.3.1"
 USER_AGENT = f"Leeroyzan/{APP_VERSION}"
 
 # Selbst-Update über GitHub-Releases dieses Repos
@@ -1595,16 +1595,32 @@ def apply_script_update(new_script: Path) -> None:
 
 
 def launch_replacer(new_exe: Path) -> None:
-    """Startet ein kleines Skript, das nach dem Beenden die alte .exe ersetzt und neu startet."""
+    """Startet ein kleines Skript, das nach dem Beenden die alte .exe ersetzt und neu startet.
+
+    Das Skript läuft in einer eigenen, unsichtbaren Konsole (CREATE_NO_WINDOW). Bis 1.3.0 lief es ganz ohne
+    Konsole (DETACHED_PROCESS): Dann öffnete jedes Konsolenprogramm darin (tasklist, find, ping) ein eigenes
+    Fenster, und „find“ wartete dort auf eine Tastatureingabe, statt die Prozessliste zu lesen – das Update
+    blieb hängen. Deshalb jetzt außerdem ohne Pipe (Prozessliste über eine Datei) und mit Zeitlimit."""
     old_exe = Path(sys.executable)
-    bat = Path(tempfile.gettempdir()) / f"leeroyzan_update_{os.getpid()}.bat"
+    pid = os.getpid()
+    tmp = Path(tempfile.gettempdir())
+    bat = tmp / f"leeroyzan_update_{pid}.bat"
+    plist = tmp / f"leeroyzan_update_{pid}.txt"
     ulog = config_dir() / "update.log"
     script = f"""@echo off
 chcp 65001 >nul
-set "PID={os.getpid()}"
+set "PID={pid}"
 >>"{ulog}" echo %date% %time% Update gestartet: "{new_exe}" -^> "{old_exe}"
+set /a w=0
 :wait
-tasklist /FI "PID eq %PID%" 2>nul | find "%PID%" >nul && (ping -n 2 127.0.0.1 >nul & goto wait)
+tasklist /FI "PID eq %PID%" /NH >"{plist}" 2>nul
+find "%PID%" "{plist}" >nul 2>&1 || goto ready
+set /a w+=1
+if %w% GEQ 60 goto ready
+ping -n 2 127.0.0.1 >nul
+goto wait
+:ready
+del "{plist}" >nul 2>&1
 set /a n=0
 :move
 move /Y "{new_exe}" "{old_exe}" >nul 2>&1 && (>>"{ulog}" echo %date% %time% ersetzt & goto start)
@@ -1617,8 +1633,8 @@ start "" "{old_exe}"
 (goto) 2>nul & del "%~f0"
 """
     bat.write_text(script, encoding="utf-8")
-    subprocess.Popen(["cmd", "/c", str(bat)], close_fds=True,
-                     creationflags=0x08000000 | 0x00000008)   # ohne Fenster, losgelöst
+    # CREATE_NO_WINDOW: eigene, unsichtbare Konsole für das Skript und alles, was es aufruft
+    subprocess.Popen(["cmd", "/c", str(bat)], close_fds=True, creationflags=0x08000000)
 
 
 def cleanup_self_update() -> None:
