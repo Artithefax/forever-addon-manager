@@ -28,7 +28,9 @@ One window, no pop-ups. A sidebar with the game version, the pages and a big **P
 | **My addons** | All installed addons as a list or as tiles, with search, grouping and a detail panel (update, undo an update, hold, open source, link with CurseForge, open folder, remove). Addons with an update are yellow with a ⬇ marker. |
 | **Discover** | Install directly from a CurseForge link, a GitHub repository or a ZIP from your download folder – and search CurseForge (WoW addons only) with file choice. |
 | **Updates** | Check and update all or single addons, read the changes, see which blocked downloads Leeroyzan is waiting for, link manual addons, and keep Leeroyzan itself up to date. |
-| **Sessions** | Every play session recorded by the companion addon **Leeroyzan Link** – a summary per session and totals per character and period (see below). |
+| **Sessions** | Every play session recorded by the companion addon **Leeroyzan Link** – a summary per session, totals, charts, forecast, records, death statistics, farming spots and dungeon history; optionally posted to Discord (see below). |
+| **Characters** | All your characters with level, gold, professions, bags and bank; *Who has what?* search and a shopping list for any stored recipe across all characters. |
+| **Diagnostics** | Lua errors per addon and version (with one-click rollback), load problems and missing dependencies, memory ranking, wishlist from the game. |
 | **Share** | Create a download-list code for Discord/SMS or a `.lzpack` package – and paste a code you received to install it. |
 | **Sets & backups** | Addon sets (switch groups of addons on/off) and WTF backups with restore. |
 | **Settings** | WoW folder, CurseForge API key, download folder, language, update options, log and data folder. |
@@ -67,6 +69,12 @@ Leeroyzan comes with its own companion addon, **Leeroyzan Link** (folder `Leeroy
 - **Exploration:** discovered areas (with XP), time per zone and visited subzones
 - **Dungeons and raids:** every instance with duration, kills, bosses, wipes, deaths, XP
 - **Enemies:** kills split into normal, elite, rare and bosses, killing blows, most killed enemies
+
+**Back into the game:** Leeroyzan writes `Data.lua` into the addon folder: pending updates, the changelog of addons it just updated (shown once after login), your addon sets as in-game profiles (`/lz profil laden Raid`), held addons and installed wishlist entries. `/lz neu` shows it in the game.
+
+**Diagnostics:** the addon counts Lua errors per addon *and* version. If an addon has errors since its last update and Leeroyzan kept the previous version, it offers the rollback right away. `/lz problem <addon>` in the game reports and disables an addon – Leeroyzan then offers the rollback too.
+
+**Characters and recipes:** opening a profession window stores its recipes with reagents (Leeroyzan Link 0.3). Leeroyzan then tells you, for any recipe and quantity, what you have, which alt has the rest and what is missing.
 
 How it works: WoW addons cannot open network connections or write files, so the addon keeps its data in its *SavedVariables* (`WTF\Account\<account>\SavedVariables\LeeroyzanLink.lua`, the newest 30 sessions), which WoW writes on logout and on `/reload`. Leeroyzan watches that file, **only reads it** and stores each session as a JSON file in `Leeroyzan-Data\sessions\<game version>`. A `/reload` or logging back in with the same character within 15 minutes continues the same session. If Leeroyzan is open while you play, the summary appears as soon as the game is closed; otherwise on the next start. In the game, `/lz session` shows the current session.
 

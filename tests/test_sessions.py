@@ -179,13 +179,131 @@ class ImportTests(unittest.TestCase):
             texts.add("".join(re.findall(r'"((?:[^"\\]|\\.)*)"', m.group(1))))
         for m in re.finditer(r'plural\([^,]+, "((?:[^"\\]|\\.)*)", "((?:[^"\\]|\\.)*)"\)', block):
             texts |= {m.group(1), m.group(2)}
-        texts |= {label for _, label in lz.App.SESSION_PERIODS}
+        texts |= {label for _, label in lz.App.SESSION_PERIODS + lz.App.DIAG_VIEWS + lz.App.SESS_VIEWS}
+        texts |= set(re.findall(r'best\("([^"]+)"', block))           # Rekorde
+        texts |= set(lz.LOAD_REASONS.values()) | {"Charaktere", "Diagnose"}
+        texts.discard("Discord")
         for d in ("QUALITY_NAMES", "MONEY_SOURCES", "GATHER_KINDS", "INSTANCE_KINDS", "ENV_KINDS", "CLASS_NAMES"):
             v = getattr(lz, d)
             texts |= set(v.values() if isinstance(v, dict) else v)
         texts = {t.encode().decode("unicode_escape").encode("latin-1").decode("utf-8") if "\\" in t else t for t in texts}
         missing = sorted(t for t in texts if t not in lz.TRANSLATIONS["en"] and t not in ("Arena", "Paladin"))
         self.assertEqual(missing, [], "missing English texts")
+
+
+class LinkDataTests(unittest.TestCase):
+    """Leeroyzan -> Spiel: Data.lua, die das Addon annehmen muss."""
+
+    PAYLOAD = {"schema": 1, "generated": 1794300000, "managerVersion": "1.4.0",
+               "updates": [{"name": "Questie", "installed": "9.2.0", "available": "9.3.0", "note": None}],
+               "managed": ["Questie", "Bagnon"], "installed": ["Details! Damage Meter"],
+               "profiles": [{"name": "Raid", "enable": ["Details", "Bagnon"]}],
+               "whatsnew": [{"id": "gh:x@9.3.0", "addon": "Questie", "version": "9.3.0",
+                             "lines": lz.notes_lines("## Changes\n- **Neue** Quests für Forever\n\n* \"Fix\" für \\Pfade")}],
+               "knownIssues": [{"addon": "Bagnon", "text": "In Leeroyzan festgehalten"}]}
+
+    def test_lua_text_parses_back(self):
+        text = lz.link_data_text(self.PAYLOAD)
+        back = lz.parse_lua_savedvariables(text)["LeeroyzanLinkImport"]
+        self.assertEqual(back["updates"][0]["available"], "9.3.0")
+        self.assertEqual(back["whatsnew"][0]["lines"], ["Neue Quests für Forever", '"Fix" für \\Pfade'])
+        self.assertEqual(back["profiles"][0]["enable"], ["Details", "Bagnon"])
+
+    @unittest.skipIf(run_addon_test is None, "lupa not installed")
+    def test_addon_accepts_data(self):
+        from lupa import lua51
+        data = TMP / "Data.lua"
+        data.write_text(lz.link_data_text(self.PAYLOAD), encoding="utf-8")
+        lua = lua51.LuaRuntime(unpack_returned_tuples=True)
+        g = lua.globals()
+        g.ADDON_DIR, g.TESTS_DIR, g.DATA_FILE = str(ROOT / "LeeroyzanLink"), str(ROOT / "tests"), str(data)
+        self.assertEqual(lua.execute(f'return dofile("{ROOT / "tests" / "import_check.lua"}")'), 0)
+
+    def test_write_only_when_changed(self):
+        wow = make_wow("LeeroyzanLinkDB = {}\n", "w#1")
+        addon = wow / "_forever_" / "Interface" / "AddOns" / "LeeroyzanLink"
+        addon.mkdir(parents=True, exist_ok=True)
+        (addon / "LeeroyzanLink.toc").write_text("## Version: 0.3.0\n", encoding="utf-8")
+        self.assertEqual(lz.write_link_data(str(wow), "_forever_", self.PAYLOAD), "written")
+        later = dict(self.PAYLOAD, generated=1794399999)
+        self.assertEqual(lz.write_link_data(str(wow), "_forever_", later), "unchanged")
+        changed = dict(self.PAYLOAD, managed=["Questie"])
+        self.assertEqual(lz.write_link_data(str(wow), "_forever_", changed), "written")
+
+
+@unittest.skipIf(run_addon_test is None, "lupa not installed")
+class GameDataTests(unittest.TestCase):
+    """Spiel -> Leeroyzan: Fehler, Charaktere, Rezepte, Einkaufsliste, Auswertung."""
+
+    @classmethod
+    def setUpClass(cls):
+        sv = TMP / "sv_state.lua"
+        f1, text, now = run_addon_test.run(ROOT / "LeeroyzanLink", 1, None)
+        sv.write_text(text, encoding="utf-8")
+        f2, text, _ = run_addon_test.run(ROOT / "LeeroyzanLink", 2, sv, start_now=now + 15)
+        assert f1 + f2 == 0
+        db = lz.parse_lua_savedvariables(text)["LeeroyzanLinkDB"]
+        cls.state = lz.link_state_from_dbs([("acc#1", db)])
+        cls.sessions = lz.sessions_in_db(db, "_forever_", "acc#1")
+
+    def test_state(self):
+        st = self.state
+        self.assertIn("FooBar", st["errorStats"])
+        rows = lz.error_rows(st, {"FooBar": "0.2.0"})        # the stub reports 0.2.0 for every addon
+        self.assertEqual((rows[0]["addon"], rows[0]["current"]), ("FooBar", 1))
+        self.assertEqual(st["wishlist"][0]["name"], "Details! Damage Meter")
+        self.assertEqual(st["reports"]["FooBar"]["version"], "2.0")
+        ch = st["chars"]["Rosenbert-CAMWOWEU5Realm2PvP"]
+        self.assertEqual(ch["level"], 22)
+        self.assertEqual(ch["bags"]["2589"], 12)
+        self.assertIn("Geringer Heiltrank", ch["recipes"]["Alchemie"]["list"])
+        self.assertEqual(lz.item_name(st, 3371), "Leere Phiole")
+        found = lz.find_items(st, "seiden")
+        self.assertEqual((found[0]["name"], found[0]["n"]), ("Seidenstoff", 3))
+
+    def test_shopping_list(self):
+        import copy
+        st = copy.deepcopy(self.state)
+        alt = copy.deepcopy(st["chars"]["Rosenbert-CAMWOWEU5Realm2PvP"])
+        alt.update(key="Twink-Realm", name="Twink", recipes={}, bags={"3371": 7}, bank={"118": 4})
+        st["chars"]["Twink-Realm"] = alt
+        res = lz.shopping_list(st, "Rosenbert-CAMWOWEU5Realm2PvP", "Alchemie", "Geringer Heiltrank", 5)
+        rows = {r["name"]: r for r in res["rows"]}
+        self.assertEqual(res["crafts"], 5)
+        self.assertEqual(rows["Schwacher Heiltrank"]["need"], 10)
+        self.assertEqual(rows["Schwacher Heiltrank"]["others"][0]["char"], "Twink")
+        self.assertEqual(rows["Schwacher Heiltrank"]["missing"], 6)
+        self.assertEqual(rows["Leere Phiole"]["missing"], 0)
+        self.assertEqual(rows["Leere Phiole"]["transfer"], 5)
+
+    def test_analysis(self):
+        s = self.sessions[0]
+        self.assertEqual(s["explore"]["zones"]["Rotkammgebirge"]["kills"], 8)  # the stub never changes the zone
+        self.assertEqual(s["runs"][0]["drops"][0]["boss"], "Edwin VanCleef")
+        # a few longer sessions so forecast and rates have something to work with
+        many = []
+        for i in range(4):
+            x = json.loads(json.dumps(s))
+            x.update(id=f"x{i}", start=s["start"] + i * 86400, stop=s["start"] + i * 86400 + 3600, played=3600)
+            x["explore"]["zones"]["Rotkammgebirge"]["sec"] = 3000
+            many.append(x)
+        for lang in ("de", "en"):
+            lz.set_language(lang)
+            text = lz.report_plain_text(lz.analysis_report(many, "Test"))
+            self.assertIn("Edwin VanCleef", text)
+            self.assertIn("Rotkammgebirge", text)
+            self.assertIn("Rosenbert", text)
+        lz.set_language("de")
+        fc = lz.level_forecast(many)
+        self.assertEqual(fc[0]["level"], 22)
+        self.assertGreater(fc[0]["targets"][0]["hours"], 0)
+        series = lz.chart_series(many)
+        self.assertEqual(len(series["xp_h"]), 4)
+        self.assertEqual(len(series["day_hours"]), 30)
+        payload = lz.discord_payload(s)
+        self.assertEqual(payload["embeds"][0]["fields"][0]["value"], lz.fmt_dur(s["played"]))
+        with self.assertRaises(ValueError):
+            lz.discord_send("https://example.com/hook", payload)
 
 
 if __name__ == "__main__":

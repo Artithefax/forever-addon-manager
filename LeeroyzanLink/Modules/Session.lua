@@ -32,6 +32,7 @@ local LIMIT = {
 
 local s = nil       -- current session (a table inside the saved variables)
 local rt = {}       -- runtime state that is not saved
+local zoneEntry     -- defined with the zone helpers below
 local band = bit and bit.band
 
 ----------------------------------------------------------------------
@@ -193,6 +194,8 @@ on("PLAYER_XP_UPDATE", function(unit)
 	rt.xp, rt.xpMax = cur, max
 	if gained <= 0 then return end
 	s.xp.total = s.xp.total + gained
+	local z = zoneEntry(zoneName())
+	z.xp = (z.xp or 0) + gained
 	if rt.run then rt.run.xp = (rt.run.xp or 0) + gained end
 end)
 
@@ -251,6 +254,10 @@ on("PLAYER_MONEY", function()
 	if d > 0 then
 		s.money.income = s.money.income + d
 		add(s.money.gain, src, d)
+		if src == "loot" or src == "quest" or src == "vendor" then -- what the zone itself brought (farm ranking)
+			local z = zoneEntry(zoneName())
+			z.money = (z.money or 0) + d
+		end
 	else
 		s.money.spent = s.money.spent - d
 		add(s.money.spend, src, -d)
@@ -427,8 +434,13 @@ on("CHAT_MSG_LOOT", function(msg)
 	add(L.q, q, count)
 	L.value = L.value + (e.v or 0) * count
 	if q >= 2 then
+		local boss = rt.lastBoss and (now() - rt.lastBoss.at) < 120 and rt.lastBoss.name or nil
 		push(L.notable, { id = id, name = e.name, q = q, n = count, t = time(), zone = zoneName(),
-			src = (kind == "pushed") and "quest" or (gk ~= "mob" and gk) or rt.lootSrc }, LIMIT.notable)
+			src = (kind == "pushed") and "quest" or (gk ~= "mob" and gk) or rt.lootSrc, boss = boss }, LIMIT.notable)
+		if rt.run and kind ~= "pushed" then
+			rt.run.drops = rt.run.drops or {}
+			push(rt.run.drops, { id = id, name = e.name, q = q, n = count, boss = boss }, 40)
+		end
 	end
 	if rt.run then rt.run.loot = (rt.run.loot or 0) + count end
 end)
@@ -557,7 +569,7 @@ on("CHAT_MSG_SYSTEM", checkDiscovery)
 -- newer clients: (messageType, message), older: (message)
 on("UI_INFO_MESSAGE", function(a, b) checkDiscovery(type(b) == "string" and b or a) end)
 
-local function zoneEntry(zone)
+zoneEntry = function(zone)
 	local zones = s.explore.zones
 	local e = zones[zone]
 	if not e then
@@ -633,6 +645,7 @@ on("ENCOUNTER_END", function(id, name, diff, size, success)
 	local started = rt.encounter and rt.encounter.at
 	rt.encounter = nil
 	if success == 1 or success == true then
+		rt.lastBoss = { name = name, at = now() }
 		push(s.bosses, { name = name, t = time(), inst = rt.run and rt.run.name or zoneName(),
 			sec = started and math.floor(now() - started) or nil }, LIMIT.bosses)
 		if rt.run then push(rt.run.bosses, name, 30) end
@@ -782,6 +795,8 @@ local function countKill(guid, name, flags)
 		K.mobs[key] = e
 	end
 	e.n = e.n + 1
+	local z = zoneEntry(zoneName())
+	z.kills = (z.kills or 0) + 1
 	if rt.run then rt.run.kills = rt.run.kills + 1 end
 end
 
@@ -1079,6 +1094,7 @@ function mod:Update()
 	s.stop, s.saved = t, t
 	s.played = rt.playedBefore + (t - (rt.loginAt or t))
 	s.level.to = playerLevel()
+	s.xpNow, s.xpMax = readXP()
 	s.money.stop = money()
 	s.addon = LZ.version
 	local x = s.xp

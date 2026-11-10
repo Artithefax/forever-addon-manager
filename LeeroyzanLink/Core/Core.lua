@@ -4,7 +4,7 @@ local C = LZ.C
 
 _G.LeeroyzanLink = LZ
 LZ.addon = ADDON
-LZ.version = C.GetMetadata(ADDON, "Version") or "0.2.0"
+LZ.version = C.GetMetadata(ADDON, "Version") or "0.3.0"
 LZ.schema = 1
 LZ.lang = (type(GetLocale) == "function" and GetLocale() == "deDE") and "de" or "en"
 LZ.modules, LZ.moduleList, LZ.commands, LZ.helpLines = {}, {}, {}, {}
