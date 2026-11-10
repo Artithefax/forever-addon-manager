@@ -7,6 +7,7 @@ if START_NOW then STUB.now = START_NOW end
 if PART == 2 then -- the game state after the reload is what part 1 left behind
 	STUB.level, STUB.xp, STUB.xpMax, STUB.money = 22, 200, 11000, 52625
 	STUB.skills[2][4], STUB.skills[3][4] = 46, 31
+	STUB.bag = { { id = 2589, n = 12 }, { id = 4306, n = 3 } }
 end
 
 local failures, checks = 0, 0
@@ -140,6 +141,32 @@ if PART == 1 then
 	STUB.fire("CHAT_MSG_SYSTEM", "You have learned how to create a new item: Schwacher Heiltrank.")
 	STUB.fire("CHAT_MSG_SYSTEM", "You have learned a new spell: Spalten.")
 
+	-- profession window: two recipes, one header
+	STUB.trade = { line = { "Alchemie", 31, 75 }, recipes = {
+		{ name = "Tränke", type = "header" },
+		{ name = "Schwacher Heiltrank", item = 118, reagents = { { id = 765, n = 1 }, { id = 2449, n = 1 } } },
+		{ name = "Geringer Heiltrank", item = 858, made = 1, reagents = { { id = 118, n = 2 }, { id = 3371, n = 1 } } },
+	} }
+	STUB.fire("TRADE_SKILL_SHOW")
+	STUB.advance(1)
+	local book = LZ.char.recipes["Alchemie"]
+	check(book and book.list["Geringer Heiltrank"] and #book.list["Geringer Heiltrank"].r == 2, "recipes scanned")
+	check(book and book.list["Tränke"] == nil, "headers skipped")
+	check(book and book.list["Schwacher Heiltrank"].item == 118 and book.rank == 31, "recipe product and rank")
+	check(LZ.gdb.items[3371] and LZ.gdb.items[3371].name == "Leere Phiole", "reagent name remembered")
+	STUB.trade = nil
+
+	-- bags: names for Leeroyzan
+	STUB.bag = { { id = 2589, n = 12 }, { id = 4306, n = 3 } }
+	LZ.modules.Alts:ScanBags()
+	check(LZ.char.bags[2589] == 12 and LZ.gdb.items[4306].name == "Seidenstoff", "bags with item names")
+
+	-- data for Leeroyzan's diagnostics: an error of another addon, a wishlist entry, a report
+	STUB.errhandler("Interface\\AddOns\\FooBar\\Core.lua:10: attempt to index a nil value")
+	LZ:HandleSlash("merken Details! Damage Meter")
+	LZ.gdb.reports.FooBar = { time = STUB.now, version = "2.0" }
+	check(LZ.gdb.errorStats.FooBar and LZ.gdb.errorStats.FooBar.total == 1, "foreign error recorded")
+
 	-- discovering a subzone, reputation
 	STUB.xp = STUB.xp + 140
 	STUB.fire("CHAT_MSG_SYSTEM", "Discovered Steinwacht: 140 experience gained")
@@ -182,6 +209,8 @@ if PART == 1 then
 	STUB.advance(120)
 	STUB.afk, STUB.resting = false, false
 
+	local z = s.explore.zones["Rotkammgebirge"]
+	check(z.kills == 6 and z.xp > 3000 and z.money == 3825, "zone stats: " .. tostring(z.kills) .. "/" .. tostring(z.xp) .. "/" .. tostring(z.money))
 	check(s.kills.n == 6, "kills counted (incl. pet kill, excl. foreign): " .. s.kills.n)
 	check(s.kills.elite == 1 and s.kills.rare == 1, "elite/rare classified")
 	check(s.kills.blows == 5, "killing blows: " .. s.kills.blows)
@@ -237,7 +266,9 @@ else
 	STUB.fire("ENCOUNTER_START", 1, "Edwin VanCleef", 1, 5)
 	kill(639, "Edwin VanCleef", 22, "elite", { xp = 800 })
 	STUB.fire("ENCOUNTER_END", 1, "Edwin VanCleef", 1, 5, 1)
-	STUB.advance(60)
+	STUB.advance(5)
+	loot(5463, 1)
+	STUB.advance(55)
 	STUB.instance = { "Westfall", "none", 0, "", 0, 0, false, 0 }
 	STUB.fire("ZONE_CHANGED_NEW_AREA")
 	STUB.advance(2)
@@ -248,6 +279,8 @@ else
 	check(s.kills.boss == 1, "boss classified by encounter: " .. s.kills.boss)
 	check(s.deathN == 1 and s.deaths[1].by == "Edwin VanCleef", "death with killer")
 	check(s.time.instance >= 80, "time in instance: " .. s.time.instance)
+	local drops = s.runs[1].drops
+	check(drops and drops[1].name == "Kristall des Testens" and drops[1].boss == "Edwin VanCleef", "boss loot in the run")
 
 	-- flight path
 	STUB.taxi, STUB.speed = true, 30
@@ -256,6 +289,7 @@ else
 	STUB.fire("PLAYER_LOGOUT")
 	check(s.move.taxi > 500, "flight path distance")
 	check(s.played > 300, "played time grows across reload: " .. s.played)
+	check(s.xpNow == STUB.xp and s.xpMax == STUB.xpMax, "xp progress saved")
 end
 
 -- the in-game page and the overview line must render without errors
@@ -263,8 +297,12 @@ local okR, report = pcall(mod.Report, mod)
 check(okR and type(report) == "string" and report:find("Sitzung", 1, true) ~= nil, "in-game report: " .. tostring(report):sub(1, 200))
 local okS, summary = pcall(mod.Summary, mod)
 check(okS and type(summary) == "string", "summary line: " .. tostring(summary))
-for _, e in pairs(LZ.gdb.errors or {}) do check(false, "error logged by the addon: " .. tostring(e.msg)) end
+for _, e in pairs(LZ.gdb.errors or {}) do
+	if e.addon == "LeeroyzanLink" then check(false, "error logged by the addon: " .. tostring(e.msg)) end
+end
 
 print(string.format("RESULT[part %d] %d checks, %d failures", PART, checks, failures))
-for _, line in ipairs(STUB.chat) do if line:find("ERROR") then print(line) end end
+for _, line in ipairs(STUB.chat) do
+	if line:find("ERROR") and not line:find("FooBar", 1, true) then print(line) end -- FooBar's error is planted
+end
 return failures

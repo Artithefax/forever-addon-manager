@@ -23,6 +23,7 @@ STUB = {
 		[2589] = { "Leinenstoff", 1, 13 }, [765] = { "Friedensblume", 1, 10 }, [2449] = { "Wilddornrose", 1, 20 },
 		[118] = { "Schwacher Heiltrank", 1, 5 }, [1210] = { "Schattenedelstein", 2, 250 }, [6256] = { "Angel", 1, 4 },
 		[4306] = { "Seidenstoff", 1, 150 }, [10000] = { "Klinge der Tests", 3, 5000 },
+		[858] = { "Geringer Heiltrank", 1, 20 }, [3371] = { "Leere Phiole", 1, 1 }, [5463] = { "Kristall des Testens", 3, 900 },
 	},
 	spells = { [2366] = "Kräutersammeln", [2575] = "Bergbau", [8613] = "Kürschnerei" },
 	abandon = nil, questID = 0, questTitle = "",
@@ -216,6 +217,30 @@ function SetAbandonQuest() end
 function GetAbandonQuestName() return STUB.abandon end
 function AbandonQuest() STUB.abandon = nil end
 function JumpOrAscendStart() end
+
+-- profession window (Classic trade skill API)
+STUB.trade = nil  -- { line = {name, rank, max}, recipes = { { name, type, item, made, reagents = { {id, n} } } } }
+local function tradeRecipe(i) return STUB.trade and STUB.trade.recipes[i] end
+function GetTradeSkillLine() if STUB.trade then return unpack(STUB.trade.line) end return "UNKNOWN", 0, 0 end
+function GetNumTradeSkills() return STUB.trade and #STUB.trade.recipes or 0 end
+function GetTradeSkillInfo(i) local r = tradeRecipe(i); if r then return r.name, r.type or "optimal", 0, true end end
+function GetTradeSkillItemLink(i) local r = tradeRecipe(i); return r and r.item and STUB.link(r.item) end
+function GetTradeSkillNumMade(i) local r = tradeRecipe(i); return r and (r.made or 1), r and (r.made or 1) end
+function GetTradeSkillNumReagents(i) local r = tradeRecipe(i); return r and r.reagents and #r.reagents or 0 end
+function GetTradeSkillReagentInfo(i, k)
+	local g = tradeRecipe(i).reagents[k]
+	return STUB.items[g.id][1], "icon", g.n, 0
+end
+function GetTradeSkillReagentItemLink(i, k) return STUB.link(tradeRecipe(i).reagents[k].id) end
+
+-- bags: bag 0 holds STUB.bag = { itemID, ... }
+STUB.bag = {}
+function GetContainerNumSlots(bag) return bag == 0 and #STUB.bag or 0 end
+function GetContainerItemInfo(bag, slot)
+	local e = STUB.bag[slot]
+	if not e then return nil end
+	return "icon", e.n, false, STUB.items[e.id][2], false, false, STUB.link(e.id), false, false, e.id
+end
 
 function GetItemInfo(x)
 	local id = type(x) == "number" and x or tonumber(tostring(x):match("item:(%d+)"))

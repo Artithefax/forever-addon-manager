@@ -64,10 +64,40 @@ function mod:UpdateSkills()
 	LZ.char.skills = skills
 end
 
+-- Item names and quality for Leeroyzan (the saved bags only hold item IDs).
+function LZ.RememberItem(id, name, q)
+	if not id then return end
+	local items = LZ.gdb.items
+	if not items then
+		items = {}
+		LZ.gdb.items = items
+	end
+	local e = items[id]
+	if e and e.name then return end
+	name = name or C.GetItemName(id)
+	if not name then return end
+	items[id] = { name = name, q = q or C.GetQuality(id) }
+end
+
+local function rememberNames(counts)
+	local items = LZ.gdb.items or {}
+	local n = 0
+	for _ in pairs(items) do n = n + 1 end
+	for id in pairs(counts or {}) do
+		if n >= 5000 then return end
+		if not (items[id] and items[id].name) then
+			LZ.RememberItem(id)
+			n = n + 1
+		end
+	end
+end
+
 function mod:ScanBags()
 	LZ.char.bags = scanContainers(C.BagIDs())
 	if bankOpen then LZ.char.bank = scanContainers(C.BankBagIDs()) end
 	LZ.char.scannedAt = time()
+	rememberNames(LZ.char.bags)
+	rememberNames(LZ.char.bank)
 end
 
 function mod:QueueScan()

@@ -49,6 +49,7 @@ from pathlib import Path
 
 import tkinter as tk
 from tkinter import ttk, filedialog
+import tkinter.font as tkfont
 
 try:                                   # optional: Drag & Drop
     from tkinterdnd2 import TkinterDnD, DND_FILES
@@ -60,7 +61,7 @@ except Exception:                      # noqa – Paket fehlt oder Tk-Erweiterun
     HAS_DND = False
 
 APP_NAME = "Leeroyzan"
-APP_VERSION = "1.3.1"
+APP_VERSION = "1.4.0"
 USER_AGENT = f"Leeroyzan/{APP_VERSION}"
 
 # Selbst-Update über GitHub-Releases dieses Repos
@@ -1911,7 +1912,8 @@ def normalize_session(raw, flavor: str = "", account: str = "") -> dict | None:
                  "notable": [{"id": _int(_map(e).get("id")), "name": _text(_map(e).get("name")),
                               "q": _int(_map(e).get("q"), 2), "n": _int(_map(e).get("n"), 1),
                               "t": _int(_map(e).get("t")), "zone": _text(_map(e).get("zone")),
-                              "src": _text(_map(e).get("src"))} for e in _list(lo.get("notable"))]},
+                              "src": _text(_map(e).get("src")), "boss": _text(_map(e).get("boss"))}
+                             for e in _list(lo.get("notable"))]},
         "combat": {
             **{k: _int(cb.get(k)) for k in ("dmg", "dmgPet", "hits", "crits", "maxHit", "heal", "over", "maxHeal",
                                              "taken", "maxTaken", "healTaken", "castN", "buffN", "debuffN",
@@ -1949,16 +1951,22 @@ def normalize_session(raw, flavor: str = "", account: str = "") -> dict | None:
         "explore": {
             "found": [{"name": _text(_map(e).get("name")), "xp": _int(_map(e).get("xp")), "zone": _text(_map(e).get("zone")),
                        "t": _int(_map(e).get("t"))} for e in _list(ex.get("found"))],
-            "zones": {k: {"sec": _int(_map(z).get("sec")), "subs": sorted(str(x) for x in _map(_map(z).get("subs")))}
+            "zones": {k: {"sec": _int(_map(z).get("sec")), "subs": sorted(str(x) for x in _map(_map(z).get("subs"))),
+                          "xp": _int(_map(z).get("xp")), "money": _int(_map(z).get("money")),
+                          "kills": _int(_map(z).get("kills"))}
                       for k, z in _map(ex.get("zones")).items()},
         },
         "runs": [{"name": _text(_map(x).get("name")), "kind": _text(_map(x).get("kind")), "diff": _text(_map(x).get("diff")),
                   "size": _int(_map(x).get("size")), "start": _int(_map(x).get("start")), "stop": _int(_map(x).get("stop")),
                   "kills": _int(_map(x).get("kills")), "bosses": [_text(b) for b in _list(_map(x).get("bosses"))],
                   "wipes": _int(_map(x).get("wipes")), "deaths": _int(_map(x).get("deaths")), "xp": _int(_map(x).get("xp")),
-                  "money": _int(_map(x).get("money")), "loot": _int(_map(x).get("loot")), "group": _int(_map(x).get("group"))}
+                  "money": _int(_map(x).get("money")), "loot": _int(_map(x).get("loot")), "group": _int(_map(x).get("group")),
+                  "drops": [{"id": _int(_map(d).get("id")), "name": _text(_map(d).get("name")), "q": _int(_map(d).get("q"), 2),
+                             "n": _int(_map(d).get("n"), 1), "boss": _text(_map(d).get("boss"))}
+                            for d in _list(_map(x).get("drops"))]}
                  for x in _list(r.get("runs"))],
         "rep": _counts(r.get("rep")),
+        "xpNow": _int(r.get("xpNow")), "xpMax": _int(r.get("xpMax")),
         "legacy": False,
     }
     # Spielzeit fehlt (z. B. Absturz vor dem ersten Speichern): Zeitraum nehmen
@@ -2108,6 +2116,7 @@ def import_link_sessions(root: str, flavor: str) -> dict:
     """Übernimmt neue und fortgesetzte Sitzungen aus allen Accounts. Schreibt nie in WoW-Dateien."""
     result = {"new": [], "updated": [], "errors": [], "files": 0}
     deleted = deleted_session_ids(flavor)
+    dbs = []
     for path in link_savedvariables(root, flavor):
         account = path.parent.parent.name
         try:
@@ -2116,6 +2125,7 @@ def import_link_sessions(root: str, flavor: str) -> dict:
             result["errors"].append(f"{path.name} ({account}): {e}")
             continue
         result["files"] += 1
+        dbs.append((account, db))
         for s in sessions_in_db(db, flavor, account):
             if s["id"] in deleted:
                 continue
@@ -2138,6 +2148,7 @@ def import_link_sessions(root: str, flavor: str) -> dict:
                 s["imported_first"] = s["imported"]
             save_session(flavor, s)
             (result["updated"] if old is not None else result["new"]).append(s)
+    result["state"] = link_state_from_dbs(dbs)
     return result
 
 
@@ -2277,6 +2288,17 @@ def skill_group(header: str) -> str:
     if "waffe" in h or "weapon" in h:
         return "weapon"
     return "other"
+
+
+PROFESSION_NAMES = {
+    "alchemie", "alchemy", "schmiedekunst", "blacksmithing", "verzauberkunst", "enchanting", "ingenieurskunst",
+    "engineering", "kräuterkunde", "herbalism", "lederverarbeitung", "leatherworking", "bergbau", "mining",
+    "kürschnerei", "skinning", "schneiderei", "tailoring", "kochkunst", "cooking", "erste hilfe", "first aid",
+    "angeln", "fishing", "juwelierskunst", "jewelcrafting", "inschriftenkunde", "inscription"}
+
+
+def skill_group_by_name(name: str) -> str:
+    return "prof" if name.strip().lower() in PROFESSION_NAMES else "other"
 
 
 def _top(d: dict, n: int, key=lambda v: v):
@@ -2563,7 +2585,8 @@ def session_report(s: dict) -> list[tuple[str, str]]:
             line(tr("Davon als Geist: {0}", fmt_dist(mv["ghost"])), "dim")
 
     pr = s["prof"]
-    profs = [(n, e) for n, e in pr["skills"].items() if skill_group(e["h"]) == "prof"]
+    profs = [(n, e) for n, e in pr["skills"].items()
+             if skill_group(e["h"]) == "prof" or skill_group_by_name(n) == "prof"]
     raised = [(n, e) for n, e in pr["skills"].items() if e["b"] > e["a"]]
     if profs or raised or pr["crafted"] or pr["gathered"] or pr["learned"]:
         head(tr("Berufe und Fertigkeiten"))
@@ -2776,6 +2799,627 @@ def overview_report(sessions: list[dict], label: str) -> list[tuple[str, str]]:
 
 def report_plain_text(parts: list[tuple[str, str]]) -> str:
     return "".join(t for t, _ in parts).strip() + "\n"
+
+
+# --------------------------------------------------------------------------- #
+# Leeroyzan Link in beide Richtungen
+#   Spiel -> Leeroyzan: SavedVariables (Fehler, Ladestatus, Speicher, Charaktere, Rezepte, Wunschliste)
+#   Leeroyzan -> Spiel: Data.lua im Addon-Ordner (Updates, Changelogs, Sets als Profile, Wunschliste)
+# WoW liest Data.lua beim Einloggen und bei /reload. Leeroyzan schreibt nur diese eine Datei.
+# --------------------------------------------------------------------------- #
+
+LINK_SCHEMA = 1
+LUA_KEYWORDS = {"and", "break", "do", "else", "elseif", "end", "false", "for", "function", "if", "in", "local",
+                "nil", "not", "or", "repeat", "return", "then", "true", "until", "while"}
+
+
+def lua_string(text: str) -> str:
+    out = ['"']
+    for ch in text:
+        o = ord(ch)
+        if ch == "\\":
+            out.append("\\\\")
+        elif ch == '"':
+            out.append('\\"')
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\r":
+            out.append("\\r")
+        elif o < 32 or o == 127:
+            out.append(f"\\{o:03d}")
+        else:
+            out.append(ch)
+    out.append('"')
+    return "".join(out)
+
+
+def lua_literal(v, ind: str = "") -> str:
+    """Python-Wert als Lua-Ausdruck (nur Daten: Zahlen, Texte, Listen, Tabellen)."""
+    if v is None:
+        return "nil"
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, int):
+        return str(v)
+    if isinstance(v, float):
+        return str(int(v)) if v.is_integer() else f"{v:.6g}"
+    if isinstance(v, str):
+        return lua_string(v)
+    inner = ind + "\t"
+    if isinstance(v, (list, tuple)):
+        if not v:
+            return "{}"
+        return "{\n" + "".join(f"{inner}{lua_literal(x, inner)},\n" for x in v) + ind + "}"
+    if isinstance(v, dict):
+        if not v:
+            return "{}"
+        rows = []
+        for k, x in v.items():
+            if isinstance(k, str) and _LUA_NAME.fullmatch(k) and k not in LUA_KEYWORDS:
+                key = k
+            else:
+                key = f"[{lua_literal(k)}]"
+            rows.append(f"{inner}{key} = {lua_literal(x, inner)},\n")
+        return "{\n" + "".join(rows) + ind + "}"
+    return lua_string(str(v))
+
+
+def link_data_text(payload: dict) -> str:
+    return ("-- Data.lua: geschrieben von Leeroyzan (Updates, Changelogs, Profile, Wunschliste).\n"
+            "-- Nicht von Hand ändern – Leeroyzan überschreibt die Datei. WoW liest sie beim Einloggen und bei /reload.\n"
+            f"LeeroyzanLinkImport = {lua_literal(payload)}\n")
+
+
+def write_link_data(root: str, flavor: str, payload: dict) -> str:
+    """Schreibt Data.lua ins installierte Addon. Ergebnis: written | unchanged | missing."""
+    folder = installed_link_dir(root, flavor)
+    if not folder:
+        return "missing"
+    target = folder / "Data.lua"
+    new_cmp = link_data_text(dict(payload, generated=0))
+    try:
+        old = target.read_text(encoding="utf-8")
+    except OSError:
+        old = ""
+    if re.sub(r"(?m)^\tgenerated = \d+,$", "\tgenerated = 0,", old) == new_cmp:
+        return "unchanged"
+    tmp = target.with_suffix(".tmp")
+    tmp.write_text(link_data_text(payload), encoding="utf-8")
+    tmp.replace(target)
+    return "written"
+
+
+def notes_lines(notes: str, limit: int = 12) -> list[str]:
+    """Changelog -> kurze Zeilen fürs Spiel (ohne Markdown-Zeichen, ohne Leerzeilen)."""
+    out = []
+    for line in html_to_text(notes or "").splitlines():
+        if line.lstrip().startswith("#"):          # Markdown-Überschriften („## Changes“) weglassen
+            continue
+        line = re.sub(r"^[\s>*\-+•]+", "", line).replace("**", "").replace("`", "").strip()
+        if line:
+            out.append(line[:200])
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _norm_name(text: str) -> str:
+    return re.sub(r"[^0-9a-z]+", "", clean_wow_text(text or "").lower())
+
+
+# ----- Spieldaten lesen ------------------------------------------------------ #
+def _norm_char(key: str, raw, account: str) -> dict:
+    c = _map(raw)
+    info = _map(c.get("info"))
+    name, _, realm = key.partition("-")
+    recipes = {}
+    for prof, book in _map(c.get("recipes")).items():
+        book = _map(book)
+        lst = {}
+        for rname, e in _map(book.get("list")).items():
+            e = _map(e)
+            lst[rname] = {"item": _int(e.get("item")) or None, "made": max(1, _int(e.get("made"), 1)),
+                          "r": [{"id": _int(_map(x).get("id")) or None, "n": max(1, _int(_map(x).get("n"), 1)),
+                                 "name": _text(_map(x).get("name"))} for x in _list(e.get("r"))]}
+        recipes[prof] = {"rank": _int(book.get("rank")), "max": _int(book.get("max")), "t": _int(book.get("t")),
+                         "list": lst}
+    return {
+        "key": key, "name": name, "realm": realm, "account": account,
+        "class": _text(info.get("class")), "level": _int(info.get("level")), "race": _text(info.get("race")),
+        "faction": _text(info.get("faction")), "guild": _text(info.get("guild")),
+        "money": _int(c.get("money")), "lastSeen": _int(c.get("lastSeen")), "scannedAt": _int(c.get("scannedAt")),
+        "skills": [{"name": _text(_map(x).get("name")), "rank": _int(_map(x).get("rank")),
+                    "max": _int(_map(x).get("max"))} for x in _list(c.get("skills"))],
+        "bags": {k: _int(v) for k, v in _map(c.get("bags")).items() if _int(v) > 0},
+        "bank": {k: _int(v) for k, v in _map(c.get("bank")).items() if _int(v) > 0},
+        "bankSeen": isinstance(c.get("bank"), (dict, list)) and bool(c.get("bank")),
+        "recipes": recipes,
+        "autoProfile": _text(c.get("autoProfile")),
+    }
+
+
+def link_state_from_dbs(dbs: list[tuple[str, dict]]) -> dict:
+    """Fasst die Addon-Daten aller WoW-Accounts dieser Spielversion zusammen."""
+    st = {"accounts": [], "errors": [], "errorStats": {}, "blocked": [], "addons": {}, "addonsAt": 0,
+          "memory": {"t": 0, "total": 0, "list": []}, "wishlist": [], "reports": {}, "chars": {}, "items": {},
+          "interface": 0, "addonVersion": "", "writtenAt": 0, "importSeen": 0}
+    seen_wish = set()
+    for account, db in dbs:
+        g = _map(db.get("global"))
+        ex = _map(db.get("export"))
+        st["accounts"].append(account)
+        written = _int(ex.get("writtenAt"))
+        if written >= st["writtenAt"]:
+            st.update(writtenAt=written, addonVersion=_text(ex.get("addonVersion")),
+                      interface=_int(ex.get("interface")), importSeen=_int(ex.get("importSeen")))
+        for e in _map(g.get("errors")).values():
+            e = _map(e)
+            st["errors"].append({"addon": _text(e.get("addon")) or "?", "msg": _text(e.get("msg")),
+                                 "count": _int(e.get("count")), "first": _int(e.get("first")),
+                                 "last": _int(e.get("last")), "version": _text(e.get("version")),
+                                 "stack": _text(e.get("stack")), "account": account})
+        for addon, es in _map(g.get("errorStats")).items():
+            es = _map(es)
+            cur = st["errorStats"].setdefault(addon, {"total": 0, "last": 0, "version": "", "byVersion": {}})
+            cur["total"] += _int(es.get("total"))
+            if _int(es.get("last")) >= cur["last"]:
+                cur["last"], cur["version"] = _int(es.get("last")), _text(es.get("version"))
+            for v, n in _map(es.get("byVersion")).items():
+                cur["byVersion"][v] = cur["byVersion"].get(v, 0) + _int(n)
+        for b in _map(g.get("blocked")).values():
+            b = _map(b)
+            st["blocked"].append({"addon": _text(b.get("addon")), "func": _text(b.get("func")), "count": _int(b.get("count")),
+                                  "last": _int(b.get("last")), "forbidden": bool(b.get("forbidden"))})
+        at = _int(g.get("addonsScannedAt"))
+        if at >= st["addonsAt"]:
+            st["addonsAt"] = at
+            st["addons"] = {name: {"title": clean_wow_text(_text(_map(a).get("title"))) or name,
+                                   "version": _text(_map(a).get("version")), "loaded": bool(_map(a).get("loaded")),
+                                   "enabled": bool(_map(a).get("enabled")), "loadable": bool(_map(a).get("loadable")),
+                                   "reason": _text(_map(a).get("reason")), "onDemand": bool(_map(a).get("onDemand")),
+                                   "deps": [_text(d) for d in _list(_map(a).get("deps"))],
+                                   "missingDeps": [_text(d) for d in _list(_map(a).get("missingDeps"))]}
+                            for name, a in _map(g.get("addons")).items()}
+        mem = _map(g.get("memory"))
+        if _int(mem.get("t")) >= st["memory"]["t"]:
+            st["memory"] = {"t": _int(mem.get("t")), "total": _num(mem.get("totalKB")),
+                            "list": [{"name": _text(_map(m).get("name")), "kb": _num(_map(m).get("kb")),
+                                      "cpu": _num(_map(m).get("cpu"))} for m in _list(mem.get("list"))]}
+        for w in _map(g.get("wishlist")).values():
+            w = _map(w)
+            name = _text(w.get("name")).strip()
+            if name and name.lower() not in seen_wish:
+                seen_wish.add(name.lower())
+                st["wishlist"].append({"name": name, "note": _text(w.get("note")), "added": _int(w.get("added"))})
+        for addon, r in _map(g.get("reports")).items():
+            r = _map(r)
+            if _int(r.get("time")) >= st["reports"].get(addon, {}).get("time", 0):
+                st["reports"][addon] = {"time": _int(r.get("time")), "version": _text(r.get("version"))}
+        for key, c in _map(db.get("chars")).items():
+            ch = _norm_char(key, c, account)
+            if ch["lastSeen"] >= st["chars"].get(key, {}).get("lastSeen", -1):
+                st["chars"][key] = ch
+        for k, it in _map(g.get("items")).items():
+            it = _map(it)
+            if _text(it.get("name")):
+                st["items"][k] = {"name": _text(it.get("name")), "q": _int(it.get("q"), 1)}
+    st["wishlist"].sort(key=lambda w: w["added"])
+    return st
+
+
+def empty_link_state() -> dict:
+    return link_state_from_dbs([])
+
+
+def item_name(state: dict, item_id, fallback: str = "") -> str:
+    it = state.get("items", {}).get(str(item_id))
+    return it["name"] if it else (fallback or f"#{item_id}")
+
+
+def item_quality(state: dict, item_id) -> int:
+    it = state.get("items", {}).get(str(item_id))
+    return it["q"] if it else 1
+
+
+# ----- Diagnose ------------------------------------------------------------------ #
+LOAD_REASONS = {"DEP_MISSING": "Abhängigkeit fehlt", "MISSING": "fehlt", "CORRUPT": "beschädigt",
+                "INCOMPATIBLE": "nicht kompatibel", "INTERFACE_VERSION": "veraltet (Interface-Version)",
+                "DEP_DISABLED": "Abhängigkeit deaktiviert", "DEP_INCOMPATIBLE": "Abhängigkeit nicht kompatibel",
+                "DEP_CORRUPT": "Abhängigkeit beschädigt", "DEP_LOADABLE_FAILED": "Abhängigkeit lädt nicht",
+                "BANNED": "gesperrt", "SECURE": "geschützt", "DISABLED": "deaktiviert",
+                "NOT_DEMAND_LOADED": "lädt bei Bedarf", "DEMAND_LOADED": "lädt bei Bedarf"}
+
+
+def error_rows(state: dict, versions: dict[str, str]) -> list[dict]:
+    """Pro Addon: Fehler gesamt und in der jetzt installierten Version (versions: Ordner -> Version)."""
+    rows = []
+    for addon, es in state.get("errorStats", {}).items():
+        cur = clean_wow_text(versions.get(addon, ""))
+        in_cur = sum(n for v, n in es["byVersion"].items() if cur and clean_wow_text(v) == cur)
+        errs = sorted((e for e in state["errors"] if e["addon"] == addon), key=lambda e: (e["count"], e["last"]), reverse=True)
+        rows.append({"addon": addon, "total": es["total"], "current": in_cur, "version": cur, "last": es["last"],
+                     "errors": errs, "byVersion": es["byVersion"], "installed": addon in versions})
+    rows.sort(key=lambda r: (r["current"] > 0, r["last"]), reverse=True)
+    return rows
+
+
+def load_problems(state: dict) -> list[dict]:
+    out = []
+    for name, a in state.get("addons", {}).items():
+        if name.startswith("Blizzard_") or not a["enabled"] or a["loaded"] or a["onDemand"]:
+            continue
+        if a["reason"] in ("DEMAND_LOADED", "NOT_DEMAND_LOADED", "DISABLED"):
+            continue
+        out.append({"name": name, "title": a["title"], "reason": a["reason"], "missing": a["missingDeps"]})
+    out.sort(key=lambda p: p["name"].lower())
+    return out
+
+
+# ----- Charaktere, Taschen, Rezepte ------------------------------------------------ #
+def char_items(ch: dict) -> dict[str, int]:
+    out = dict(ch["bags"])
+    for k, n in ch["bank"].items():
+        out[k] = out.get(k, 0) + n
+    return out
+
+
+def find_items(state: dict, text: str, limit: int = 200) -> list[dict]:
+    """Wer hat was? Suche nach Item-Name (Teiltext) oder ID in Taschen und Bank aller Charaktere."""
+    text = text.strip().lower()
+    if not text:
+        return []
+    out = []
+    for ch in state.get("chars", {}).values():
+        for where in ("bags", "bank"):
+            for k, n in ch[where].items():
+                name = item_name(state, k)
+                if text == k or text in name.lower():
+                    out.append({"char": ch["name"], "key": ch["key"], "where": where, "id": k, "name": name,
+                                "q": item_quality(state, k), "n": n})
+    out.sort(key=lambda r: (r["name"].lower(), r["char"].lower()))
+    return out[:limit]
+
+
+def all_recipes(state: dict) -> list[tuple[str, str, str]]:
+    """(Charakter-Schlüssel, Beruf, Rezept) für alle gespeicherten Rezepte."""
+    out = []
+    for key, ch in state.get("chars", {}).items():
+        for prof, book in ch["recipes"].items():
+            for rname in book["list"]:
+                out.append((key, prof, rname))
+    return sorted(out, key=lambda t: (t[0].lower(), t[1].lower(), t[2].lower()))
+
+
+def shopping_list(state: dict, crafter: str, prof: str, recipe: str, qty: int) -> dict:
+    """Zutaten für qty Stück: Bedarf, beim Hersteller vorhanden, bei anderen Charakteren, fehlt noch."""
+    ch = state["chars"][crafter]
+    e = ch["recipes"][prof]["list"][recipe]
+    crafts = max(1, -(-max(1, qty) // max(1, e["made"])))
+    own = char_items(ch)
+    rows = []
+    for r in e["r"]:
+        need = r["n"] * crafts
+        key = str(r["id"]) if r["id"] else ""
+        have = own.get(key, 0) if key else None
+        others = []
+        if key:
+            for other in state["chars"].values():
+                if other["key"] == crafter:
+                    continue
+                n = char_items(other).get(key, 0)
+                if n:
+                    others.append({"char": other["name"], "n": n, "bank": other["bank"].get(key, 0)})
+        others.sort(key=lambda o: o["n"], reverse=True)
+        elsewhere = sum(o["n"] for o in others)
+        rows.append({"id": r["id"], "name": item_name(state, r["id"], r["name"]) if r["id"] else (r["name"] or "?"),
+                     "q": item_quality(state, r["id"]) if r["id"] else 1, "need": need, "have": have,
+                     "others": others, "missing": max(0, need - (have or 0) - elsewhere) if have is not None else None,
+                     "transfer": max(0, min(need - (have or 0), elsewhere)) if have is not None else 0})
+    return {"crafts": crafts, "made": e["made"], "item": e["item"], "rows": rows,
+            "product": item_name(state, e["item"], recipe) if e["item"] else recipe}
+
+
+# ----- Sitzungen auswerten: Prognose, Rekorde, Tode, Farmgebiete, Dungeons ------------- #
+# Erfahrung pro Stufe (Classic 1–59). Was die Sitzungen selbst gemessen haben, geht vor.
+CLASSIC_XP = [400, 900, 1400, 2100, 2800, 3600, 4500, 5400, 6500, 7600, 8800, 10100, 11400, 12900, 14400, 16000,
+              17700, 19400, 21300, 23200, 25200, 27300, 29400, 31700, 34000, 36400, 38900, 41400, 44300, 47400,
+              50800, 54500, 58600, 62800, 67100, 71600, 76100, 80800, 85700, 90700, 95800, 101000, 106300, 111800,
+              117500, 123200, 129100, 135100, 141200, 147500, 153900, 160400, 167100, 173900, 180800, 187900,
+              195000, 202300, 209800]
+MAX_LEVEL = len(CLASSIC_XP) + 1
+
+
+def xp_for_level(level: int, measured: dict[int, int]) -> int:
+    if level in measured:
+        return measured[level]
+    return CLASSIC_XP[level - 1] if 1 <= level <= len(CLASSIC_XP) else 0
+
+
+def level_forecast(sessions: list[dict]) -> list[dict]:
+    """Pro Charakter: Tempo der letzten Sitzungen und geschätzte Spielzeit bis zu den nächsten Stufen."""
+    by_char: dict[str, list[dict]] = {}
+    for s in sessions:
+        by_char.setdefault(s["char"], []).append(s)
+    measured: dict[int, int] = {}
+    for s in sessions:
+        if s.get("xpMax") and s["level"]["to"]:
+            measured[s["level"]["to"]] = _int(s["xpMax"])
+    out = []
+    for char, lst in by_char.items():
+        lst = sorted(lst, key=lambda s: s["stop"])
+        last = lst[-1]
+        level = last["level"]["to"]
+        if not level or level >= MAX_LEVEL:
+            continue
+        recent = [s for s in lst if s["played"] >= 900 and s["xp"]["total"] > 0][-10:]
+        played = sum(s["played"] for s in recent)
+        xp = sum(s["xp"]["total"] for s in recent)
+        if played < 1800 or xp <= 0:
+            continue
+        rate = xp * 3600 / played
+        need_lvl = xp_for_level(level, measured)
+        now = _int(last.get("xpNow")) if last.get("xpMax") else 0
+        need_next = max(0, (_int(last.get("xpMax")) or need_lvl) - now)
+        targets = []
+        for target in sorted({level + 1, ((level // 10) + 1) * 10, MAX_LEVEL}):
+            if target <= level or target > MAX_LEVEL:
+                continue
+            need = need_next + sum(xp_for_level(l, measured) for l in range(level + 1, target))
+            targets.append({"level": target, "xp": need, "hours": need / rate})
+        out.append({"char": char, "name": last["name"] or char, "level": level, "progress": now / last["xpMax"]
+                    if last.get("xpMax") else None, "rate": rate, "sessions": len(recent), "targets": targets})
+    out.sort(key=lambda f: f["name"].lower())
+    return out
+
+
+def session_records(sessions: list[dict]) -> list[tuple[str, str, dict]]:
+    """(Rekord, Wert, Sitzung) – nur sinnvolle Sitzungen (Raten ab 20 Minuten)."""
+    recs = []
+
+    def best(label, key, fmt, cond=lambda s: True):
+        cands = [s for s in sessions if cond(s)]
+        if not cands:
+            return
+        s = max(cands, key=key)
+        if key(s) > 0:
+            recs.append((label, fmt(s), s))
+
+    long_enough = lambda s: s["played"] >= 1200      # noqa: E731
+    best("Längste Sitzung", lambda s: s["played"], lambda s: fmt_dur(s["played"]))
+    best("Meiste Erfahrung", lambda s: s["xp"]["total"], lambda s: tr("{0} XP", fmt_int(s["xp"]["total"])))
+    best("Beste XP pro Stunde", lambda s: s["xp"]["total"] / s["played"], lambda s: tr("{0}/h", fmt_int(
+        s["xp"]["total"] * 3600 / s["played"])), long_enough)
+    best("Bestes Gold pro Stunde", lambda s: session_net_money(s) / s["played"], lambda s: tr("{0}/h", fmt_money(
+        session_net_money(s) * 3600 / s["played"])), long_enough)
+    best("Meiste Kills", lambda s: s["kills"]["n"], lambda s: fmt_int(s["kills"]["n"]))
+    best("Meiste Quests", lambda s: len(s["quests"]["done"]), lambda s: fmt_int(len(s["quests"]["done"])))
+    best("Größter Treffer", lambda s: s["combat"]["maxHit"], lambda s: f"{fmt_int(s['combat']['maxHit'])} "
+         f"({s['combat']['maxHitSpell'] or '?'})")
+    best("Größte Heilung", lambda s: s["combat"]["maxHeal"], lambda s: f"{fmt_int(s['combat']['maxHeal'])} "
+         f"({s['combat']['maxHealSpell'] or '?'})")
+    best("Weiteste Strecke zu Fuß", lambda s: s["move"]["foot"] + s["move"]["ghost"],
+         lambda s: fmt_dist(s["move"]["foot"] + s["move"]["ghost"]))
+    best("Wertvollste Beute", lambda s: s["loot"]["value"], lambda s: fmt_money(s["loot"]["value"]))
+    best("Meiste Tode", lambda s: s["deathN"], lambda s: fmt_int(s["deathN"]))
+    return recs
+
+
+def death_stats(sessions: list[dict]) -> dict:
+    by_killer, by_zone, total, played = {}, {}, 0, 0
+    for s in sessions:
+        total += s["deathN"]
+        played += s["played"]
+        for d in s["deaths"]:
+            killer = d["by"] or tr(ENV_KINDS.get(d["spell"], d["spell"] or "unbekannt"))
+            by_killer[killer] = by_killer.get(killer, 0) + 1
+            where = d["inst"] or d["zone"] or "?"
+            by_zone[where] = by_zone.get(where, 0) + 1
+    return {"total": total, "per_hour": total * 3600 / played if played >= 3600 else 0,
+            "killers": _top(by_killer, 8), "zones": _top(by_zone, 8)}
+
+
+def zone_ranking(sessions: list[dict], min_sec: int = 600) -> list[dict]:
+    zones: dict[str, dict] = {}
+    for s in sessions:
+        for name, z in s["explore"]["zones"].items():
+            e = zones.setdefault(name, {"zone": name, "sec": 0, "xp": 0, "money": 0, "kills": 0})
+            e["sec"] += _int(z.get("sec"))
+            e["xp"] += _int(z.get("xp"))
+            e["money"] += _int(z.get("money"))
+            e["kills"] += _int(z.get("kills"))
+    out = []
+    for e in zones.values():
+        if e["sec"] >= min_sec:
+            h = e["sec"] / 3600
+            out.append(dict(e, xp_h=e["xp"] / h, money_h=e["money"] / h, kills_h=e["kills"] / h))
+    return out
+
+
+def dungeon_history(sessions: list[dict]) -> list[dict]:
+    inst: dict[str, dict] = {}
+    for s in sessions:
+        for r in s["runs"]:
+            if not r["name"] or not r["start"]:
+                continue
+            stop = r["stop"] or s["stop"]
+            e = inst.setdefault(r["name"], {"name": r["name"], "kind": r["kind"], "runs": 0, "times": [], "bosses": {},
+                                            "wipes": 0, "deaths": 0, "kills": 0, "xp": 0, "last": 0, "drops": []})
+            e["runs"] += 1
+            e["times"].append(max(0, stop - r["start"]))
+            for b in r["bosses"]:
+                e["bosses"][b] = e["bosses"].get(b, 0) + 1
+            e["wipes"] += r["wipes"]
+            e["deaths"] += r["deaths"]
+            e["kills"] += r["kills"]
+            e["xp"] += r["xp"]
+            e["last"] = max(e["last"], r["start"])
+            for d in r.get("drops", []):
+                e["drops"].append(d)
+    out = []
+    for e in inst.values():
+        cleared = [t for t in e["times"] if t > 0]
+        e["best"] = min(cleared) if cleared else 0
+        e["avg"] = sum(cleared) / len(cleared) if cleared else 0
+        out.append(e)
+    out.sort(key=lambda e: e["last"], reverse=True)
+    return out
+
+
+def analysis_report(sessions: list[dict], label: str) -> list[tuple[str, str]]:
+    P: list[tuple[str, str]] = []
+    add = lambda text, tag="": P.append((text, tag))   # noqa: E731
+
+    def head(text):
+        add("\n" + text + "\n", "head")
+
+    def line(text, tag=""):
+        add(text + "\n", tag)
+
+    add(tr("Auswertung – {0}", label) + "\n", "title")
+    if not sessions:
+        line(tr("Noch keine Sitzungen."), "dim")
+        return P
+
+    head(tr("Prognose"))
+    fc = level_forecast(sessions)
+    if not fc:
+        line(tr("Für eine Prognose braucht es mindestens 30 Minuten Spielzeit mit Erfahrung."), "dim")
+    for f in fc:
+        add(f["name"], "hl")
+        prog = f" ({round(100 * f['progress'])} %)" if f["progress"] is not None else ""
+        line("  " + tr("Stufe {0}{1} · Ø {2} XP/h aus {3}", f["level"], prog, fmt_int(f["rate"]),
+                       plural(f["sessions"], "{0} Sitzung", "{0} Sitzungen")), "dim")
+        line("  " + " · ".join(tr("Stufe {0} in ≈ {1}", t["level"], fmt_dur(t["hours"] * 3600)) for t in f["targets"]))
+    if fc:
+        line(tr("Spielzeit, geschätzt aus deinem bisherigen Tempo. Wo noch nicht gemessen, gilt die Erfahrungstabelle von Classic."), "dim")
+
+    head(tr("Rekorde"))
+    for label_r, value, s in session_records(sessions):
+        add(tr(label_r) + ": ", "")
+        add(value, "hl")
+        line(f"  {s['name'] or s['char']}, {datetime.fromtimestamp(s['start']).strftime(tr('%d.%m.%Y'))}", "dim")
+
+    head(tr("Tode"))
+    ds = death_stats(sessions)
+    if not ds["total"]:
+        line(tr("Keine Tode – sehr vorsichtig!"), "dim")
+    else:
+        line(plural(ds["total"], "{0} Tod", "{0} Tode") +
+             (tr(" · {0} pro Stunde", f"{ds['per_hour']:.2f}".replace(".", "," if LANG == "de" else ".")) if ds["per_hour"] else ""))
+        if ds["killers"]:
+            line(tr("Gefährlichste Gegner: {0}", ", ".join(f"{k} ×{n}" for k, n in ds["killers"])), "dim")
+        if ds["zones"]:
+            line(tr("Gefährlichste Orte: {0}", ", ".join(f"{k} ×{n}" for k, n in ds["zones"])), "dim")
+
+    head(tr("Farmgebiete"))
+    zr = zone_ranking(sessions)
+    if not zr:
+        line(tr("Noch zu wenig Daten – eine Zone zählt ab 10 Minuten Spielzeit (aufgezeichnet ab Leeroyzan Link 0.3)."), "dim")
+    else:
+        by_xp = sorted((z for z in zr if z["xp"]), key=lambda z: z["xp_h"], reverse=True)[:6]
+        by_gold = sorted((z for z in zr if z["money"]), key=lambda z: z["money_h"], reverse=True)[:6]
+        if by_xp:
+            line(tr("Erfahrung pro Stunde: {0}", ", ".join(f"{z['zone']} {fmt_int(z['xp_h'])}" for z in by_xp)))
+        if by_gold:
+            line(tr("Gold pro Stunde: {0}", ", ".join(f"{z['zone']} {fmt_money(z['money_h'])}" for z in by_gold)))
+        by_kills = sorted((z for z in zr if z["kills"]), key=lambda z: z["kills_h"], reverse=True)[:6]
+        if by_kills:
+            line(tr("Kills pro Stunde: {0}", ", ".join(f"{z['zone']} {fmt_int(z['kills_h'])}" for z in by_kills)), "dim")
+        line(tr("Gold zählt Beute, Questbelohnungen und Händlerverkäufe in der Zone."), "dim")
+
+    head(tr("Dungeons und Schlachtzüge"))
+    dh = dungeon_history(sessions)
+    if not dh:
+        line(tr("Noch keine Instanz besucht."), "dim")
+    for e in dh:
+        add(e["name"], "hl")
+        line("  " + " · ".join(x for x in (
+            plural(e["runs"], "{0} Besuch", "{0} Besuche"),
+            tr("Bestzeit {0}", fmt_dur(e["best"])) if e["best"] else "",
+            tr("Ø {0}", fmt_dur(e["avg"])) if e["avg"] and e["runs"] > 1 else "",
+            plural(e["wipes"], "{0} Wipe", "{0} Wipes") if e["wipes"] else "",
+            plural(e["deaths"], "{0} Tod", "{0} Tode") if e["deaths"] else "",
+            tr("zuletzt {0}", datetime.fromtimestamp(e["last"]).strftime(tr("%d.%m.%Y")))) if x), "dim")
+        if e["bosses"]:
+            line("  " + tr("Bosse: {0}", ", ".join(f"{b} ×{n}" if n > 1 else b for b, n in _top(e["bosses"], 12))))
+        by_boss: dict[str, list] = {}
+        for d in e["drops"]:
+            by_boss.setdefault(d.get("boss") or tr("unterwegs"), []).append(d)
+        for boss, drops in by_boss.items():
+            add("  " + boss + ": ", "dim")
+            for i, d in enumerate(drops[-8:]):
+                if i:
+                    add(", ", "dim")
+                add(f"[{d['name']}]", f"q{min(max(_int(d.get('q'), 2), 0), 6)}")
+            add("\n")
+    return P
+
+
+def chart_series(sessions: list[dict]) -> dict:
+    """Werte für die Diagramme (chronologisch, höchstens 40 Sitzungen)."""
+    lst = sorted(sessions, key=lambda s: s["start"])[-40:]
+    labels = [datetime.fromtimestamp(s["start"]).strftime("%d.%m") for s in lst]
+    xp_h = [s["xp"]["total"] * 3600 / s["played"] if s["played"] >= 600 else 0 for s in lst]
+    gold = [session_net_money(s) / 10000 for s in lst]
+    days: dict[str, int] = {}
+    today = datetime.now().date()
+    for i in range(29, -1, -1):
+        days[(today.fromordinal(today.toordinal() - i)).strftime("%Y-%m-%d")] = 0
+    for s in sessions:
+        d = datetime.fromtimestamp(s["start"]).strftime("%Y-%m-%d")
+        if d in days:
+            days[d] += s["played"]
+    levels: dict[str, list[tuple[int, int]]] = {}
+    for s in sorted(sessions, key=lambda s: s["stop"]):
+        if s["level"]["to"]:
+            levels.setdefault(s["name"] or s["char"], []).append((s["stop"], s["level"]["to"]))
+    return {"labels": labels, "xp_h": xp_h, "gold": gold,
+            "day_labels": [datetime.strptime(d, "%Y-%m-%d").strftime("%d.%m") for d in days],
+            "day_hours": [v / 3600 for v in days.values()], "levels": levels}
+
+
+# ----- Discord ---------------------------------------------------------------------- #
+DISCORD_WEBHOOK_RE = re.compile(r"^https://(?:(?:ptb|canary)\.)?discord(?:app)?\.com/api/webhooks/\d+/[\w-]+/?$")
+
+
+def discord_payload(s: dict) -> dict:
+    """Eine Sitzung als Discord-Nachricht (Embed)."""
+    k, x = s["kills"], s["xp"]
+    lv = s["level"]
+    fields = [(tr("Spielzeit"), fmt_dur(s["played"])),
+              (tr("Stufe"), f"{lv['from']} → {lv['to']}" if lv["to"] > lv["from"] > 0 else str(lv["to"] or "–")),
+              (tr("Erfahrung"), fmt_int(x["total"])),
+              (tr("Gold"), fmt_money(session_net_money(s), sign=True)),
+              (tr("Gegner"), fmt_int(k["n"]) + (f" ({tr('{0} Elite', k['elite'] + k['rareelite'])})" if k["elite"] + k["rareelite"] else "")),
+              (tr("Quests"), fmt_int(len(s["quests"]["done"]))),
+              (tr("Tode"), fmt_int(s["deathN"])),
+              (tr("Strecke"), fmt_dist(s["move"]["foot"] + s["move"]["ghost"] + s["move"]["mount"]))]
+    if s["bosses"]:
+        fields.append((tr("Bosse"), ", ".join(dict.fromkeys(b["name"] for b in s["bosses"]))[:1000]))
+    best = max(s["loot"]["notable"], key=lambda e: (e["q"], e["t"]), default=None)
+    if best and best["q"] >= 3:
+        fields.append((tr("Beste Beute"), f"[{best['name']}]"))
+    cls = tr(CLASS_NAMES.get(s["class"], s["class"].title())) if s["class"] else ""
+    return {"username": "Leeroyzan", "embeds": [{
+        "title": f"{s['name'] or s['char']}{' · ' + cls if cls else ''} – {session_title(s)}"[:256],
+        "description": _summary_sentence(s)[:3500],
+        "color": 0xE6BB70,
+        "fields": [{"name": n, "value": v or "–", "inline": True} for n, v in fields][:25],
+        "footer": {"text": f"Leeroyzan {APP_VERSION} · Leeroyzan Link"},
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(s["stop"])),
+    }]}
+
+
+def discord_send(url: str, payload: dict) -> None:
+    if not DISCORD_WEBHOOK_RE.match(url.strip()):
+        raise ValueError(tr("Das ist keine Discord-Webhook-Adresse."))
+    req = urllib.request.Request(url.strip(), data=json.dumps(payload).encode("utf-8"), method="POST",
+                                 headers={"Content-Type": "application/json", "User-Agent": USER_AGENT})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            r.read()
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(tr("Discord hat abgelehnt (HTTP {0}).", e.code)) from None
 
 
 # --------------------------------------------------------------------------- #
@@ -3235,8 +3879,8 @@ class App(BaseTk):
 
     # ----- Aufbau ---------------------------------------------------------- #
     PAGES = [("addons", "Meine Addons"), ("discover", "Entdecken"), ("updates", "Updates"),
-             ("sessions", "Sitzungen"), ("share", "Teilen"), ("sets", "Sets & Backups"),
-             ("settings", "Einstellungen")]
+             ("sessions", "Sitzungen"), ("characters", "Charaktere"), ("diagnose", "Diagnose"),
+             ("share", "Teilen"), ("sets", "Sets & Backups"), ("settings", "Einstellungen")]
     TREE_SHOWN = ("status", "name", "version", "source", "update")
 
     def _build_ui(self):
@@ -3296,6 +3940,19 @@ class App(BaseTk):
         self._sess_pending: dict[str, dict] = {}
         self._sess_importing = False
         self._link_hint_shown = False
+        self.link_state = empty_link_state()
+        self._link_write_job = None
+        self.diag_state_var = tk.StringVar()
+        self._diag_rows: list = []
+        self.chars_total_var = tk.StringVar()
+        self._chars_rows: list = []
+        self.shop_char_var, self.shop_prof_var = tk.StringVar(), tk.StringVar()
+        self.shop_recipe_var, self.shop_filter_var = tk.StringVar(), tk.StringVar()
+        self.shop_qty_var = tk.StringVar(value="1")
+        self.find_var = tk.StringVar()
+        self.sess_view = self.cfg.get("sess_view", "report") if self.cfg.get("sess_view") in ("report", "charts", "analysis") else "report"
+        self.discord_var = tk.StringVar(value=self.cfg.get("discord_webhook", ""))
+        self.discord_auto_var = tk.BooleanVar(value=bool(self.cfg.get("discord_auto")))
         self.sort_col, self.sort_rev = "name", False
         self.open_groups: set[str] = set()
         self.group_members: dict[str, list[str]] = {}
@@ -3355,6 +4012,8 @@ class App(BaseTk):
         self._page_discover()
         self._page_updates()
         self._page_sessions()
+        self._page_characters()
+        self._page_diagnose()
         self._page_share()
         self._page_sets()
         self._page_settings()
@@ -3748,6 +4407,10 @@ class App(BaseTk):
             self.refresh_recv_files()
         elif key == "updates":
             self.refresh_updates_page()
+        elif key == "diagnose":
+            self.refresh_diagnose()
+        elif key == "characters":
+            self.refresh_characters()
         elif key == "sessions":
             self.refresh_sessions_page()
             if not self._sess_importing and self.root_path and self.flavor \
@@ -4266,16 +4929,22 @@ class App(BaseTk):
         ttk.Button(brow, text=tr("Ordner öffnen"), command=self.open_sessions_folder).pack(side="right")
 
         box = self._card_box(body, pady=(0, 0), side="left", fill="both", expand=True, padx=(14, 0))
+        seg = ttk.Frame(box, style="Panel.TFrame")
+        seg.pack(fill="x", pady=(0, 10))
+        self.sess_view_btns = {}
+        for key, label in self.SESS_VIEWS:
+            b = ttk.Button(seg, text=tr(label), width=11, command=lambda k=key: self._sess_select_view(k))
+            b.pack(side="left", padx=(0, 4))
+            self.sess_view_btns[key] = b
+        ttk.Button(seg, text="Discord ↗", command=self.send_session_discord).pack(side="right")
         tf, txt = self._text(box)
         tf.pack(fill="both", expand=True)
-        txt.configure(spacing1=1, spacing3=1, padx=14, pady=10)
-        txt.tag_configure("title", foreground=t["gold"], font=self.fonts["card"], spacing3=2)
-        txt.tag_configure("hl", foreground=t["gold"])
-        txt.tag_configure("ok", foreground=t["ok"])
-        txt.tag_configure("warn", foreground=t["warn"])
-        for i, color in enumerate(QUALITY_COLORS):
-            txt.tag_configure(f"q{i}", foreground=color)
+        self._tag_text(txt)
         self.sess_text = txt
+        self.sess_text_frame = tf
+        self.sess_canvas = tk.Canvas(box, bg=t["panel"], highlightthickness=0)
+        self.sess_canvas.bind("<Configure>", lambda e: self.after_idle(self.draw_session_charts))
+        self.after_idle(lambda: self._sess_select_view(self.sess_view))
 
     def _wrap_link_label(self, width: int | None = None):
         try:
@@ -4364,9 +5033,14 @@ class App(BaseTk):
                          "Sitzung. Im Spiel zeigt /lz sitzung die laufende Sitzung.") + "\n", "dim")]
         else:
             s = self._sess_selected()
-            if s is None:
-                who = self.sess_char_var.get() or tr("Alle Charaktere")
-                period = tr(dict(self.SESSION_PERIODS)[self.sess_period])
+            who = self.sess_char_var.get() or tr("Alle Charaktere")
+            period = tr(dict(self.SESSION_PERIODS)[self.sess_period])
+            if self.sess_view == "charts":
+                self.draw_session_charts()
+                parts = overview_report(self.sessions_shown, f"{who}, {period}")
+            elif self.sess_view == "analysis":
+                parts = analysis_report(self.sessions_shown, f"{who}, {period}")
+            elif s is None:
                 parts = overview_report(self.sessions_shown, f"{who}, {period}")
             else:
                 parts = session_report(s)
@@ -4438,6 +5112,8 @@ class App(BaseTk):
             if flavor != self.flavor:
                 return
             self._sess_sig = sig
+            self.link_state = res.get("state") or empty_link_state()
+            self._link_state_changed()
             changed = res["new"] + res["updated"]
             for s in changed:
                 self._sess_pending[s["id"]] = s
@@ -4494,6 +5170,8 @@ class App(BaseTk):
         self.notify(text, "ok", [(tr("Zusammenfassung ansehen"), lambda sid=last["id"]: self.show_session(sid))],
                     timeout=180000)
         self.set_status(text)
+        if self.cfg.get("discord_auto") and self.cfg.get("discord_webhook") and not last.get("legacy"):
+            self.send_session_discord(last, quiet=True)
 
     # Addon installieren ------------------------------------------------------------ #
     def update_link_state(self) -> bool:
@@ -4559,6 +5237,7 @@ class App(BaseTk):
     def _sessions_flavor_changed(self):
         self._sess_sig = None
         self._sess_pending.clear()
+        self.link_state = empty_link_state()
         outdated = self.update_link_state()
         if outdated and not self._link_hint_shown:
             self._link_hint_shown = True
@@ -4570,6 +5249,760 @@ class App(BaseTk):
         if self.current_page == "sessions":
             self.refresh_sessions_page()
         self.import_sessions()
+
+    # --- Leeroyzan Link: Daten fürs Spiel (Data.lua) ------------------------------------ #
+    def link_news(self) -> list:
+        return self.cfg.setdefault("link_news", {}).setdefault(self.flavor, [])
+
+    def record_link_news(self, results):
+        """Nach Updates den Changelog merken – Leeroyzan Link zeigt ihn beim nächsten Login (neueste 20)."""
+        news = self.link_news()
+        for repo, info, asset, folders in results:
+            nid = f"{repo}@{info.get('tag', '')}"[:80]
+            news[:] = [n for n in news if n.get("id") != nid]
+            news.append({"id": nid, "addon": self.source_name(repo)[:80], "version": str(info.get("tag", ""))[:40],
+                         "lines": notes_lines(info.get("notes", ""))})
+        del news[:-20]
+
+    def build_link_payload(self) -> dict:
+        updates, issues = [], []
+        for sid, src in self.sources().items():
+            new = self.updates.get(sid)
+            if self.is_held(sid):
+                issues.append({"addon": self.source_name(sid),
+                               "text": tr("In Leeroyzan festgehalten – keine Updates, bis du es freigibst.")})
+            if not new or new == src.get("tag"):
+                continue
+            note = tr("festgehalten") if self.is_held(sid) else (
+                tr("Download nur im Browser") if src.get("allow_dl") is False else None)
+            updates.append({"name": self.source_name(sid), "installed": str(src.get("tag", "")),
+                            "available": str(new), "note": note})
+        managed = sorted({f for src in self.sources().values() for f in src.get("folders", [])}, key=str.lower)
+        names = {_norm_name(a.name) for a in self.addons} | {_norm_name(a.title) for a in self.addons}
+        installed = [w["name"] for w in self.link_state["wishlist"] if _norm_name(w["name"]) in names]
+        profiles = [{"name": name, "enable": list(folders)} for name, folders in sorted(self.sets().items())]
+        return {"schema": LINK_SCHEMA, "generated": int(time.time()), "managerVersion": APP_VERSION,
+                "updates": updates, "managed": managed, "installed": installed, "profiles": profiles,
+                "whatsnew": list(self.link_news()), "knownIssues": issues}
+
+    def schedule_link_write(self):
+        if self._link_write_job:
+            try:
+                self.after_cancel(self._link_write_job)
+            except tk.TclError:
+                pass
+        self._link_write_job = self.after(1500, self.write_link_now)
+
+    def write_link_now(self):
+        self._link_write_job = None
+        if not self.root_path or not self.flavor:
+            return
+        try:
+            res = write_link_data(self.root_path, self.flavor, self.build_link_payload())
+        except OSError as e:
+            log.warning("Data.lua für Leeroyzan Link: %s", e)
+            return
+        if res == "written":
+            log.info("Data.lua für Leeroyzan Link geschrieben (%s)", self.flavor)
+
+    def _link_state_changed(self):
+        """Neue Daten aus dem Spiel: Seiten auffrischen, Hinweise zeigen, Data.lua anpassen."""
+        if self.current_page == "diagnose":
+            self.refresh_diagnose()
+        elif self.current_page == "characters":
+            self.refresh_characters()
+        self._hint_reports()
+        self._hint_errors()
+        self.schedule_link_write()
+
+    def _addon_by_name(self, name: str):
+        return next((a for a in self.addons if a.name.lower() == name.lower()), None)
+
+    def _source_of(self, addon_name: str) -> str:
+        return self.folder_source(addon_name)[0] or ""
+
+    def _hint_reports(self):
+        """/lz problem im Spiel: Rückgängig anbieten (einmal pro Meldung)."""
+        seen = self.cfg.setdefault("reports_seen", {}).setdefault(self.flavor, {})
+        for addon, r in self.link_state["reports"].items():
+            if seen.get(addon, 0) >= r["time"]:
+                continue
+            seen[addon] = r["time"]
+            sid = self._source_of(addon)
+            acts = []
+            if sid and self.rollback_info(sid):
+                acts.append((tr("↶ Zurücksetzen"), lambda sid=sid: self.rollback(sid)))
+            acts.append((tr("Diagnose"), lambda: self.show_page("diagnose")))
+            self.notify(tr("Im Spiel gemeldet: {0} (Version {1}) wurde mit /lz problem als fehlerhaft gemeldet und abgeschaltet.",
+                           addon, r["version"] or "?"), "warn", acts, key=f"report:{addon}")
+        save_config(self.cfg)
+
+    def _hint_errors(self):
+        """„Addon X: 14 Fehler seit dem Update“ – nur wenn sich die Vorversion wiederherstellen lässt."""
+        seen = self.cfg.setdefault("error_hints", {}).setdefault(self.flavor, {})
+        versions = {a.name: a.version for a in self.addons}
+        for row in error_rows(self.link_state, versions):
+            sid = self._source_of(row["addon"])
+            if row["current"] < 3 or not sid or not self.rollback_info(sid) or seen.get(row["addon"]) == row["version"]:
+                continue
+            seen[row["addon"]] = row["version"]
+            self.notify(tr("{0}: {1} Lua-Fehler seit dem Update auf {2}. Vorherige Version wiederherstellen?",
+                           row["addon"], row["current"], row["version"] or "?"), "warn",
+                        [(tr("↶ Zurücksetzen"), lambda sid=sid: self.rollback(sid)),
+                         (tr("Details"), lambda: self.show_page("diagnose"))], key=f"errors:{row['addon']}")
+        save_config(self.cfg)
+
+    # --- Diagnose -------------------------------------------------------------------------- #
+    DIAG_VIEWS = [("errors", "Fehler"), ("load", "Ladeprobleme"), ("memory", "Speicher"), ("wish", "Wunschliste")]
+
+    def _page_diagnose(self):
+        page, head = self._page("diagnose", tr("Leeroyzan Link"), tr("Diagnose aus dem Spiel"))
+        right = ttk.Frame(head)
+        right.pack(side="right", anchor="s")
+        ttk.Button(right, text=tr("Jetzt einlesen"), command=lambda: self.import_sessions(manual=True)).pack(side="right")
+        ttk.Label(right, textvariable=self.diag_state_var).pack(side="right", padx=(0, 14))
+        seg = ttk.Frame(page)
+        seg.pack(fill="x", pady=(12, 0))
+        self.diag_btns = {}
+        for key, label in self.DIAG_VIEWS:
+            b = ttk.Button(seg, text=tr(label), width=16, command=lambda k=key: self._diag_select_view(k))
+            b.pack(side="left", padx=(0, 4))
+            self.diag_btns[key] = b
+        body = ttk.Frame(page)
+        body.pack(fill="both", expand=True, pady=(12, 0))
+        left = ttk.Frame(body, width=520)
+        left.pack(side="left", fill="y")
+        left.pack_propagate(False)
+        self.diag_list_host = left
+        self.diag_lists = {}
+        specs = {
+            "errors": ((("addon", tr("Addon")), ("cur", tr("Diese Version")), ("total", tr("Gesamt")), ("last", tr("Zuletzt"))),
+                       (190, 104, 80, 130), ("addon",)),
+            "load": ((("addon", tr("Addon")), ("reason", tr("Grund"))), (200, 300), ("reason",)),
+            "memory": ((("addon", tr("Addon")), ("mb", tr("Speicher")), ("share", tr("Anteil"))), (250, 120, 120), ("addon",)),
+            "wish": ((("name", tr("Vorgemerkt")), ("when", tr("Seit")), ("state", tr("Status"))), (220, 120, 160), ("name",)),
+        }
+        for key, (cols, widths, stretch) in specs.items():
+            frame, tv = self._list(left, cols, widths, stretch=stretch)
+            tv.bind("<<TreeviewSelect>>", lambda e: self._diag_show())
+            self.diag_lists[key] = (frame, tv)
+        box = self._card_box(body, pady=(0, 0), side="left", fill="both", expand=True, padx=(14, 0))
+        btns = ttk.Frame(box, style="Panel.TFrame")
+        btns.pack(fill="x", side="bottom", pady=(10, 0))
+        self.diag_btn_frame = btns
+        tf, self.diag_text = self._text(box)
+        tf.pack(fill="both", expand=True)
+        self._tag_text(self.diag_text)
+        self.diag_view = self.cfg.get("diag_view", "errors")
+
+    def _tag_text(self, txt):
+        t = THEME
+        txt.configure(spacing1=1, spacing3=1, padx=14, pady=10)
+        txt.tag_configure("title", foreground=t["gold"], font=self.fonts["card"], spacing3=2)
+        txt.tag_configure("hl", foreground=t["gold"])
+        txt.tag_configure("ok", foreground=t["ok"])
+        txt.tag_configure("warn", foreground=t["warn"])
+        txt.tag_configure("mono", font=("Consolas", 9), foreground=t["text_dim"])
+        for i, color in enumerate(QUALITY_COLORS):
+            txt.tag_configure(f"q{i}", foreground=color)
+
+    def _diag_select_view(self, key: str):
+        self.diag_view = key
+        self.cfg["diag_view"] = key
+        self.refresh_diagnose()
+
+    def _diag_buttons(self, items):
+        for w in self.diag_btn_frame.winfo_children():
+            w.destroy()
+        for i, (label, cmd, style) in enumerate(items):
+            ttk.Button(self.diag_btn_frame, text=label, command=cmd, style=style).pack(side="left", padx=(0 if i == 0 else 6, 0))
+
+    def refresh_diagnose(self):
+        if getattr(self, "diag_text", None) is None or not self.diag_text.winfo_exists():
+            return
+        st = self.link_state
+        when = datetime.fromtimestamp(st["writtenAt"]).strftime(tr("%d.%m.%Y  %H:%M")) if st["writtenAt"] else ""
+        self.diag_state_var.set(tr("Daten aus dem Spiel vom {0}", when) if when else tr("Noch keine Daten aus dem Spiel"))
+        for key, b in self.diag_btns.items():
+            b.configure(style="Primary.TButton" if key == self.diag_view else "TButton")
+        for key, (frame, tv) in self.diag_lists.items():
+            frame.pack_forget()
+        frame, tv = self.diag_lists[self.diag_view]
+        frame.pack(fill="both", expand=True)
+        tv.delete(*tv.get_children())
+        self._diag_rows = []
+        versions = {a.name: a.version for a in self.addons}
+        hidden = self.cfg.setdefault("diag_hidden", {}).setdefault(self.flavor, {})
+        if self.diag_view == "errors":
+            rows = [r for r in error_rows(st, versions) if hidden.get(r["addon"], -1) < r["total"]]
+            for i, r in enumerate(rows):
+                tags = ["odd"] if i % 2 else []
+                if r["current"]:
+                    tags.append("update")
+                elif not r["installed"]:
+                    tags.append("dim")
+                tv.insert("", "end", iid=f"r{i}", tags=tuple(tags), values=(
+                    r["addon"], fmt_int(r["current"]) if r["installed"] else "–", fmt_int(r["total"]),
+                    datetime.fromtimestamp(r["last"]).strftime(tr("%d.%m.%Y  %H:%M")) if r["last"] else ""))
+            self._diag_rows = rows
+        elif self.diag_view == "load":
+            rows = load_problems(st)
+            for i, r in enumerate(rows):
+                reason = tr(LOAD_REASONS.get(r["reason"], r["reason"] or "unbekannt"))
+                if r["missing"]:
+                    reason += ": " + ", ".join(r["missing"])
+                tv.insert("", "end", iid=f"r{i}", tags=("odd",) if i % 2 else (), values=(r["name"], reason))
+            self._diag_rows = rows
+        elif self.diag_view == "memory":
+            mem = st["memory"]
+            total = mem["total"] or sum(m["kb"] for m in mem["list"]) or 1
+            rows = sorted(mem["list"], key=lambda m: m["kb"], reverse=True)
+            for i, m in enumerate(rows):
+                tv.insert("", "end", iid=f"r{i}", tags=("odd",) if i % 2 else (), values=(
+                    m["name"], f"{m['kb'] / 1024:.1f} MB".replace(".", "," if LANG == "de" else "."), fmt_pct(m["kb"], total)))
+            self._diag_rows = rows
+        else:
+            names = {_norm_name(a.name) for a in self.addons} | {_norm_name(a.title) for a in self.addons}
+            rows = []
+            for w in st["wishlist"]:
+                done = _norm_name(w["name"]) in names
+                rows.append(dict(w, done=done))
+            for i, w in enumerate(rows):
+                tv.insert("", "end", iid=f"r{i}", tags=(("odd",) if i % 2 else ()) + (("dim",) if w["done"] else ()), values=(
+                    w["name"], datetime.fromtimestamp(w["added"]).strftime(tr("%d.%m.%Y")) if w["added"] else "",
+                    tr("installiert") if w["done"] else tr("offen")))
+            self._diag_rows = rows
+        self._diag_show()
+
+    def _diag_selected(self):
+        tv = self.diag_lists[self.diag_view][1]
+        sel = tv.selection()
+        if not sel:
+            return None
+        try:
+            return self._diag_rows[int(sel[0][1:])]
+        except (ValueError, IndexError):
+            return None
+
+    def _diag_show(self):
+        st = self.link_state
+        row = self._diag_selected()
+        P: list[tuple[str, str]] = []
+        add = lambda text, tag="": P.append((text, tag))   # noqa: E731
+        btns = []
+        view = self.diag_view
+        if not st["accounts"]:
+            add(tr("Noch keine Daten aus dem Spiel") + "\n", "title")
+            add(tr("Leeroyzan Link schreibt Fehler, Ladestatus, Speicherverbrauch, Charaktere und deine Wunschliste "
+                   "beim Ausloggen und bei /reload. Installiere das Addon auf der Seite „Sitzungen“ und logge dich "
+                   "einmal ein und wieder aus.") + "\n", "")
+        elif view == "errors":
+            if row is None:
+                add(tr("Lua-Fehler aus dem Spiel") + "\n", "title")
+                n_cur = sum(1 for r in self._diag_rows if r["current"])
+                add(tr("Leeroyzan Link ordnet jeden Lua-Fehler dem verursachenden Addon zu und zählt ihn pro Version. "
+                       "Gelb markiert: Fehler in der Version, die jetzt installiert ist.") + "\n\n", "dim")
+                if not self._diag_rows:
+                    add(tr("Keine Fehler – alles sauber.") + "\n", "ok")
+                elif n_cur:
+                    add(plural(n_cur, "{0} Addon hat Fehler in der aktuellen Version.",
+                               "{0} Addons haben Fehler in der aktuellen Version.") + "\n", "warn")
+                blocked = sorted(st["blocked"], key=lambda b: b["count"], reverse=True)[:8]
+                if blocked:
+                    add("\n" + tr("Blockierte Aktionen") + "\n", "head")
+                    add(tr("„Aktion wurde durch ein Addon blockiert“ – diese Addons haben geschützte Funktionen aufgerufen:") + "\n", "dim")
+                    for b in blocked:
+                        add(f"{b['addon']}: {b['func']} ×{b['count']}" + (tr(" (verboten)") if b["forbidden"] else "") + "\n")
+            else:
+                add(row["addon"] + "\n", "title")
+                if row["installed"]:
+                    add(tr("Installiert: {0}", row["version"] or "?") + "\n", "dim")
+                else:
+                    add(tr("Nicht (mehr) installiert.") + "\n", "dim")
+                if row["addon"] in ("?", "Blizzard"):
+                    add(tr("Fehler, die keinem Addon zugeordnet werden konnten (oder in Blizzards eigener Oberfläche).") + "\n", "dim")
+                add("\n" + tr("Nach Version") + "\n", "head")
+                for v, n in sorted(row["byVersion"].items(), key=lambda kv: kv[1], reverse=True):
+                    cur = row["installed"] and clean_wow_text(v) == row["version"]
+                    add(f"{v}: {fmt_int(n)}" + (tr("  ← installiert") if cur else "") + "\n", "warn" if cur else "")
+                add("\n" + tr("Meldungen") + "\n", "head")
+                for e in row["errors"][:8]:
+                    add(f"×{e['count']}  ", "hl")
+                    add(e["msg"] + "\n")
+                    add("    " + tr("zuerst {0}, zuletzt {1}", datetime.fromtimestamp(e["first"]).strftime(tr("%d.%m.%Y  %H:%M")),
+                                    datetime.fromtimestamp(e["last"]).strftime(tr("%d.%m.%Y  %H:%M"))) + "\n", "dim")
+                if row["errors"] and row["errors"][0]["stack"]:
+                    add("\n" + tr("Aufrufkette (häufigster Fehler)") + "\n", "head")
+                    add(row["errors"][0]["stack"][:600] + "\n", "mono")
+                sid = self._source_of(row["addon"])
+                rb = self.rollback_info(sid) if sid else None
+                addon = self._addon_by_name(row["addon"])
+                if rb:
+                    btns.append((tr("↶ Zurück auf {0}", rb["source"].get("tag") or "?"), lambda sid=sid: self.rollback(sid), "Primary.TButton"))
+                if sid:
+                    btns.append((tr("Freigeben") if self.is_held(sid) else tr("Festhalten"), lambda sid=sid: (self.toggle_hold(sid=sid), self.refresh_diagnose()), "TButton"))
+                if addon is not None:
+                    btns.append((tr("Deaktivieren") if addon.enabled else tr("Aktivieren"), lambda a=addon: (self.toggle_selected([a]), self.refresh_diagnose()), "TButton"))
+                btns.append((tr("Ausblenden"), lambda r=row: self._diag_hide(r), "TButton"))
+        elif view == "load":
+            if row is None:
+                add(tr("Ladeprobleme") + "\n", "title")
+                add(tr("Addons, die aktiviert sind, die WoW aber nicht geladen hat – mit dem Grund aus dem Spiel.") + "\n\n", "dim")
+                if not self._diag_rows:
+                    add(tr("Alle aktivierten Addons wurden geladen.") + "\n", "ok")
+            else:
+                add(row["name"] + "\n", "title")
+                add(tr(LOAD_REASONS.get(row["reason"], row["reason"] or "unbekannt")) + "\n\n", "warn")
+                if row["reason"] == "INTERFACE_VERSION":
+                    add(tr("Das Addon ist für eine andere Spielversion gebaut. Suche ein Update oder setze im Addon-Menü "
+                           "des Spiels den Haken bei „Veraltete AddOns laden“.") + "\n", "")
+                for dep in row["missing"]:
+                    other = self._addon_by_name(dep)
+                    if other is not None and not other.enabled:
+                        add(tr("{0} ist installiert, aber deaktiviert.", dep) + "\n")
+                        btns.append((tr("{0} aktivieren", dep), lambda a=other: (self.toggle_selected([a]), self.refresh_diagnose()), "Primary.TButton"))
+                    elif other is None:
+                        add(tr("{0} fehlt.", dep) + "\n")
+                        btns.append((tr("{0} suchen", dep), lambda d=dep: self.search_addon(d), "Primary.TButton"))
+                addon = self._addon_by_name(row["name"])
+                if addon is not None:
+                    btns.append((tr("Ordner öffnen"), lambda a=addon: self.open_folder([a]), "TButton"))
+        elif view == "memory":
+            mem = st["memory"]
+            add(tr("Speicherverbrauch") + "\n", "title")
+            if mem["t"]:
+                add(tr("Gemessen am {0} · gesamt {1}", datetime.fromtimestamp(mem["t"]).strftime(tr("%d.%m.%Y  %H:%M")),
+                       f"{mem['total'] / 1024:.0f} MB") + "\n\n", "dim")
+            add(tr("Viel Speicher ist kein Fehler – große Datenbanken (Questie, AtlasLoot) brauchen ihn. Spürbar wird es "
+                   "erst bei Rucklern beim Laden oder auf schwachen Rechnern.") + "\n", "dim")
+            if row is not None:
+                add("\n" + row["name"] + "\n", "head")
+                add(f"{row['kb'] / 1024:.1f} MB · {fmt_pct(row['kb'], mem['total'] or 1)}\n")
+                if row["cpu"]:
+                    add(tr("Rechenzeit zuletzt: {0} ms pro Bild", f"{row['cpu']:.2f}") + "\n", "dim")
+                addon = self._addon_by_name(row["name"])
+                if addon is not None:
+                    btns.append((tr("Deaktivieren") if addon.enabled else tr("Aktivieren"), lambda a=addon: (self.toggle_selected([a]), self.refresh_diagnose()), "TButton"))
+        else:
+            add(tr("Wunschliste aus dem Spiel") + "\n", "title")
+            add(tr("Im Spiel mit /lz merken <Name> vorgemerkt. Installierte Einträge meldet Leeroyzan ans Addon zurück, "
+                   "das sie dann von der Liste nimmt.") + "\n\n", "dim")
+            if not self._diag_rows:
+                add(tr("Nichts vorgemerkt.") + "\n", "dim")
+            if row is not None:
+                add(row["name"] + "\n", "head")
+                if row["note"]:
+                    add(row["note"] + "\n")
+                add((tr("Ist installiert.") if row["done"] else tr("Noch nicht installiert.")) + "\n", "ok" if row["done"] else "")
+                if not row["done"]:
+                    btns.append((tr("Auf CurseForge suchen"), lambda n=row["name"]: self.search_addon(n), "Primary.TButton"))
+        self._set_text(self.diag_text, parts=P)
+        self._diag_buttons(btns)
+
+    def _diag_hide(self, row):
+        self.cfg.setdefault("diag_hidden", {}).setdefault(self.flavor, {})[row["addon"]] = row["total"]
+        save_config(self.cfg)
+        self.refresh_diagnose()
+        self.set_status(tr("{0} ausgeblendet – erscheint wieder, sobald neue Fehler dazukommen.", row["addon"]))
+
+    def search_addon(self, name: str):
+        """Addon-Namen auf der Seite „Entdecken“ suchen (CurseForge) – ohne API-Key im Browser."""
+        if self.cf_key():
+            self.cf_q.set(name)
+            self.show_page("discover")
+            self.cf_search()
+        else:
+            self.open_link("https://www.curseforge.com/wow/search?search=" + urllib.parse.quote(name))
+
+    # --- Charaktere -------------------------------------------------------------------------- #
+    def _page_characters(self):
+        page, head = self._page("characters", tr("Leeroyzan Link"), tr("Charaktere"))
+        right = ttk.Frame(head)
+        right.pack(side="right", anchor="s")
+        ttk.Label(right, textvariable=self.chars_total_var, style="Body.TLabel").pack(side="right")
+        top = ttk.Frame(page)
+        top.pack(fill="both", expand=True, pady=(12, 0))
+        left = ttk.Frame(top, width=520)
+        left.pack(side="left", fill="y")
+        left.pack_propagate(False)
+        frame, self.chars_tree = self._list(left, (("name", tr("Charakter")), ("level", tr("Stufe")), ("cls", tr("Klasse")),
+                                                    ("gold", tr("Gold")), ("seen", tr("Zuletzt"))),
+                                            (128, 66, 100, 108, 104), stretch=("name",))
+        frame.pack(fill="both", expand=True)
+        self.chars_tree.bind("<<TreeviewSelect>>", lambda e: self._chars_show())
+        box = self._card_box(top, pady=(0, 0), side="left", fill="both", expand=True, padx=(14, 0))
+        tf, self.chars_text = self._text(box, height=8)
+        tf.pack(fill="both", expand=True)
+        self._tag_text(self.chars_text)
+
+        low = ttk.Frame(page)
+        low.pack(fill="both", expand=True, pady=(12, 0))
+        low.columnconfigure(0, weight=3, uniform="low")
+        low.columnconfigure(1, weight=2, uniform="low")
+        low.rowconfigure(0, weight=1)
+        lcol, rcol = ttk.Frame(low), ttk.Frame(low)
+        lcol.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        rcol.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+        sbox = self._card_box(lcol, pady=(0, 0), fill="both", expand=True, title=tr("Einkaufsliste"))
+        r1 = ttk.Frame(sbox, style="Panel.TFrame")
+        r1.pack(fill="x")
+        self.shop_char_cb = ttk.Combobox(r1, textvariable=self.shop_char_var, state="readonly", width=14)
+        self.shop_char_cb.pack(side="left")
+        self.shop_char_cb.bind("<<ComboboxSelected>>", lambda e: self._shop_fill(level=1))
+        self.shop_prof_cb = ttk.Combobox(r1, textvariable=self.shop_prof_var, state="readonly", width=14)
+        self.shop_prof_cb.pack(side="left", padx=(6, 0))
+        self.shop_prof_cb.bind("<<ComboboxSelected>>", lambda e: self._shop_fill(level=2))
+        sp = ttk.Spinbox(r1, from_=1, to=999, width=5, textvariable=self.shop_qty_var, command=self.shop_calc)
+        sp.pack(side="right")
+        sp.bind("<Return>", lambda e: self.shop_calc())
+        ttk.Label(r1, text=tr("Menge"), style="Panel.TLabel").pack(side="right", padx=(8, 6))
+        r2 = ttk.Frame(sbox, style="Panel.TFrame")
+        r2.pack(fill="x", pady=(6, 0))
+        fe = ttk.Entry(r2, textvariable=self.shop_filter_var, width=14)
+        fe.pack(side="left")
+        Placeholder(fe, self.shop_filter_var, tr("Filter"))
+        self.shop_filter_var.trace_add("write", lambda *a: self._shop_fill(level=2, keep=True))
+        self.shop_recipe_cb = ttk.Combobox(r2, textvariable=self.shop_recipe_var, state="readonly", width=20)
+        self.shop_recipe_cb.pack(side="left", fill="x", expand=True, padx=(6, 0))
+        self.shop_recipe_cb.bind("<<ComboboxSelected>>", lambda e: self.shop_calc())
+        tf2, self.shop_text = self._text(sbox, height=7)
+        tf2.pack(fill="both", expand=True, pady=(8, 0))
+        self._tag_text(self.shop_text)
+
+        fbox = self._card_box(rcol, pady=(0, 0), fill="both", expand=True, title=tr("Wer hat was?"))
+        fr = ttk.Frame(fbox, style="Panel.TFrame")
+        fr.pack(fill="x")
+        fe2 = ttk.Entry(fr, textvariable=self.find_var)
+        fe2.pack(side="left", fill="x", expand=True)
+        Placeholder(fe2, self.find_var, tr("Item-Name oder ID, z. B. Kupfererz"))
+        fe2.bind("<Return>", lambda e: self.find_item())
+        ttk.Button(fr, text=tr("Suchen"), style="Primary.TButton", command=self.find_item).pack(side="left", padx=(8, 0))
+        tf3, self.find_text = self._text(fbox, height=7)
+        tf3.pack(fill="both", expand=True, pady=(8, 0))
+        self._tag_text(self.find_text)
+
+    def _chars_sorted(self) -> list[dict]:
+        return sorted(self.link_state["chars"].values(), key=lambda c: (-c["lastSeen"], c["name"].lower()))
+
+    def refresh_characters(self):
+        if getattr(self, "chars_tree", None) is None or not self.chars_tree.winfo_exists():
+            return
+        chars = self._chars_sorted()
+        total = sum(c["money"] for c in chars)
+        self.chars_total_var.set(tr("{0} · zusammen {1}", plural(len(chars), "{0} Charakter", "{0} Charaktere"),
+                                    fmt_money(total)) if chars else "")
+        tv = self.chars_tree
+        keep = tv.selection()[0] if tv.selection() else ""
+        tv.delete(*tv.get_children())
+        self._chars_rows = chars
+        for i, c in enumerate(chars):
+            cls = tr(CLASS_NAMES.get(c["class"], c["class"].title())) if c["class"] else ""
+            tv.insert("", "end", iid=f"c{i}", tags=("odd",) if i % 2 else (), values=(
+                c["name"], c["level"] or "", cls, fmt_money(c["money"]),
+                datetime.fromtimestamp(c["lastSeen"]).strftime(tr("%d.%m.%Y")) if c["lastSeen"] else ""))
+        if chars:
+            tv.selection_set(keep if keep and tv.exists(keep) else "c0")
+        self._chars_show()
+        self._shop_fill(level=0, keep=True)
+
+    def _chars_show(self):
+        P: list[tuple[str, str]] = []
+        add = lambda text, tag="": P.append((text, tag))   # noqa: E731
+        sel = self.chars_tree.selection()
+        c = None
+        if sel:
+            try:
+                c = self._chars_rows[int(sel[0][1:])]
+            except (ValueError, IndexError):
+                c = None
+        if c is None:
+            add(tr("Noch keine Charaktere") + "\n", "title")
+            add(tr("Leeroyzan Link speichert Klasse, Stufe, Gold, Berufe sowie Taschen- und Bankinhalt jedes Charakters, "
+                   "mit dem du dich einloggst (Bank: sobald du sie einmal öffnest).") + "\n", "")
+        else:
+            cls = tr(CLASS_NAMES.get(c["class"], c["class"].title())) if c["class"] else ""
+            add(c["name"] + "\n", "title")
+            add(" · ".join(x for x in (cls, tr("Stufe {0}", c["level"]) if c["level"] else "", c["realm"],
+                                       c["guild"] and f"<{c['guild']}>") if x) + "\n", "dim")
+            add(tr("Gold: {0}", fmt_money(c["money"])) + "\n")
+            mine = [s for s in self.sessions_all if s["char"] == c["key"]] or [
+                s for s in load_sessions(self.flavor) if s["char"] == c["key"]]
+            if mine:
+                add(tr("{0} in {1} · zuletzt {2}", fmt_dur(sum(s["played"] for s in mine)),
+                       plural(len(mine), "{0} Sitzung", "{0} Sitzungen"), fmt_day(max(s["start"] for s in mine))) + "\n", "dim")
+            profs = [sk for sk in c["skills"] if skill_group_by_name(sk["name"]) == "prof"] or c["skills"][:6]
+            if c["skills"]:
+                add("\n" + tr("Berufe und Fertigkeiten") + "\n", "head")
+                for sk in c["skills"]:
+                    book = c["recipes"].get(sk["name"])
+                    extra = tr("  · {0} Rezepte gespeichert", len(book["list"])) if book else ""
+                    add(f"{sk['name']} {sk['rank']}/{sk['max']}" + extra + "\n", "" if sk in profs else "dim")
+            for prof, book in c["recipes"].items():
+                if not any(sk["name"] == prof for sk in c["skills"]):
+                    add(f"{prof} {book['rank']}/{book['max']}" + tr("  · {0} Rezepte gespeichert", len(book["list"])) + "\n")
+            items = char_items(c)
+            if items:
+                add("\n" + tr("Taschen und Bank") + "\n", "head")
+                if not c["bankSeen"]:
+                    add(tr("Bank noch nicht gelesen – öffne sie einmal im Spiel.") + "\n", "dim")
+                top = sorted(items.items(), key=lambda kv: kv[1], reverse=True)[:30]
+                for i, (k, n) in enumerate(top):
+                    if i:
+                        add(", ", "dim")
+                    add(item_name(self.link_state, k), f"q{min(max(item_quality(self.link_state, k), 0), 6)}")
+                    add(f" ×{fmt_int(n)}", "dim")
+                add("\n")
+        self._set_text(self.chars_text, parts=P)
+
+    def _shop_fill(self, level: int = 0, keep: bool = False):
+        """Auswahl der Einkaufsliste: Charakter -> Beruf -> Rezept (mit Filter)."""
+        if getattr(self, "shop_char_cb", None) is None or not self.shop_char_cb.winfo_exists():
+            return
+        chars = {c["name"] if sum(1 for o in self.link_state["chars"].values() if o["name"] == c["name"]) == 1
+                 else f"{c['name']} ({c['realm']})": c for c in self.link_state["chars"].values() if c["recipes"]}
+        self._shop_chars = chars
+        if level <= 0:
+            self.shop_char_cb["values"] = sorted(chars, key=str.lower)
+            if self.shop_char_var.get() not in chars:
+                self.shop_char_var.set(next(iter(sorted(chars, key=str.lower)), ""))
+        c = chars.get(self.shop_char_var.get())
+        profs = sorted(c["recipes"], key=str.lower) if c else []
+        if level <= 1:
+            self.shop_prof_cb["values"] = profs
+            if self.shop_prof_var.get() not in profs:
+                self.shop_prof_var.set(profs[0] if profs else "")
+        book = c["recipes"].get(self.shop_prof_var.get()) if c else None
+        flt = self.shop_filter_var.get().strip().lower()
+        if flt == tr("Filter").lower():
+            flt = ""
+        names = sorted((n for n in (book["list"] if book else {}) if flt in n.lower()), key=str.lower)
+        self.shop_recipe_cb["values"] = names
+        if self.shop_recipe_var.get() not in names:
+            self.shop_recipe_var.set(names[0] if names else "")
+        self.shop_calc()
+
+    def shop_calc(self):
+        P: list[tuple[str, str]] = []
+        add = lambda text, tag="": P.append((text, tag))   # noqa: E731
+        c = getattr(self, "_shop_chars", {}).get(self.shop_char_var.get())
+        prof, recipe = self.shop_prof_var.get(), self.shop_recipe_var.get()
+        try:
+            qty = max(1, min(999, int(self.shop_qty_var.get())))
+        except (ValueError, tk.TclError):
+            qty = 1
+        if not c or not recipe or recipe not in c["recipes"].get(prof, {}).get("list", {}):
+            add(tr("Öffne im Spiel einmal dein Berufsfenster – dann merkt sich Leeroyzan Link die Rezepte, und hier "
+                   "entsteht die Einkaufsliste über alle Charaktere.") + "\n", "dim")
+        else:
+            res = shopping_list(self.link_state, c["key"], prof, recipe, qty)
+            add(tr("{0} × {1}", qty, res["product"]), "hl")
+            add(("  " + tr("({0} Herstellungen)", res["crafts"]) if res["made"] > 1 or res["crafts"] != qty else "") + "\n", "dim")
+            for r in res["rows"]:
+                add(f"{r['need']}× ", "")
+                add(r["name"], f"q{min(max(r['q'], 0), 6)}")
+                if r["have"] is None:
+                    add("  " + tr("(Bestand unbekannt)") + "\n", "dim")
+                    continue
+                if r["missing"] == 0 and r["have"] >= r["need"]:
+                    add("  ✓ " + tr("hast du ({0})", r["have"]) + "\n", "ok")
+                    continue
+                parts = [tr("hast {0}", r["have"])]
+                if r["others"]:
+                    parts.append(tr("bei {0}", ", ".join(f"{o['char']} {o['n']}" for o in r["others"][:4])))
+                add("  " + " · ".join(parts), "dim")
+                if r["missing"]:
+                    add("  " + tr("fehlt: {0}", r["missing"]) + "\n", "warn")
+                else:
+                    add("  " + tr("→ {0} herüberschicken", r["transfer"]) + "\n", "ok")
+        self._set_text(self.shop_text, parts=P)
+
+    def find_item(self):
+        text = self.find_var.get().strip()
+        if text == tr("Item-Name oder ID, z. B. Kupfererz"):
+            text = ""
+        P: list[tuple[str, str]] = []
+        add = lambda t, tag="": P.append((t, tag))   # noqa: E731
+        res = find_items(self.link_state, text) if text else []
+        if not text:
+            add(tr("Durchsucht Taschen und Bank aller Charaktere.") + "\n", "dim")
+        elif not res:
+            add(tr("Nichts gefunden.") + "\n", "dim")
+        groups: dict[str, list] = {}
+        for r in res:
+            groups.setdefault(r["id"], []).append(r)
+        for k, rows in groups.items():
+            add(rows[0]["name"], f"q{min(max(rows[0]['q'], 0), 6)}")
+            add(f"  ×{fmt_int(sum(r['n'] for r in rows))}\n", "dim")
+            add("    " + ", ".join(f"{r['char']} {r['n']} ({tr('Bank') if r['where'] == 'bank' else tr('Taschen')})"
+                                   for r in rows) + "\n")
+        self._set_text(self.find_text, parts=P)
+
+    # --- Sitzungen: Diagramme, Auswertung, Discord ---------------------------------------------- #
+    SESS_VIEWS = [("report", "Bericht"), ("charts", "Diagramme"), ("analysis", "Auswertung")]
+
+    def _sess_select_view(self, key: str):
+        self.sess_view = key
+        self.cfg["sess_view"] = key
+        for k, b in self.sess_view_btns.items():
+            b.configure(style="Primary.TButton" if k == key else "TButton")
+        if key == "charts":
+            self.sess_text_frame.pack_forget()
+            self.sess_canvas.pack(fill="both", expand=True)
+            self.after_idle(self.draw_session_charts)
+        else:
+            self.sess_canvas.pack_forget()
+            self.sess_text_frame.pack(fill="both", expand=True)
+            self._sess_show()
+
+    def draw_session_charts(self):
+        cv = getattr(self, "sess_canvas", None)
+        if cv is None or not cv.winfo_exists() or not cv.winfo_ismapped():
+            return
+        t = THEME
+        cv.delete("all")
+        w, h = max(cv.winfo_width(), 300), max(cv.winfo_height(), 240)
+        data = chart_series(self.sessions_shown)
+        if not self.sessions_shown:
+            cv.create_text(w // 2, h // 2, text=tr("Noch keine Sitzungen."), fill=t["text_dim"], font=self.fonts["base"])
+            return
+        pad = 10
+        cw, ch = (w - 3 * pad) // 2, (h - 3 * pad) // 2
+        boxes = [(pad, pad), (2 * pad + cw, pad), (pad, 2 * pad + ch), (2 * pad + cw, 2 * pad + ch)]
+        self._bar_chart(cv, *boxes[0], cw, ch, tr("Erfahrung pro Stunde"), data["xp_h"], data["labels"],
+                        lambda v: fmt_int(v))
+        self._bar_chart(cv, *boxes[1], cw, ch, tr("Gold pro Sitzung"), data["gold"], data["labels"],
+                        lambda v: fmt_money(v * 10000, sign=True))
+        self._line_chart(cv, *boxes[2], cw, ch, tr("Stufe"), data["levels"])
+        self._bar_chart(cv, *boxes[3], cw, ch, tr("Spielzeit pro Tag"), data["day_hours"], data["day_labels"],
+                        lambda v: fmt_dur(v * 3600))
+
+    def _chart_frame(self, cv, x, y, w, h, title, axis_labels=()):
+        t = THEME
+        cv.create_rectangle(x, y, x + w, y + h, outline=t["border_soft"], fill=t["row_a"])
+        cv.create_text(x + 12, y + 14, text=title.upper(), anchor="w", fill=t["gold"], font=self.fonts["label"])
+        f = tkfont.Font(font=self.fonts["small"])
+        left = max([f.measure(a) for a in axis_labels] + [16]) + 18
+        return x + left, y + 34, x + w - 14, y + h - 26     # Zeichenfläche
+
+    def _x_labels(self, cv, x0, x1, y1, labels, slot):
+        f = tkfont.Font(font=self.fonts["small"])
+        widest = max((f.measure(l) for l in labels), default=30) + 10
+        step = max(1, -(-len(labels) * widest // max(1, int(x1 - x0))))
+        for i in range(0, len(labels), step):
+            cv.create_text(x0 + slot * i + slot / 2, y1 + 12, text=labels[i], fill=THEME["text_faint"], font=self.fonts["small"])
+
+    def _bar_chart(self, cv, x, y, w, h, title, values, labels, fmt):
+        t = THEME
+        hi0, lo0 = max(max(values, default=0), 0), min(min(values, default=0), 0)
+        x0, y0, x1, y1 = self._chart_frame(cv, x, y, w, h, title, (fmt(hi0), fmt(lo0)) if lo0 < 0 else (fmt(hi0),))
+        if not values or not any(values):
+            cv.create_text((x0 + x1) // 2, (y0 + y1) // 2, text=tr("keine Daten"), fill=t["text_faint"], font=self.fonts["small"])
+            return
+        hi, lo = max(max(values), 0), min(min(values), 0)
+        span = (hi - lo) or 1
+        zero = y1 - (0 - lo) / span * (y1 - y0)
+        n = len(values)
+        slot = (x1 - x0) / n
+        bw = max(2, min(26, slot * 0.7))
+        cv.create_line(x0, zero, x1, zero, fill=t["line"])
+        for v_lab, v in ((hi, hi), (lo, lo)) if lo < 0 else ((hi, hi),):
+            yy = y1 - (v - lo) / span * (y1 - y0)
+            cv.create_text(x0 - 6, yy, text=fmt(v_lab), anchor="e", fill=t["text_faint"], font=self.fonts["small"])
+        for i, v in enumerate(values):
+            cx = x0 + slot * i + slot / 2
+            top = y1 - (v - lo) / span * (y1 - y0)
+            color = t["warn"] if v < 0 else t["gold_deep"]
+            cv.create_rectangle(cx - bw / 2, min(top, zero), cx + bw / 2, max(top, zero), fill=color, outline="")
+        self._x_labels(cv, x0, x1, y1, labels, slot)
+        avg = sum(values) / n
+        cv.create_text(x + w - 12, y + 14, text=tr("Ø {0}", fmt(avg)), anchor="e", fill=t["text_dim"], font=self.fonts["small"])
+
+    def _line_chart(self, cv, x, y, w, h, title, series: dict):
+        t = THEME
+        x0, y0, x1, y1 = self._chart_frame(cv, x, y, w, h, title, ("88",))
+        pts = [p for s in series.values() for p in s]
+        if not pts:
+            cv.create_text((x0 + x1) // 2, (y0 + y1) // 2, text=tr("keine Daten"), fill=t["text_faint"], font=self.fonts["small"])
+            return
+        tmin, tmax = min(p[0] for p in pts), max(p[0] for p in pts)
+        lmin, lmax = min(p[1] for p in pts), max(p[1] for p in pts)
+        if lmax == lmin:
+            lmin, lmax = lmin - 1, lmax + 1
+        tspan = (tmax - tmin) or 1
+        colors = [t["gold"], t["ok"], "#6fb7ff", "#d98cff", t["warn"], "#9fe0d0"]
+        for v in (lmin, lmax):
+            yy = y1 - (v - lmin) / (lmax - lmin) * (y1 - y0)
+            cv.create_text(x0 - 6, yy, text=str(v), anchor="e", fill=t["text_faint"], font=self.fonts["small"])
+            cv.create_line(x0, yy, x1, yy, fill=t["line"], dash=(2, 3))
+        for i, (name, s) in enumerate(series.items()):
+            color = colors[i % len(colors)]
+            coords = []
+            for ts, lvl in s:
+                coords += [x0 + (ts - tmin) / tspan * (x1 - x0), y1 - (lvl - lmin) / (lmax - lmin) * (y1 - y0)]
+            if len(coords) >= 4:
+                cv.create_line(*coords, fill=color, width=2)
+            for j in range(0, len(coords), 2):
+                cv.create_oval(coords[j] - 2, coords[j + 1] - 2, coords[j] + 2, coords[j + 1] + 2, fill=color, outline="")
+            cv.create_text(x0 + 4 + (i % 3) * 110, y1 + 12 + (i // 3) * 0, text=name, anchor="w", fill=color, font=self.fonts["small"])
+        cv.create_text(x1, y1 + 12, text=datetime.fromtimestamp(tmax).strftime("%d.%m"), anchor="e",
+                       fill=t["text_faint"], font=self.fonts["small"])
+
+    def send_session_discord(self, s: dict | None = None, quiet: bool = False):
+        url = (self.cfg.get("discord_webhook") or "").strip()
+        s = s or self._sess_selected()
+        if s is None:
+            if not quiet:
+                self.set_status(tr("Bitte eine einzelne Sitzung auswählen."))
+            return
+        if not url:
+            if not quiet:
+                self.notify(tr("Trage zuerst eine Discord-Webhook-Adresse in den Einstellungen ein."), "info",
+                            [(tr("Einstellungen"), lambda: self.show_page("settings"))])
+            return
+        payload = discord_payload(s)
+
+        def done(res, err):
+            if err:
+                log.warning("Discord: %s", err)
+                if not quiet:
+                    self.error(tr("Discord: {0}", err))
+                else:
+                    self.set_status(tr("Discord: {0}", err))
+                return
+            log.info("Sitzung an Discord gesendet: %s", s["id"])
+            self.set_status(tr("Sitzung an Discord gesendet."))
+
+        self.run_quiet(lambda: discord_send(url, payload), done)
+
+    def _w_discord(self, parent):
+        box = ttk.Frame(parent, style="Panel.TFrame")
+        ttk.Label(box, text=tr("Webhook-Adresse eines Discord-Kanals (Kanal bearbeiten → Integrationen → Webhooks)."),
+                  style="Panel.TLabel", wraplength=280, justify="left").pack(anchor="w")
+        e = ttk.Entry(box, textvariable=self.discord_var)
+        e.pack(fill="x", pady=(6, 0))
+        e.bind("<FocusOut>", lambda ev: self._save_discord())
+        e.bind("<Return>", lambda ev: self._save_discord())
+        ttk.Checkbutton(box, text=tr("Nach jeder Sitzung automatisch senden"), variable=self.discord_auto_var,
+                        style="Wrap.TCheckbutton", command=self._save_discord).pack(anchor="w", pady=(6, 0))
+        ttk.Button(box, text=tr("Letzte Sitzung senden (Test)"), command=self._discord_test).pack(anchor="w", pady=(6, 0))
+        return box
+
+    def _save_discord(self):
+        url = self.discord_var.get().strip()
+        if url and not DISCORD_WEBHOOK_RE.match(url):
+            self.set_status(tr("Das ist keine Discord-Webhook-Adresse."))
+            return
+        self.cfg["discord_webhook"] = url
+        self.cfg["discord_auto"] = bool(self.discord_auto_var.get())
+        save_config(self.cfg)
+
+    def _discord_test(self):
+        self._save_discord()
+        latest = load_sessions(self.flavor)[:1] if self.flavor else []
+        if not latest:
+            self.info(tr("Noch keine Sitzung zum Senden."))
+            return
+        self.send_session_discord(latest[0])
 
     # --- Einstellungen ---------------------------------------------------------------- #
     def _page_settings(self):
@@ -4611,6 +6044,8 @@ class App(BaseTk):
         else:
             where = tr("Einstellungen, Logs und Backups liegen in {0}.", config_dir())
         ttk.Label(gbox, text=where, style="Panel.TLabel", wraplength=360, justify="left").pack(anchor="w", pady=(10, 0))
+        dbox = self._card_box(rf, pady=(12, 0), title="Discord")
+        self._w_discord(dbox).pack(fill="x")
         hbox = self._card_box(rf, pady=(12, 0), title=tr("Hilfe"))
         for text, cmd in ((tr("Log öffnen"), self.open_log), (tr("Datenordner öffnen"), lambda: open_in_explorer(config_dir())),
                           (tr("Addon-Ordner öffnen"), lambda: self.open_folder([])), (tr("Neu einlesen"), self.refresh)):
@@ -5309,6 +6744,7 @@ class App(BaseTk):
                 del self.sources()[sid]
         save_config(self.cfg)
         self.render()
+        self.schedule_link_write()
         if not self.busy:
             self.set_status(tr("{0} Addons in {1} gefunden.", len(self.addons), self.flavor or '–'))
 
@@ -6175,6 +7611,7 @@ class App(BaseTk):
     # ----- Sets & Backups -------------------------------------------------------- #
     def reload_sets(self, select: str = ""):
         self.refresh_sets_overview(select)
+        self.schedule_link_write()
 
     def refresh_sets_overview(self, select: str = ""):
         tv = getattr(self, "sets_tree", None)
@@ -6515,6 +7952,7 @@ class App(BaseTk):
                 if r.startswith(CF_PREFIX) and info.get("best") and self.has_update(r):
                     self.watch_download(r)
             n = sum(1 for r in res if self.has_update(r))
+            self.schedule_link_write()
             msg = tr("{0} Update(s) verfügbar.", n) if n else tr("Alle Addons sind aktuell.")
             if errors:
                 msg += tr("  ({0} Fehler)", len(errors))
@@ -6569,6 +8007,11 @@ class App(BaseTk):
                             log.warning("Vorversion von %s nicht gesichert: %s", r, e)
                     if r.startswith(CF_PREFIX):
                         folders = cf_install_asset(asset, info, root, flavor, cf_key)
+                        if not info.get("notes") and asset.get("file_id"):
+                            try:          # Changelog für Leeroyzan Link (Anzeige im Spiel)
+                                info["notes"] = cf_changelog(asset.get("mod_id") or info.get("mod_id"), asset["file_id"], cf_key)
+                            except Exception:  # noqa – nur ein Extra
+                                pass
                     else:
                         folders = github_install_asset(asset, root, flavor, token)
                     ok.append((r, info, asset, folders))
@@ -6584,6 +8027,7 @@ class App(BaseTk):
             for repo, info, asset, folders in results:
                 self.remember_source(repo, info, asset, folders)
                 log.info("Aktualisiert: %s -> %s (%s)", repo, info["tag"], asset["name"])
+            self.record_link_news(results)
             save_config(self.cfg)
             self.refresh()
             msg = tr("{0} Addon(s) aktualisiert.", len(results))
@@ -8655,6 +10099,319 @@ TRANSLATIONS["en"] = {
         "Demon Hunter",
     "Rufer":
         "Evoker",
+    # Leeroyzan Link: Diagnose, Charaktere, Auswertung, Discord
+    "  · {0} Rezepte gespeichert":
+        "  · {0} recipes stored",
+    "  ← installiert":
+        "  ← installed",
+    " (verboten)":
+        " (forbidden)",
+    " · {0} pro Stunde":
+        " · {0} per hour",
+    "(Bestand unbekannt)":
+        "(stock unknown)",
+    "({0} Herstellungen)":
+        "({0} crafts)",
+    "Abhängigkeit beschädigt":
+        "dependency corrupt",
+    "Abhängigkeit deaktiviert":
+        "dependency disabled",
+    "Abhängigkeit fehlt":
+        "dependency missing",
+    "Abhängigkeit lädt nicht":
+        "dependency fails to load",
+    "Abhängigkeit nicht kompatibel":
+        "dependency incompatible",
+    "Addons, die aktiviert sind, die WoW aber nicht geladen hat – mit dem Grund aus dem Spiel.":
+        "Addons that are enabled but were not loaded by WoW – with the reason from the game.",
+    "Aktivieren":
+        "Enable",
+    "Alle aktivierten Addons wurden geladen.":
+        "All enabled addons were loaded.",
+    "An Discord senden":
+        "Send to Discord",
+    "Anteil":
+        "Share",
+    "Auf CurseForge suchen":
+        "Search on CurseForge",
+    "Aufrufkette (häufigster Fehler)":
+        "Call stack (most frequent error)",
+    "Ausblenden":
+        "Hide",
+    "Auswertung":
+        "Analysis",
+    "Auswertung – {0}":
+        "Analysis – {0}",
+    "Bank noch nicht gelesen – öffne sie einmal im Spiel.":
+        "Bank not read yet – open it once in the game.",
+    "Bericht":
+        "Report",
+    "Beste Beute":
+        "Best loot",
+    "Beste XP pro Stunde":
+        "Best XP per hour",
+    "Bestes Gold pro Stunde":
+        "Best gold per hour",
+    "Bestzeit {0}":
+        "best time {0}",
+    "Blockierte Aktionen":
+        "Blocked actions",
+    "Bosse":
+        "Bosses",
+    "Das Addon ist für eine andere Spielversion gebaut. Suche ein Update oder setze im Addon-Menü des Spiels den Haken bei „Veraltete AddOns laden“.":
+        "The addon is built for a different game version. Look for an update or tick \"Load out of date AddOns\" in the game's addon menu.",
+    "Das ist keine Discord-Webhook-Adresse.":
+        "That is not a Discord webhook address.",
+    "Daten aus dem Spiel vom {0}":
+        "Game data from {0}",
+    "Deaktivieren":
+        "Disable",
+    "Diagnose":
+        "Diagnostics",
+    "Diagnose aus dem Spiel":
+        "Diagnostics from the game",
+    "Diagramme":
+        "Charts",
+    "Diese Version":
+        "This version",
+    "Discord hat abgelehnt (HTTP {0}).":
+        "Discord refused it (HTTP {0}).",
+    "Discord: {0}":
+        "Discord: {0}",
+    "Download nur im Browser":
+        "download in the browser only",
+    "Durchsucht Taschen und Bank aller Charaktere.":
+        "Searches the bags and banks of all characters.",
+    "Einkaufsliste":
+        "Shopping list",
+    "Erfahrung pro Stunde":
+        "Experience per hour",
+    "Erfahrung pro Stunde: {0}":
+        "Experience per hour: {0}",
+    "Farmgebiete":
+        "Farming spots",
+    "Fehler":
+        "Errors",
+    "Fehler, die keinem Addon zugeordnet werden konnten (oder in Blizzards eigener Oberfläche).":
+        "Errors that could not be attributed to an addon (or in Blizzard's own interface).",
+    "Filter":
+        "Filter",
+    "Für eine Prognose braucht es mindestens 30 Minuten Spielzeit mit Erfahrung.":
+        "A forecast needs at least 30 minutes of play time with experience.",
+    "Gefährlichste Gegner: {0}":
+        "Most dangerous enemies: {0}",
+    "Gefährlichste Orte: {0}":
+        "Most dangerous places: {0}",
+    "Gemessen am {0} · gesamt {1}":
+        "Measured {0} · total {1}",
+    "Gesamt":
+        "Total",
+    "Gold pro Sitzung":
+        "Gold per session",
+    "Gold pro Stunde: {0}":
+        "Gold per hour: {0}",
+    "Gold zählt Beute, Questbelohnungen und Händlerverkäufe in der Zone.":
+        "Gold counts loot, quest rewards and vendor sales in the zone.",
+    "Gold: {0}":
+        "Gold: {0}",
+    "Grund":
+        "Reason",
+    "Größte Heilung":
+        "Biggest heal",
+    "Größter Treffer":
+        "Biggest hit",
+    "Im Spiel gemeldet: {0} (Version {1}) wurde mit /lz problem als fehlerhaft gemeldet und abgeschaltet.":
+        "Reported in the game: {0} (version {1}) was reported as broken with /lz problem and disabled.",
+    "Im Spiel mit /lz merken <Name> vorgemerkt. Installierte Einträge meldet Leeroyzan ans Addon zurück, das sie dann von der Liste nimmt.":
+        "Bookmarked in the game with /lz wish <name>. Leeroyzan reports installed entries back to the addon, which then removes them from the list.",
+    "In Leeroyzan festgehalten – keine Updates, bis du es freigibst.":
+        "Held in Leeroyzan – no updates until you release it.",
+    "Ist installiert.":
+        "Is installed.",
+    "Item-Name oder ID, z. B. Kupfererz":
+        "Item name or ID, e.g. Copper Ore",
+    "Keine Fehler – alles sauber.":
+        "No errors – all clean.",
+    "Keine Tode – sehr vorsichtig!":
+        "No deaths – very careful!",
+    "Kills pro Stunde: {0}":
+        "Kills per hour: {0}",
+    "Klasse":
+        "Class",
+    "Ladeprobleme":
+        "Load problems",
+    "Leeroyzan Link ordnet jeden Lua-Fehler dem verursachenden Addon zu und zählt ihn pro Version. Gelb markiert: Fehler in der Version, die jetzt installiert ist.":
+        "Leeroyzan Link attributes every Lua error to the addon that caused it and counts it per version. Marked yellow: errors in the version that is installed now.",
+    "Leeroyzan Link schreibt Fehler, Ladestatus, Speicherverbrauch, Charaktere und deine Wunschliste beim Ausloggen und bei /reload. Installiere das Addon auf der Seite „Sitzungen“ und logge dich einmal ein und wieder aus.":
+        "Leeroyzan Link writes errors, load status, memory use, characters and your wishlist when you log out and on /reload. Install the addon on the \"Sessions\" page, then log in and out once.",
+    "Leeroyzan Link speichert Klasse, Stufe, Gold, Berufe sowie Taschen- und Bankinhalt jedes Charakters, mit dem du dich einloggst (Bank: sobald du sie einmal öffnest).":
+        "Leeroyzan Link stores class, level, gold, professions and the bag and bank contents of every character you log in with (bank: once you open it).",
+    "Letzte Sitzung senden (Test)":
+        "Send the latest session (test)",
+    "Lua-Fehler aus dem Spiel":
+        "Lua errors from the game",
+    "Längste Sitzung":
+        "Longest session",
+    "Meiste Erfahrung":
+        "Most experience",
+    "Meiste Kills":
+        "Most kills",
+    "Meiste Quests":
+        "Most quests",
+    "Meiste Tode":
+        "Most deaths",
+    "Meldungen":
+        "Messages",
+    "Menge":
+        "Quantity",
+    "Nach Version":
+        "By version",
+    "Nach jeder Sitzung automatisch senden":
+        "Send automatically after every session",
+    "Nicht (mehr) installiert.":
+        "Not installed (anymore).",
+    "Nichts vorgemerkt.":
+        "Nothing bookmarked.",
+    "Noch keine Charaktere":
+        "No characters yet",
+    "Noch keine Daten aus dem Spiel":
+        "No game data yet",
+    "Noch keine Instanz besucht.":
+        "No instance visited yet.",
+    "Noch keine Sitzung zum Senden.":
+        "No session to send yet.",
+    "Noch nicht installiert.":
+        "Not installed yet.",
+    "Noch zu wenig Daten – eine Zone zählt ab 10 Minuten Spielzeit (aufgezeichnet ab Leeroyzan Link 0.3).":
+        "Not enough data yet – a zone counts from 10 minutes of play time (recorded since Leeroyzan Link 0.3).",
+    "Prognose":
+        "Forecast",
+    "Rechenzeit zuletzt: {0} ms pro Bild":
+        "Recent CPU time: {0} ms per frame",
+    "Rekorde":
+        "Records",
+    "Seit":
+        "Since",
+    "Sitzung an Discord gesendet.":
+        "Session sent to Discord.",
+    "Speicher":
+        "Memory",
+    "Speicherverbrauch":
+        "Memory use",
+    "Spielzeit":
+        "Play time",
+    "Spielzeit pro Tag":
+        "Play time per day",
+    "Taschen":
+        "bags",
+    "Bank":
+        "bank",
+    "Spielzeit, geschätzt aus deinem bisherigen Tempo. Wo noch nicht gemessen, gilt die Erfahrungstabelle von Classic.":
+        "Play time, estimated from your pace so far. Where not measured yet, the Classic experience table is used.",
+    "Strecke":
+        "Distance",
+    "Stufe":
+        "Level",
+    "Stufe {0} in ≈ {1}":
+        "level {0} in ≈ {1}",
+    "Stufe {0}{1} · Ø {2} XP/h aus {3}":
+        "Level {0}{1} · avg. {2} XP/h from {3}",
+    "Taschen und Bank":
+        "Bags and bank",
+    "Tode":
+        "Deaths",
+    "Trage zuerst eine Discord-Webhook-Adresse in den Einstellungen ein.":
+        "Enter a Discord webhook address in the settings first.",
+    "Viel Speicher ist kein Fehler – große Datenbanken (Questie, AtlasLoot) brauchen ihn. Spürbar wird es erst bei Rucklern beim Laden oder auf schwachen Rechnern.":
+        "High memory use is not an error – large databases (Questie, AtlasLoot) need it. You only notice it as stutter while loading or on weak PCs.",
+    "Vorgemerkt":
+        "Bookmarked",
+    "Webhook-Adresse eines Discord-Kanals (Kanal bearbeiten → Integrationen → Webhooks).":
+        "Webhook address of a Discord channel (Edit channel → Integrations → Webhooks).",
+    "Weiteste Strecke zu Fuß":
+        "Longest walk",
+    "Wer hat was?":
+        "Who has what?",
+    "Wertvollste Beute":
+        "Most valuable loot",
+    "Wunschliste":
+        "Wishlist",
+    "Wunschliste aus dem Spiel":
+        "Wishlist from the game",
+    "Zuletzt":
+        "Last",
+    "bei {0}":
+        "at {0}",
+    "beschädigt":
+        "corrupt",
+    "fehlt":
+        "missing",
+    "festgehalten":
+        "held",
+    "geschützt":
+        "protected",
+    "gesperrt":
+        "banned",
+    "hast du ({0})":
+        "you have it ({0})",
+    "hast {0}":
+        "you have {0}",
+    "installiert":
+        "installed",
+    "keine Daten":
+        "no data",
+    "lädt bei Bedarf":
+        "load on demand",
+    "nicht kompatibel":
+        "incompatible",
+    "offen":
+        "open",
+    "unterwegs":
+        "elsewhere",
+    "veraltet (Interface-Version)":
+        "out of date (interface version)",
+    "zuerst {0}, zuletzt {1}":
+        "first {0}, last {1}",
+    "zuletzt {0}":
+        "last {0}",
+    "{0} Besuch":
+        "{0} visit",
+    "{0} Besuche":
+        "{0} visits",
+    "{0} Charakter":
+        "{0} character",
+    "{0} Charaktere":
+        "{0} characters",
+    "{0} aktivieren":
+        "Enable {0}",
+    "{0} ausgeblendet – erscheint wieder, sobald neue Fehler dazukommen.":
+        "{0} hidden – it shows up again as soon as new errors come in.",
+    "{0} fehlt.":
+        "{0} is missing.",
+    "{0} in {1} · zuletzt {2}":
+        "{0} in {1} · last {2}",
+    "{0} ist installiert, aber deaktiviert.":
+        "{0} is installed but disabled.",
+    "{0} suchen":
+        "Search {0}",
+    "{0} · zusammen {1}":
+        "{0} · together {1}",
+    "{0} × {1}":
+        "{0} × {1}",
+    "{0}/h":
+        "{0}/h",
+    "{0}: {1} Lua-Fehler seit dem Update auf {2}. Vorherige Version wiederherstellen?":
+        "{0}: {1} Lua errors since the update to {2}. Restore the previous version?",
+    "Öffne im Spiel einmal dein Berufsfenster – dann merkt sich Leeroyzan Link die Rezepte, und hier entsteht die Einkaufsliste über alle Charaktere.":
+        "Open your profession window once in the game – Leeroyzan Link then remembers the recipes, and the shopping list across all characters appears here.",
+    "Ø {0}":
+        "avg. {0}",
+    "„Aktion wurde durch ein Addon blockiert“ – diese Addons haben geschützte Funktionen aufgerufen:":
+        "\"Action blocked by an addon\" – these addons called protected functions:",
+    "→ {0} herüberschicken":
+        "→ send {0} over",
+    "↶ Zurücksetzen":
+        "↶ Roll back",
 }
 
 
