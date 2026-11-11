@@ -183,6 +183,8 @@ function UnitExists(u) return u == "player" or STUB.units[u] ~= nil end
 function UnitIsPlayer(u) return u == "player" or (STUB.units[u] and STUB.units[u].player) or false end
 function UnitIsDead(u) if u == "player" then return STUB.dead end local d = STUB.units[u]; return d and d.dead or false end
 function UnitIsDeadOrGhost(u) return u == "player" and STUB.dead end
+function UnitIsTapDenied(u) return u ~= "player" and STUB.tapDenied or false end
+function UnitCanAttack(a, u) return u ~= "player" and STUB.units[u] ~= nil end
 function UnitClassification(u) local d = STUB.units[u]; return d and d.class or "normal" end
 function UnitClass() return "Krieger", "WARRIOR" end
 function UnitRace() return "Mensch", "Human" end

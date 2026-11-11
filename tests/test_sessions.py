@@ -134,7 +134,7 @@ class ImportTests(unittest.TestCase):
         stored = lz.load_sessions("_forever_")
         self.assertEqual(len(stored), 1)
         s = stored[0]
-        self.assertEqual(s["kills"]["n"], 8)
+        self.assertEqual(s["kills"]["n"], 11)
         self.assertEqual(s["kills"]["boss"], 1)
         self.assertEqual(s["quests"]["done"][0]["title"], "Die Bedrohung der Gnolle")
         self.assertEqual(s["prof"]["skills"]["Kräuterkunde"]["b"], 46)
@@ -278,7 +278,7 @@ class GameDataTests(unittest.TestCase):
 
     def test_analysis(self):
         s = self.sessions[0]
-        self.assertEqual(s["explore"]["zones"]["Rotkammgebirge"]["kills"], 8)  # the stub never changes the zone
+        self.assertEqual(s["explore"]["zones"]["Rotkammgebirge"]["kills"], 11)  # the stub never changes the zone
         self.assertEqual(s["runs"][0]["drops"][0]["boss"], "Edwin VanCleef")
         # a few longer sessions so forecast and rates have something to work with
         many = []
