@@ -71,9 +71,9 @@ SCRIPT_ASSET = "leeroyzan.py"                     # Quelldatei im Repo (für die
 
 # Link-Buttons in der Kopfzeile (Text, Adresse) – hier einfach anpassbar
 HEADER_LINKS = [
+    ("GitHub", "https://github.com/Artithefax/leeroyzan"),
     ("CurseForge", "https://www.curseforge.com/wow"),
-    ("GitHub", "https://github.com/search?q=wow+forever+addon&type=repositories&s=updated"),
-    ("Projektseite", "https://github.com/Artithefax/leeroyzan"),
+    ("Wowhead", "wowhead"),                   # Startseite der gewählten Wowhead-Ausgabe (siehe wowhead_base)
 ]
 
 # --------------------------------------------------------------------------- #
@@ -3453,6 +3453,91 @@ def discord_send(url: str, payload: dict) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Wowhead: Suche mit Vorschau
+# --------------------------------------------------------------------------- #
+# Wowhead hat getrennte Datenbanken je Spielausgabe – WoW Forever passt am besten zu Classic.
+WOWHEAD_EDITIONS = [("classic", "Classic (Era / Anniversary)"), ("tbc", "Burning Crusade Classic"),
+                    ("wotlk", "Wrath of the Lich King Classic"), ("cata", "Cataclysm Classic"),
+                    ("mop-classic", "Mists of Pandaria Classic"), ("", "Retail (aktuelles WoW)")]
+# Typnummern aus der Wowhead-Suche → Adressteil und Anzeigename
+WOWHEAD_TYPES = {1: ("npc", "NPC"), 2: ("object", "Objekt"), 3: ("item", "Gegenstand"), 4: ("item-set", "Set"),
+                 5: ("quest", "Quest"), 6: ("spell", "Zauber"), 7: ("zone", "Zone"), 8: ("faction", "Fraktion"),
+                 10: ("achievement", "Erfolg"), 11: ("title", "Titel"), 12: ("event", "Ereignis"),
+                 13: ("class", "Klasse"), 14: ("race", "Volk"), 15: ("skill", "Fertigkeit"), 17: ("currency", "Währung")}
+WOWHEAD_TOOLTIP_TYPES = ("item", "npc", "quest", "spell", "object", "achievement", "currency", "item-set")
+WOWHEAD_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Leeroyzan/" + APP_VERSION
+
+
+def wowhead_base(edition: str, lang: str = "") -> str:
+    """https://www.wowhead.com[/classic][/de] – deutsche Seiten, wenn Leeroyzan auf Deutsch läuft."""
+    lang = lang or LANG
+    return "https://www.wowhead.com" + (f"/{edition}" if edition else "") + ("/de" if lang == "de" else "")
+
+
+def wowhead_url(edition: str, kind: str, wid) -> str:
+    return f"{wowhead_base(edition)}/{kind}={wid}"
+
+
+def wowhead_search_url(edition: str, query: str) -> str:
+    return f"{wowhead_base(edition)}/search?q={urllib.parse.quote(query)}"
+
+
+def _wowhead_json(url: str):
+    req = urllib.request.Request(url, headers={"User-Agent": WOWHEAD_UA, "Accept": "application/json, text/javascript, */*"})
+    with urllib.request.urlopen(req, timeout=15) as r:
+        return json.loads(r.read().decode("utf-8", "replace"))
+
+
+def wowhead_search(query: str, edition: str) -> list[dict]:
+    """Die Vorschläge der Wowhead-Suche (wie im Suchfeld auf der Seite): Name, Art, ID, Qualität."""
+    query = query.strip()
+    if not query:
+        return []
+    data = _wowhead_json(f"{wowhead_base(edition)}/search/suggestions-template?q={urllib.parse.quote(query)}")
+    out = []
+    for r in (data.get("results") or []) if isinstance(data, dict) else []:
+        if not isinstance(r, dict):
+            continue
+        t = WOWHEAD_TYPES.get(r.get("type"))
+        name = r.get("name")
+        if not t or not name or r.get("id") is None:
+            continue
+        q = r.get("quality")
+        out.append({"kind": t[0], "kind_name": t[1], "id": r["id"], "name": html.unescape(str(name)),
+                    "quality": q if isinstance(q, int) and 0 <= q < len(QUALITY_COLORS) else None,
+                    "url": wowhead_url(edition, t[0], r["id"])})
+    return out
+
+
+def tooltip_text(markup: str) -> str:
+    """Wowhead-Tooltip (HTML) → lesbarer Text mit Zeilenumbrüchen."""
+    t = re.sub(r"<!--.*?-->", "", markup or "", flags=re.S)
+    t = re.sub(r"<(script|style)\b.*?</\1>", "", t, flags=re.S | re.I)
+    t = re.sub(r"<br\s*/?>|<table\b[^>]*>|</(div|tr|table|p|li|h\d)>", "\n", t, flags=re.I)
+    t = re.sub(r"</t[dh]>", "   ", t, flags=re.I)
+    t = html.unescape(re.sub(r"<[^>]+>", "", t))
+    lines = [re.sub(r"[ \t\u00a0]+", " ", ln).strip() for ln in t.splitlines()]
+    out = []
+    for ln in lines:
+        if ln or (out and out[-1]):
+            out.append(ln)
+    return "\n".join(out).strip()
+
+
+def wowhead_tooltip(kind: str, wid, edition: str) -> dict:
+    """Kurzinfo zu einem Eintrag (der Tooltip, den Wowhead beim Überfahren eines Links zeigt)."""
+    if kind not in WOWHEAD_TOOLTIP_TYPES:
+        return {}
+    env = (f"/{edition}" if edition else "") + ("/de" if LANG == "de" else "")
+    data = _wowhead_json(f"https://nether.wowhead.com{env}/tooltip/{kind}/{wid}")
+    if not isinstance(data, dict):
+        return {}
+    q = data.get("quality")
+    return {"name": html.unescape(str(data.get("name") or "")), "text": tooltip_text(str(data.get("tooltip") or "")),
+            "quality": q if isinstance(q, int) and 0 <= q < len(QUALITY_COLORS) else None}
+
+
+# --------------------------------------------------------------------------- #
 # Theme (Braun/Gold im Stil eines Fantasy-MMO-Interfaces)
 # --------------------------------------------------------------------------- #
 
@@ -3909,7 +3994,7 @@ class App(BaseTk):
 
     # ----- Aufbau ---------------------------------------------------------- #
     PAGES = [("addons", "Meine Addons"), ("discover", "Entdecken"), ("updates", "Updates"),
-             ("sessions", "Sitzungen"), ("characters", "Charaktere"), ("diagnose", "Diagnose"),
+             ("sessions", "Sitzungen"), ("characters", "Charaktere"), ("wowhead", "Wowhead"), ("diagnose", "Diagnose"),
              ("share", "Teilen"), ("sets", "Sets & Backups"), ("settings", "Einstellungen")]
     TREE_SHOWN = ("status", "name", "version", "source", "update")
 
@@ -4025,6 +4110,16 @@ class App(BaseTk):
             self.nav_buttons[key] = b
         bottom = ttk.Frame(side, style="Side.TFrame")
         bottom.pack(side="bottom", fill="x")
+        links = tk.Frame(bottom, bg=t["header"])
+        links.pack(pady=(0, 10))
+        for i, (text, url) in enumerate(HEADER_LINKS):
+            if i:
+                tk.Label(links, text="·", bg=t["header"], fg=t["text_faint"], font=self.fonts["small"]).pack(side="left", padx=1)
+            lbl = tk.Label(links, text=tr(text), bg=t["header"], fg=t["text_dim"], font=self.fonts["small"], cursor="hand2")
+            lbl.pack(side="left")
+            lbl.bind("<Button-1>", lambda e, u=url: self.open_header_link(u))
+            lbl.bind("<Enter>", lambda e, w=lbl: w.configure(fg=t["gold"]))
+            lbl.bind("<Leave>", lambda e, w=lbl: w.configure(fg=t["text_dim"]))
         tk.Frame(bottom, height=1, bg=t["line"]).pack(fill="x", pady=(0, 12))
         self._w_play(bottom, style="BigPlay.TButton", text=tr("▶   SPIELEN")).pack(fill="x")
         ttk.Label(bottom, textvariable=self.game_info_var, style="Side.TLabel", anchor="center",
@@ -4043,6 +4138,7 @@ class App(BaseTk):
         self._page_updates()
         self._page_sessions()
         self._page_characters()
+        self._page_wowhead()
         self._page_diagnose()
         self._page_share()
         self._page_sets()
@@ -4441,6 +4537,8 @@ class App(BaseTk):
             self.refresh_diagnose()
         elif key == "characters":
             self.refresh_characters()
+        elif key == "wowhead":
+            self.after(50, self.wh_entry.focus_set)
         elif key == "sessions":
             self.refresh_sessions_page()
             if not self._sess_importing and self.root_path and self.flavor \
@@ -6034,6 +6132,181 @@ class App(BaseTk):
             return
         self.send_session_discord(latest[0])
 
+    # --- Wowhead ---------------------------------------------------------------------- #
+    def _page_wowhead(self):
+        page, head = self._page("wowhead", tr("Nachschlagen"), "Wowhead")
+        self.wh_results: list[dict] = []
+        self.wh_seq = 0
+        self.wh_after = None
+        self.wh_tips: dict[tuple, dict] = {}
+        self.wh_var = tk.StringVar()
+        self.wh_info_var = tk.StringVar(value=tr("Tippe einen Namen ein – Gegenstand, NPC, Quest, Zauber, Zone …"))
+        ed = self.cfg.get("wowhead_edition", "classic")
+        if ed not in [e for e, _ in WOWHEAD_EDITIONS]:
+            ed = "classic"
+        self.wh_ed_var = tk.StringVar(value=tr(dict(WOWHEAD_EDITIONS)[ed]))
+
+        row = ttk.Frame(page)
+        row.pack(fill="x", pady=(12, 0))
+        self.wh_entry = ttk.Entry(row, textvariable=self.wh_var)
+        self.wh_entry.pack(side="left", fill="x", expand=True)
+        Placeholder(self.wh_entry, self.wh_var, tr("Suchen, z. B. Kupfererz oder Hogger"))
+        self.wh_entry.bind("<Return>", lambda e: self.wh_search(now=True))
+        self.wh_var.trace_add("write", lambda *a: self.wh_search())
+        cb = ttk.Combobox(row, textvariable=self.wh_ed_var, state="readonly", width=30,
+                          values=[tr(label) for _, label in WOWHEAD_EDITIONS])
+        cb.pack(side="left", padx=(8, 0))
+        cb.bind("<<ComboboxSelected>>", lambda e: self._wh_edition())
+        ttk.Button(row, text=tr("Suchen"), style="Primary.TButton", command=lambda: self.wh_search(now=True)).pack(
+            side="left", padx=(8, 0))
+        ttk.Button(row, text=tr("Auf Wowhead suchen ↗"), command=self.wh_open_search).pack(side="left", padx=(6, 0))
+        ttk.Label(page, textvariable=self.wh_info_var, style="Body.TLabel").pack(anchor="w", pady=(8, 0))
+
+        body = ttk.Frame(page)
+        body.pack(fill="both", expand=True, pady=(8, 0))
+        left = ttk.Frame(body, width=470)
+        left.pack(side="left", fill="y")
+        left.pack_propagate(False)
+        frame, self.wh_tree = self._list(left, (("name", tr("Name")), ("kind", tr("Art")), ("id", "ID")),
+                                         (300, 100, 60), stretch=("name",))
+        frame.pack(fill="both", expand=True)
+        for i, color in enumerate(QUALITY_COLORS):
+            self.wh_tree.tag_configure(f"q{i}", foreground=color)
+        self.wh_tree.bind("<<TreeviewSelect>>", lambda e: self._wh_show())
+        self.wh_tree.bind("<Double-1>", lambda e: self.wh_open())
+        self.wh_tree.bind("<Return>", lambda e: self.wh_open())
+        box = self._card_box(body, pady=(0, 0), side="left", fill="both", expand=True, padx=(14, 0), title=tr("Vorschau"))
+        tf, self.wh_text = self._text(box, height=8)
+        tf.pack(fill="both", expand=True)
+        self._tag_text(self.wh_text)
+        btns = ttk.Frame(box, style="Panel.TFrame")
+        btns.pack(fill="x", pady=(10, 0))
+        self.wh_open_btn = ttk.Button(btns, text=tr("Auf Wowhead öffnen ↗"), style="Primary.TButton",
+                                      command=self.wh_open, state="disabled")
+        self.wh_open_btn.pack(side="left")
+        self.wh_copy_btn = ttk.Button(btns, text=tr("Link kopieren"), command=self.wh_copy, state="disabled")
+        self.wh_copy_btn.pack(side="left", padx=(6, 0))
+        self._set_text(self.wh_text, parts=[(tr("Wähle links einen Treffer, um die Kurzinfo zu sehen. "
+                                                 "Doppelklick öffnet die Seite auf Wowhead."), "dim")])
+        self.wh_text.configure(state="disabled")
+
+    def _wh_edition_key(self) -> str:
+        label = self.wh_ed_var.get()
+        return next((e for e, l in WOWHEAD_EDITIONS if tr(l) == label), "classic")
+
+    def _wh_edition(self):
+        self.cfg["wowhead_edition"] = self._wh_edition_key()
+        save_config(self.cfg)
+        self.wh_tips.clear()
+        if self.wh_var.get().strip():
+            self.wh_search(now=True)
+
+    def _wh_query(self) -> str:
+        q = self.wh_var.get().strip()
+        return "" if q == tr("Suchen, z. B. Kupfererz oder Hogger") else q
+
+    def wh_search(self, now: bool = False):
+        """Sucht beim Tippen (kurz verzögert) oder sofort mit Enter/Suchen."""
+        if self.wh_after:
+            self.after_cancel(self.wh_after)
+            self.wh_after = None
+        q = self._wh_query()
+        if len(q) < (1 if now else 3):
+            return
+        if not now:
+            self.wh_after = self.after(450, lambda: self.wh_search(now=True))
+            return
+        self.wh_seq += 1
+        seq, edition = self.wh_seq, self._wh_edition_key()
+        self.wh_info_var.set(tr("Suche „{0}“ …", q))
+        self.run_quiet(lambda: wowhead_search(q, edition), lambda res, err: self._wh_results(seq, q, res, err))
+
+    def _wh_results(self, seq, q, res, err):
+        if seq != self.wh_seq:
+            return                              # eine neuere Suche läuft schon
+        self.wh_tree.delete(*self.wh_tree.get_children())
+        self.wh_results = res or []
+        if err:
+            log.warning("Wowhead-Suche: %s", err)
+            self.wh_info_var.set(tr("Wowhead ist gerade nicht erreichbar ({0}). „Auf Wowhead suchen ↗“ öffnet die Suche im Browser.",
+                                    str(err)[:120]))
+            return
+        if not self.wh_results:
+            self.wh_info_var.set(tr("Nichts gefunden für „{0}“.", q))
+            return
+        for i, r in enumerate(self.wh_results):
+            tags = [f"q{r['quality']}"] if r["quality"] is not None else []
+            if i % 2:
+                tags.append("odd")
+            self.wh_tree.insert("", "end", iid=str(i), values=(r["name"], tr(r["kind_name"]), r["id"]), tags=tags)
+        self.wh_info_var.set(plural(len(self.wh_results), "{0} Treffer", "{0} Treffer") + "  ·  " +
+                             tr("Doppelklick öffnet die Seite auf Wowhead."))
+        self.wh_tree.selection_set("0")
+
+    def _wh_selected(self):
+        sel = self.wh_tree.selection()
+        if not sel:
+            return None
+        try:
+            return self.wh_results[int(sel[0])]
+        except (ValueError, IndexError):
+            return None
+
+    def _wh_show(self):
+        r = self._wh_selected()
+        state = "normal" if r else "disabled"
+        self.wh_open_btn.configure(state=state)
+        self.wh_copy_btn.configure(state=state)
+        if not r:
+            return
+        key = (self._wh_edition_key(), r["kind"], r["id"])
+        self._wh_render(r, self.wh_tips.get(key), loading=key not in self.wh_tips)
+        if key in self.wh_tips or r["kind"] not in WOWHEAD_TOOLTIP_TYPES:
+            return
+
+        def done(tip, err):
+            if err:
+                log.info("Wowhead-Tooltip %s: %s", key, err)
+            self.wh_tips[key] = tip or {}
+            if self._wh_selected() is r:
+                self._wh_render(r, self.wh_tips[key])
+        self.run_quiet(lambda: wowhead_tooltip(r["kind"], r["id"], key[0]), done)
+
+    def _wh_render(self, r, tip, loading=False):
+        q = (tip or {}).get("quality")
+        q = r["quality"] if q is None else q
+        parts = [((tip or {}).get("name") or r["name"], f"q{q}" if q is not None else "title"), ("\n", ""),
+                 (f"{tr(r['kind_name'])} · ID {r['id']}\n\n", "dim")]
+        if tip and tip.get("text"):
+            lines = tip["text"].splitlines()
+            if lines and lines[0].strip() == ((tip or {}).get("name") or r["name"]).strip():
+                lines = lines[1:]               # der Name steht schon oben
+            parts.append(("\n".join(lines).strip() + "\n", ""))
+        elif loading and r["kind"] in WOWHEAD_TOOLTIP_TYPES:
+            parts.append((tr("Lade Kurzinfo …") + "\n", "dim"))
+        else:
+            parts.append((tr("Keine Kurzinfo verfügbar – die ganze Seite gibt es auf Wowhead.") + "\n", "dim"))
+        parts.append(("\n" + r["url"], "mono"))
+        self._set_text(self.wh_text, parts=parts)
+        self.wh_text.configure(state="disabled")
+
+    def wh_open(self):
+        r = self._wh_selected()
+        if r:
+            self.open_link(r["url"])
+
+    def wh_copy(self):
+        r = self._wh_selected()
+        if r:
+            self.clipboard_clear()
+            self.clipboard_append(r["url"])
+            self.set_status(tr("Link kopiert: {0}", r["url"]))
+
+    def wh_open_search(self):
+        q = self._wh_query()
+        ed = self._wh_edition_key()
+        self.open_link(wowhead_search_url(ed, q) if q else wowhead_base(ed))
+
     # --- Einstellungen ---------------------------------------------------------------- #
     def _page_settings(self):
         page, _ = self._page("settings", tr("Einstellungen"), tr("Leeroyzan einrichten"))
@@ -6084,7 +6357,7 @@ class App(BaseTk):
         links.pack(fill="x", pady=(6, 0))
         for i, (text, url) in enumerate(HEADER_LINKS):
             links.columnconfigure(i, weight=1, uniform="l")
-            ttk.Button(links, text=f"{tr(text)} ↗", command=lambda u=url: self.open_link(u)).grid(
+            ttk.Button(links, text=f"{tr(text)} ↗", command=lambda u=url: self.open_header_link(u)).grid(
                 row=0, column=i, sticky="ew", padx=(0 if i == 0 else 6, 0))
 
     def _w_cf_key(self, parent, panel: bool = False):
@@ -6357,6 +6630,9 @@ class App(BaseTk):
             except tk.TclError:
                 pass          # Ansicht inzwischen gewechselt
         self.after(15000, enable)   # Doppelstarts vermeiden
+
+    def open_header_link(self, url: str):
+        self.open_link(wowhead_base(self.cfg.get("wowhead_edition", "classic")) if url == "wowhead" else url)
 
     def open_link(self, url: str):
         try:
@@ -10450,6 +10726,31 @@ def main():
     setup_logging()
     app = App()
     app.mainloop()
+
+
+TRANSLATIONS["en"].update({
+    "Nachschlagen": "Look up",
+    "Tippe einen Namen ein – Gegenstand, NPC, Quest, Zauber, Zone …": "Type a name – item, NPC, quest, spell, zone …",
+    "Suchen, z. B. Kupfererz oder Hogger": "Search, e.g. Copper Ore or Hogger",
+    "Auf Wowhead suchen ↗": "Search on Wowhead ↗",
+    "Vorschau": "Preview",
+    "Auf Wowhead öffnen ↗": "Open on Wowhead ↗",
+    "Link kopieren": "Copy link",
+    "Wähle links einen Treffer, um die Kurzinfo zu sehen. Doppelklick öffnet die Seite auf Wowhead.":
+        "Pick a result on the left to see a short preview. Double-click opens the page on Wowhead.",
+    "Suche „{0}“ …": "Searching \"{0}\" …",
+    "Wowhead ist gerade nicht erreichbar ({0}). „Auf Wowhead suchen ↗“ öffnet die Suche im Browser.":
+        "Wowhead can't be reached right now ({0}). \"Search on Wowhead ↗\" opens the search in your browser.",
+    "Nichts gefunden für „{0}“.": "Nothing found for \"{0}\".",
+    "{0} Treffer": "{0} results",
+    "Doppelklick öffnet die Seite auf Wowhead.": "Double-click opens the page on Wowhead.",
+    "Lade Kurzinfo …": "Loading preview …",
+    "Keine Kurzinfo verfügbar – die ganze Seite gibt es auf Wowhead.": "No preview available – the full page is on Wowhead.",
+    "Link kopiert: {0}": "Link copied: {0}",
+    "Retail (aktuelles WoW)": "Retail (current WoW)",
+    "Objekt": "Object", "Gegenstand": "Item", "Zauber": "Spell", "Fraktion": "Faction", "Erfolg": "Achievement",
+    "Ereignis": "Event", "Volk": "Race", "Fertigkeit": "Skill", "Währung": "Currency",
+})
 
 
 if __name__ == "__main__":
