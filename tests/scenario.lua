@@ -185,6 +185,13 @@ if PART == 1 then
 	STUB.fire("CHAT_MSG_COMBAT_XP_GAIN", secretSkill)
 	STUB.fire("CHAT_MSG_LOOT", secretSkill)
 	STUB.fire("UNIT_SPELLCAST_SUCCEEDED", "player", "Cast-2", 99999)
+	-- the real error from Forever: the speed is a secret number in combat
+	local footBefore = s.move.foot
+	STUB.speed = 4242
+	STUB.secrets[4242] = true
+	STUB.advance(3)
+	STUB.speed = 0
+	check(s.move.foot == footBefore and s.time.combat >= 2.5, "secret speed skipped, combat time still counted")
 	STUB.skills[5][4] = 101               -- the skill-up still arrives via SKILL_LINES_CHANGED
 	STUB.fire("SKILL_LINES_CHANGED")
 	STUB.combat = false
