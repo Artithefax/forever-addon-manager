@@ -27,7 +27,10 @@ if imp then
 	check(#imp.profiles == 1 and imp.profiles[1].name == "Raid" and #imp.profiles[1].enable == 2, "profiles")
 	check(#imp.knownIssues == 1, "known issues")
 	check(#imp.managed == 2, "managed folders")
+	check(imp.questGuide and imp.questGuide.on == false, "quest companion switch from Leeroyzan")
 end
+-- switched off in Leeroyzan after the last change in the game: the module stays off
+check(not LZ.modules.QuestGuide.enabled and LeeroylinkDB.settings.modules.QuestGuide == false, "quest companion switched off by Leeroyzan")
 local names = LZ.modules.Profiles:Names()
 check(#names == 1 and names[1].source == "leeroyzan", "profile from Leeroyzan listed")
 check(LeeroylinkDB.global.wishlist["details! damage meter"] == nil, "installed wishlist entry resolved")

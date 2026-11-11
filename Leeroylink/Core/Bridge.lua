@@ -72,6 +72,11 @@ local function sanitize(raw)
 		end
 	end
 
+	-- quest companion switched on/off in Leeroyzan (the newer change – there or here – wins)
+	if type(raw.questGuide) == "table" then
+		imp.questGuide = { on = raw.questGuide.on ~= false, at = tonumber(raw.questGuide.at) or 0 }
+	end
+
 	imp.knownIssues = {}
 	if type(raw.knownIssues) == "table" then
 		for i = 1, math.min(#raw.knownIssues, 100) do

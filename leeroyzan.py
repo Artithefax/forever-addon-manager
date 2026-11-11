@@ -25,6 +25,7 @@ Arbeitet ausschließlich mit Dateien im Addon-/WTF-Ordner – kein Eingriff in d
 
 import base64
 import bisect
+import gzip
 import hashlib
 import html
 import json
@@ -63,7 +64,7 @@ except Exception:                      # noqa – Paket fehlt oder Tk-Erweiterun
     HAS_DND = False
 
 APP_NAME = "Leeroyzan"
-APP_VERSION = "1.6.0"
+APP_VERSION = "1.7.0"
 USER_AGENT = f"Leeroyzan/{APP_VERSION}"
 
 # Selbst-Update über GitHub-Releases dieses Repos
@@ -3044,7 +3045,7 @@ def link_state_from_dbs(dbs: list[tuple[str, dict]]) -> dict:
     st = {"accounts": [], "errors": [], "errorStats": {}, "blocked": [], "addons": {}, "addonsAt": 0,
           "memory": {"t": 0, "total": 0, "list": []}, "wishlist": [], "reports": {}, "chars": {}, "items": {},
           "interface": 0, "addonVersion": "", "writtenAt": 0, "importSeen": 0,
-          "questRewards": {}, "zoneNames": {}, "factionNames": {}}
+          "questRewards": {}, "zoneNames": {}, "factionNames": {}, "questGuide": {"on": True, "at": 0}}
     seen_wish = set()
     for account, db in dbs:
         g = _map(db.get("global"))
@@ -3116,6 +3117,11 @@ def link_state_from_dbs(dbs: list[tuple[str, dict]]) -> dict:
                     "choice": [{"id": _int(_map(x).get("id")), "n": _int(_map(x).get("n"), 1), "q": _int(_map(x).get("q"), 1),
                                 "name": _text(_map(x).get("name"))} for x in _list(r.get("choice"))],
                     "spell": _text(r.get("spell"))}
+        sets = _map(db.get("settings"))
+        on = _map(sets.get("modules")).get("QuestGuide")
+        at = _int(_map(sets.get("toggledAt")).get("QuestGuide"))
+        if at > st["questGuide"]["at"]:
+            st["questGuide"] = {"on": on is not False, "at": at}
         names = _map(g.get("names"))
         for key, target in (("zones", "zoneNames"), ("factions", "factionNames")):
             for k, v in _map(names.get(key)).items():
@@ -4011,6 +4017,16 @@ class QuestDB:
         key = self.faction_names.get(fid)
         return _pretty_enum(key) if key else f"#{fid}"
 
+    def reward_items(self, qid: int) -> list[int]:
+        """Gegenstände, die QuestieDB als Belohnung dieser Quest kennt (ohne Anzahl, ohne Wahl/fest)."""
+        if not hasattr(self, "_reward_items"):
+            out: dict[int, list[int]] = {}
+            for iid in self.all_ids("Item"):
+                for q in _ids((self.row("Item", iid, 16) or {}).get(6)):
+                    out.setdefault(q, []).append(iid)
+            self._reward_items = out
+        return self._reward_items.get(qid, [])
+
     # ----- Questreihen -------------------------------------------------- #
     def chain(self, qid: int) -> list[int]:
         """Die Questreihe als Liste: Anfang … qid … Ende (Verzweigungen: der Hauptpfad)."""
@@ -4062,7 +4078,200 @@ class QuestDB:
         return out[:limit]
 
 
-QUEST_DATA_FORMAT = 1
+# Belohnungen (Gegenstände, Wahl, Gold) stehen nicht vollständig in QuestieDB. Für Classic gibt es sie
+# offen in der Spieldatenbank des cMaNGOS-Projekts (GitHub, GPL). Leeroyzan lädt sie einmal herunter,
+# zieht nur die Questbelohnungen heraus und legt sie in Leeroyzan-Data/questdata ab.
+REWARD_REPOS = {"_forever_": "cmangos/classic-db", "_classic_era_": "cmangos/classic-db",
+                "_anniversary_": "cmangos/classic-db", "_classic_era_ptr_": "cmangos/classic-db"}
+REWARD_CHECK_DAYS = 30
+_REWARD_TRIED: set[str] = set()
+_SQL_TOKEN = re.compile(r"'((?:[^'\\]|\\.)*)'|(NULL)|(-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)|([(),])")
+_SQL_ESC = {"n": "\n", "r": "\r", "t": "\t", "0": "\0", "Z": "\x1a"}
+
+
+def _sql_rows(values: str) -> list[list]:
+    """Werte eines MySQL-INSERT: (1,'a',NULL),(2,'b',3) → [[1, 'a', None], [2, 'b', 3]]."""
+    out, row = [], None
+    for m in _SQL_TOKEN.finditer(values):
+        text, null, num, punct = m.groups()
+        if punct == "(":
+            row = []
+        elif punct == ")":
+            if row is not None:
+                out.append(row)
+            row = None
+        elif punct == ",":
+            continue
+        elif row is not None:
+            if text is not None:
+                row.append(re.sub(r"\\(.)", lambda e: _SQL_ESC.get(e.group(1), e.group(1)), text) if "\\" in text else text)
+            elif null:
+                row.append(None)
+            else:
+                row.append(float(num) if "." in num or "e" in num.lower() else int(num))
+    return out
+
+
+def parse_quest_rewards_dump(path: Path) -> dict:
+    """Questbelohnungen aus einem cMaNGOS-Datenbankabzug (.sql.gz): Gegenstände, Wahl, Gold, Zauber."""
+    want = {"quest_template", "item_template"}
+    cols: dict[str, list[str]] = {}
+    rows: dict[str, list] = {k: [] for k in want}
+    cur = None
+    with gzip.open(path, "rt", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            if line.startswith("CREATE TABLE `"):
+                name = line.split("`")[1]
+                cur = name if name in want else None
+                if cur:
+                    cols[cur] = []
+            elif cur and line.startswith("  `"):
+                cols[cur].append(line.split("`")[1])
+            elif line.startswith(")"):
+                cur = None
+            elif line.startswith("INSERT INTO `") and line.split("`")[1] in want:
+                rows[line.split("`")[1]] += _sql_rows(line[line.index(" VALUES ") + 8:])
+    if not rows["quest_template"] or "entry" not in cols.get("quest_template", []):
+        raise QuestDBError(tr("Die Belohnungsdaten haben ein unbekanntes Format."))
+    qc = {c: i for i, c in enumerate(cols["quest_template"])}
+    ic = {c: i for i, c in enumerate(cols.get("item_template", []))}
+
+    def col(r, name, default=0):
+        i = qc.get(name)
+        return r[i] if i is not None and i < len(r) and r[i] is not None else default
+
+    quests, used = {}, set()
+    for r in rows["quest_template"]:
+        e = {}
+        items = [[col(r, f"RewItemId{i}"), col(r, f"RewItemCount{i}") or 1] for i in range(1, 5) if col(r, f"RewItemId{i}")]
+        choice = [[col(r, f"RewChoiceItemId{i}"), col(r, f"RewChoiceItemCount{i}") or 1] for i in range(1, 7)
+                  if col(r, f"RewChoiceItemId{i}")]
+        if items:
+            e["i"] = items
+        if choice:
+            e["c"] = choice
+        if col(r, "RewOrReqMoney") > 0:
+            e["m"] = col(r, "RewOrReqMoney")
+        if col(r, "RewMoneyMaxLevel") > 0:
+            e["mx"] = col(r, "RewMoneyMaxLevel")
+        if col(r, "RewSpell") or col(r, "RewSpellCast"):
+            e["s"] = col(r, "RewSpell") or col(r, "RewSpellCast")
+        if e:
+            quests[str(col(r, "entry"))] = e
+            used.update(x[0] for x in items + choice)
+    items = {}
+    if "entry" in ic:
+        for r in rows["item_template"]:
+            if r[ic["entry"]] in used:
+                items[str(r[ic["entry"]])] = [r[ic["name"]] if "name" in ic else "", r[ic["Quality"]] if "Quality" in ic else 1]
+    return {"q": quests, "items": items}
+
+
+def rewards_file(flavor: str) -> Path | None:
+    repo = REWARD_REPOS.get(flavor)
+    return config_dir() / "questdata" / (repo.replace("/", "_") + "-rewards.json") if repo else None
+
+
+def load_reward_data(flavor: str) -> dict | None:
+    path = rewards_file(flavor)
+    if not path or not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) and isinstance(data.get("q"), dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def rewards_due(flavor: str) -> bool:
+    if flavor not in REWARD_REPOS:
+        return False
+    data = load_reward_data(flavor)
+    return not data or time.time() - (data.get("checked") or 0) > REWARD_CHECK_DAYS * 86400
+
+
+def fetch_reward_data(flavor: str, token: str = "") -> dict | None:
+    """Lädt den aktuellen Datenbankabzug von GitHub (nur wenn er sich geändert hat) und speichert die Belohnungen."""
+    repo = REWARD_REPOS.get(flavor)
+    if not repo:
+        return None
+    path = rewards_file(flavor)
+    old = load_reward_data(flavor)
+    listing = json.loads(http_get(f"https://api.github.com/repos/{repo}/contents/Full_DB", token))
+    dumps = sorted((x for x in listing if isinstance(x, dict) and str(x.get("name", "")).endswith(".sql.gz")),
+                   key=lambda x: x["name"])
+    if not dumps:
+        raise QuestDBError(tr("Im Projekt {0} gibt es keinen Datenbankabzug.", repo))
+    pick = dumps[-1]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if old and old.get("sha") == pick.get("sha"):
+        old["checked"] = int(time.time())
+        path.write_text(json.dumps(old, ensure_ascii=False), encoding="utf-8")
+        return old
+    url = pick.get("download_url") or ""
+    if urllib.parse.urlparse(url).hostname not in ("raw.githubusercontent.com", "github.com"):
+        raise QuestDBError(tr("Unerwartete Download-Adresse: {0}", url))
+    tmp = path.with_name(path.name + ".sql.gz.part")
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    try:
+        with urllib.request.urlopen(req, timeout=120) as r, tmp.open("wb") as f:
+            shutil.copyfileobj(r, f, 1 << 20)
+        data = parse_quest_rewards_dump(tmp)
+    finally:
+        tmp.unlink(missing_ok=True)
+    data.update(repo=repo, source=pick["name"], sha=pick.get("sha", ""), fetched=int(time.time()), checked=int(time.time()))
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    log.info("Questbelohnungen aus %s/%s: %d Quests", repo, pick["name"], len(data["q"]))
+    return data
+
+
+def ensure_reward_data(flavor: str, token: str = "") -> dict | None:
+    """Vorhandene Belohnungsdaten; fehlen sie oder sind sie alt, einmal pro Programmstart nachladen."""
+    data = load_reward_data(flavor)
+    if rewards_due(flavor) and flavor not in _REWARD_TRIED:
+        _REWARD_TRIED.add(flavor)
+        try:
+            data = fetch_reward_data(flavor, token) or data
+        except (OSError, ValueError, QuestDBError, urllib.error.URLError) as e:
+            log.warning("Questbelohnungen nicht geladen: %s", e)
+    return data
+
+
+def quest_rewards(db: QuestDB, qid: int, cm: dict | None, learned: dict | None, locale: str,
+                  item_names: dict | None = None) -> dict:
+    """Alles, was über die Belohnung einer Quest bekannt ist – aus der besten verfügbaren Quelle:
+    im Spiel gesehen (genau) > cMaNGOS (Classic) > QuestieDB (nur welche Gegenstände)."""
+    cm_items = (cm or {}).get("items", {})
+
+    def name(iid, fallback=""):
+        return (db.localized("Item", iid, 1, locale) or (item_names or {}).get(str(iid), {}).get("name")
+                or (cm_items.get(str(iid)) or [None])[0] or fallback or (db.row("Item", iid, 16) or {}).get(1) or f"#{iid}")
+
+    def quality(iid, fallback=None):
+        q = (cm_items.get(str(iid)) or [None, None])[1]
+        if q is None:
+            q = (item_names or {}).get(str(iid), {}).get("q", fallback)
+        return q if isinstance(q, int) else 1
+
+    out = {"src": "", "items": [], "choice": [], "unsure": [], "money": None, "maxmoney": 0, "spell": None}
+    if learned:
+        out.update(src="game", money=learned.get("money"), spell=learned.get("spell") or None,
+                   items=[{"id": x["id"], "n": x["n"], "q": x["q"], "name": name(x["id"], x["name"])} for x in learned["items"]],
+                   choice=[{"id": x["id"], "n": x["n"], "q": x["q"], "name": name(x["id"], x["name"])} for x in learned["choice"]])
+        return out
+    e = (cm or {}).get("q", {}).get(str(qid))
+    if e:
+        out.update(src="cmangos", money=e.get("m", 0), maxmoney=e.get("mx", 0), spell=e.get("s"),
+                   items=[{"id": i, "n": n, "q": quality(i), "name": name(i)} for i, n in e.get("i", [])],
+                   choice=[{"id": i, "n": n, "q": quality(i), "name": name(i)} for i, n in e.get("c", [])])
+        return out
+    items = db.reward_items(qid)
+    if items:
+        out.update(src="questie", unsure=[{"id": i, "n": 1, "q": quality(i), "name": name(i)} for i in items])
+    return out
+
+
+QUEST_DATA_FORMAT = 2
 QUEST_DATA_FILE = "Quests.lua"
 
 
@@ -4072,12 +4281,23 @@ def _lua_num(v) -> str:
     return str(int(v))
 
 
-def quest_data_text(db: QuestDB, locale: str, zone_names: dict | None = None, faction_names: dict | None = None) -> str:
+def quest_data_text(db: QuestDB, locale: str, zone_names: dict | None = None, faction_names: dict | None = None,
+                    cm: dict | None = None, item_names: dict | None = None) -> str:
     """Quests.lua für Leeroylink: alle Quests kompakt in der Sprache des Spiels.
     q[id] = {Name, Stufe, Mindeststufe, Zone, Seite, Folgequest, {Vorquests}, Questgeber, Abgabe,
-             {Ziele}, {Fraktion, Ruf, …}, XP, Klassen, wiederholbar}; Questgeber = {Name, Zone, x, y, Art}"""
+             {Ziele}, {Fraktion, Ruf, …}, XP, Klassen, wiederholbar,
+             {Gegenstand, Anzahl, …}, {Wahl: Gegenstand, Anzahl, …}, Gold, Zauber, {Gegenstände laut QuestieDB}}
+    Questgeber = {Name, Zone, x, y, Art}; items[id] = {Name, Qualität}"""
     zone_names, faction_names = zone_names or {}, faction_names or {}
     zones_used, factions_used = set(), set()
+    items_used: dict[int, tuple[str, int]] = {}
+
+    def flat(lst, with_count=True):
+        out = []
+        for x in lst:
+            items_used[x["id"]] = (x["name"], x["q"])
+            out += [str(x["id"]), str(x["n"])] if with_count else [str(x["id"])]
+        return "{%s}" % ",".join(out) if out else "false"
     L = lua_string
 
     def giver(g) -> str:
@@ -4112,31 +4332,52 @@ def quest_data_text(db: QuestDB, locale: str, zone_names: dict | None = None, fa
                   "{%s}" % ",".join(rep) if rep else "false",
                   str(xp[1]) if xp else "false", str(q["classes"]) if q["classes"] else "false",
                   "true" if q["repeatable"] else "false"]
+        rw = quest_rewards(db, qid, cm, None, locale, item_names)
+        fields += [flat(rw["items"]), flat(rw["choice"]), str(rw["money"]) if rw["money"] else "false",
+                   str(rw["spell"]) if isinstance(rw["spell"], int) and rw["spell"] else "false",
+                   flat(rw["unsure"], with_count=False)]
         while fields and fields[-1] == "false":
             fields.pop()
         rows.append(f"[{qid}]={{{','.join(fields)}}},")
     zl = ",".join(f"[{z}]={L(db.zone_name(z, zone_names))}" for z in sorted(zones_used) if z and db.zone_name(z, zone_names))
     fl = ",".join(f"[{f}]={L(db.faction_name(f, faction_names))}" for f in sorted(factions_used))
+    il = ",".join(f"[{i}]={{{L(n)},{q}}}" for i, (n, q) in sorted(items_used.items()))
     return ("-- Quests.lua: geschrieben von Leeroyzan aus QuestieDB " + db.version + " (" + locale + ").\n"
             "-- Nicht von Hand ändern – Leeroyzan schreibt die Datei neu, wenn sich QuestieDB ändert.\n"
             f"LeeroylinkQuests = {{\nv={QUEST_DATA_FORMAT},src={L('QuestieDB ' + db.version)},locale={L(locale)},\n"
-            f"zones={{{zl}}},\nfactions={{{fl}}},\nq={{\n" + "\n".join(rows) + "\n},\n}\n")
+            f"zones={{{zl}}},\nfactions={{{fl}}},\nitems={{{il}}},\nrewards={L((cm or {}).get('source', ''))},\nq={{\n"
+            + "\n".join(rows) + "\n},\n}\n")
 
 
-def write_quest_data(root: str, flavor: str, zone_names: dict | None = None, faction_names: dict | None = None) -> str:
-    """Schreibt Quests.lua ins installierte Leeroylink. Ergebnis: written | unchanged | missing | noqdb."""
+QUEST_DATA_OFF = ("-- sig: off\n-- Quests.lua: Der Questbegleiter ist in Leeroyzan ausgeschaltet – keine Questdaten im Spiel.\n"
+                  "LeeroylinkQuests = nil\n")
+
+
+def write_quest_data(root: str, flavor: str, zone_names: dict | None = None, faction_names: dict | None = None,
+                     cm: dict | None = None, item_names: dict | None = None, enabled: bool = True) -> str:
+    """Schreibt Quests.lua ins installierte Leeroylink. Ergebnis: written | unchanged | missing | noqdb | off.
+    Ausgeschaltet bleibt die Datei leer – dann belegen die Questdaten im Spiel keinen Speicher."""
     folder = installed_link_dir(root, flavor)
     if not folder:
         return "missing"
+    target = folder / QUEST_DATA_FILE
+    if not enabled:
+        try:
+            if target.read_text(encoding="utf-8", errors="replace") == QUEST_DATA_OFF:
+                return "off"
+        except OSError:
+            pass
+        target.write_text(QUEST_DATA_OFF, encoding="utf-8", newline="\n")
+        return "off"
     toc = find_questie_toc(root, flavor)
     if not toc:
         return "noqdb"
     st = toc.stat()
     locale = game_locale(root, flavor)
-    names_key = hashlib.sha1(json.dumps([sorted((zone_names or {}).items()), sorted((faction_names or {}).items())],
+    names_key = hashlib.sha1(json.dumps([sorted((zone_names or {}).items()), sorted((faction_names or {}).items()),
+                                         (cm or {}).get("sha", "")],
                                         ensure_ascii=False).encode("utf-8")).hexdigest()[:10]
     sig = f"-- sig: {toc.name}:{st.st_size}:{int(st.st_mtime)}|{locale}|{QUEST_DATA_FORMAT}|{names_key}"
-    target = folder / QUEST_DATA_FILE
     try:
         with target.open(encoding="utf-8", errors="replace") as f:
             if f.readline().strip() == sig:
@@ -4147,7 +4388,7 @@ def write_quest_data(root: str, flavor: str, zone_names: dict | None = None, fac
         db = load_questdb(root, flavor)
     except QuestDBError:
         return "noqdb"
-    text = sig + "\n" + quest_data_text(db, locale, zone_names, faction_names)
+    text = sig + "\n" + quest_data_text(db, locale, zone_names, faction_names, cm, item_names)
     tmp = target.with_name(QUEST_DATA_FILE + ".tmp")
     tmp.write_text(text, encoding="utf-8", newline="\n")
     os.replace(tmp, target)
@@ -6079,7 +6320,8 @@ class App(BaseTk):
         profiles = [{"name": name, "enable": list(folders)} for name, folders in sorted(self.sets().items())]
         return {"schema": LINK_SCHEMA, "generated": int(time.time()), "managerVersion": APP_VERSION,
                 "updates": updates, "managed": managed, "installed": installed, "profiles": profiles,
-                "whatsnew": list(self.link_news()), "knownIssues": issues}
+                "whatsnew": list(self.link_news()), "knownIssues": issues,
+                "questGuide": {"on": self.quest_guide_on(), "at": int(self.cfg.get("quest_guide", {}).get("at", 0))}}
 
     def schedule_link_write(self):
         if self._link_write_job:
@@ -6104,14 +6346,19 @@ class App(BaseTk):
             self._quest_write_running = True
             root, flavor = self.root_path, self.flavor
             zn, fn = dict(self.link_state.get("zoneNames", {})), dict(self.link_state.get("factionNames", {}))
+            names, on, token = dict(self.link_state.get("items", {})), self.quest_guide_on(), self.cfg.get("github_token", "")
+
+            def work():
+                cm = ensure_reward_data(flavor, token) if on else None
+                return write_quest_data(root, flavor, zn, fn, cm, names, on)
 
             def done(res, err):
                 self._quest_write_running = False
                 if err:
                     log.warning("Quests.lua für Leeroylink: %s", err)
-                elif res == "written":
-                    log.info("Quests.lua für Leeroylink geschrieben (%s)", flavor)
-            self.run_quiet(lambda: write_quest_data(root, flavor, zn, fn), done)
+                elif res in ("written", "off"):
+                    log.info("Quests.lua für Leeroylink: %s (%s)", res, flavor)
+            self.run_quiet(work, done)
 
     def _link_state_changed(self):
         """Neue Daten aus dem Spiel: Seiten auffrischen, Hinweise zeigen, Data.lua anpassen."""
@@ -6121,6 +6368,7 @@ class App(BaseTk):
             self.refresh_characters()
         self._hint_reports()
         self._hint_errors()
+        self._quest_guide_button()
         self.schedule_link_write()
 
     def _addon_by_name(self, name: str):
@@ -6831,7 +7079,11 @@ class App(BaseTk):
         self.qdb_side_var = tk.StringVar(value=tr(self.QDB_SIDES[0][1]))
         self.qdb_lmin = tk.StringVar(value="")
         self.qdb_lmax = tk.StringVar(value="")
+        self.qdb_rewards = None
+        self.qdb_guide_btn = ttk.Button(head, command=self.toggle_quest_guide)
+        self.qdb_guide_btn.pack(side="right", anchor="s", padx=(12, 0))
         ttk.Label(head, textvariable=self.qdb_status_var, style="Body.TLabel").pack(side="right", anchor="s")
+        self._quest_guide_button()
 
         row = ttk.Frame(page)
         row.pack(fill="x", pady=(12, 0))
@@ -6914,10 +7166,64 @@ class App(BaseTk):
                 self.qdb_key = None
                 return
             self.qdb = db
-            self.qdb_status_var.set(tr("QuestieDB {0} · {1} Quests", db.version, fmt_int(len(db.quests))))
+            self._qdb_status()
             if self.qdb_var.get().strip() or self.qdb_lmin.get().strip() or self.qdb_lmax.get().strip():
                 self.qdb_search()
+            self._qdb_load_rewards()
+        self.qdb_rewards = load_reward_data(flavor)
         self.run_quiet(lambda: load_questdb(root, flavor), done)
+
+    def _qdb_status(self, extra: str = ""):
+        db = self.qdb
+        if db is None:
+            return
+        text = tr("QuestieDB {0} · {1} Quests", db.version, fmt_int(len(db.quests)))
+        if self.qdb_rewards:
+            text += "  ·  " + tr("Belohnungen: cMaNGOS ({0} Quests)", fmt_int(len(self.qdb_rewards.get("q", {}))))
+        self.qdb_status_var.set(text + extra)
+
+    def _qdb_load_rewards(self):
+        """Belohnungsdaten (Gegenstände, Wahl, Gold) einmal von GitHub holen, wenn sie fehlen oder alt sind."""
+        flavor = self.flavor
+        if not rewards_due(flavor) or flavor in _REWARD_TRIED:
+            return
+        self._qdb_status("  ·  " + tr("lade Belohnungen …"))
+        token = self.cfg.get("github_token", "")
+
+        def done(data, err):
+            if err:
+                log.warning("Questbelohnungen: %s", err)
+            if data and flavor == self.flavor:
+                self.qdb_rewards = data
+                if self.qdb_current is not None:
+                    self.qdb_show(self.qdb_current, remember=False)
+                self.schedule_link_write()                 # Quests.lua mit den Belohnungen neu schreiben
+            self._qdb_status()
+        self.run_quiet(lambda: ensure_reward_data(flavor, token), done)
+
+    # Questbegleiter im Spiel an/aus (gilt die jüngste Änderung – hier oder im Spiel)
+    def quest_guide_on(self) -> bool:
+        mine = self.cfg.get("quest_guide") or {}
+        game = self.link_state.get("questGuide") or {"on": True, "at": 0}
+        if game.get("at", 0) > mine.get("at", 0):
+            return bool(game.get("on", True))
+        return bool(mine.get("on", True))
+
+    def toggle_quest_guide(self):
+        on = not self.quest_guide_on()
+        self.cfg["quest_guide"] = {"on": on, "at": int(time.time())}
+        save_config(self.cfg)
+        self._quest_guide_button()
+        self.schedule_link_write()
+        self.set_status(tr("Questbegleiter im Spiel eingeschaltet – nach dem nächsten Einloggen oder /reload aktiv.") if on else
+                        tr("Questbegleiter im Spiel ausgeschaltet – ab dem nächsten Einloggen oder /reload, ohne Questdaten im Speicher."))
+
+    def _quest_guide_button(self):
+        if getattr(self, "qdb_guide_btn", None) is None:
+            return
+        on = self.quest_guide_on()
+        self.qdb_guide_btn.configure(text=tr("Questbegleiter im Spiel: AN") if on else tr("Questbegleiter im Spiel: AUS"),
+                                     style="ToggleOn.TButton" if on else "ToggleOff.TButton")
 
     def _qdb_side(self) -> str:
         label = self.qdb_side_var.get()
@@ -7069,34 +7375,44 @@ class App(BaseTk):
             line("• " + g, "dim")
 
         head(tr("Belohnung"))
-        rw = self.link_state.get("questRewards", {}).get(qid)
-        xp = (rw or {}).get("xp") or (db.xp.get(qid) or (0, 0))[1]
+        seen = self.link_state.get("questRewards", {}).get(qid)
+        rw = quest_rewards(db, qid, self.qdb_rewards, seen, loc, self.link_state.get("items", {}))
+        xp = (seen or {}).get("xp") or (db.xp.get(qid) or (0, 0))[1]
         bits = []
         if xp:
             bits.append(f"{fmt_int(xp)} XP")
-        if rw and rw["money"]:
+        if rw["money"]:
             bits.append(fmt_money(rw["money"]))
         for fid, val in q["rep"]:
             bits.append(f"{db.faction_name(fid, fn)} {'+' if val > 0 else ''}{val}")
+        if rw["spell"]:
+            bits.append(tr("Zauber {0}", rw["spell"]) if isinstance(rw["spell"], int) else str(rw["spell"]))
         line("  ·  ".join(bits) if bits else "–")
-        if rw:
-            for it in rw["items"]:
+
+        def items(lst):
+            for it in lst:
                 parts.append(("• ", ""))
-                parts.append((it["name"] or item_name(self.link_state, it["id"]), f"q{min(max(it['q'], 0), 6)}"))
+                parts.append((it["name"], f"q{min(max(it['q'], 0), 6)}"))
                 parts.append(((f" ×{it['n']}" if it["n"] > 1 else "") + "\n", ""))
-            if rw["choice"]:
-                line(tr("Eine davon zur Wahl:"), "dim")
-                for it in rw["choice"]:
-                    parts.append(("• ", ""))
-                    parts.append((it["name"] or item_name(self.link_state, it["id"]), f"q{min(max(it['q'], 0), 6)}"))
-                    parts.append(((f" ×{it['n']}" if it["n"] > 1 else "") + "\n", ""))
-            if rw["spell"]:
-                line("• " + rw["spell"])
-            line(tr("Gesehen von einem deiner Charaktere am {0}.",
-                    datetime.fromtimestamp(rw["t"]).strftime(tr("%d.%m.%Y"))) if rw["t"] else "", "dim")
+        items(rw["items"])
+        if rw["choice"]:
+            line(tr("Eine davon zur Wahl:"), "dim")
+            items(rw["choice"])
+        if rw["unsure"]:
+            line(tr("Gegenstände (laut QuestieDB – ob fest oder zur Wahl, ist nicht bekannt):"), "dim")
+            items(rw["unsure"])
+        if rw["maxmoney"] and not rw["money"]:
+            line(tr("Auf Höchststufe statt Erfahrung: {0}", fmt_money(rw["maxmoney"])), "dim")
+        src = {"game": tr("Quelle: im Spiel gesehen am {0}", datetime.fromtimestamp((seen or {}).get("t") or 0).strftime(tr("%d.%m.%Y"))),
+               "cmangos": tr("Quelle: Spieldatenbank von cMaNGOS (Classic) – in WoW Forever kann es Abweichungen geben"),
+               "questie": tr("Quelle: QuestieDB (Gold unbekannt)")}.get(rw["src"])
+        if src:
+            line(src, "dim")
+        elif self.qdb_rewards is None and REWARD_REPOS.get(self.flavor):
+            line(tr("Gegenstände und Gold: Die Belohnungsdaten werden gerade geladen …"), "dim")
         else:
-            line(tr("Gegenstände und Gold: noch nicht gesehen – Leeroylink merkt sie sich, sobald einer deiner "
-                    "Charaktere die Quest sieht. Bis dahin hilft Wowhead."), "dim")
+            line(tr("Gegenstände und Gold: unbekannt. Leeroylink merkt sie sich, sobald einer deiner Charaktere "
+                    "die Quest sieht – bis dahin hilft Wowhead."), "dim")
 
         pre = [p for p in q["pre"] if p in db.quests and p not in chain]
         if pre or q["skill"]:
@@ -11893,6 +12209,27 @@ TRANSLATIONS["en"].update({
     "Leeroyzan Link heißt jetzt Leeroylink. Ein Klick stellt um und übernimmt deine Daten (WoW muss dafür geschlossen sein).":
         "Leeroyzan Link is now called Leeroylink. One click switches over and keeps your data (WoW has to be closed).",
     "Umstellen": "Switch",
+    "Zauber {0}": "Spell {0}",
+    "Gegenstände (laut QuestieDB – ob fest oder zur Wahl, ist nicht bekannt):": "Items (according to QuestieDB – fixed or a choice is unknown):",
+    "Auf Höchststufe statt Erfahrung: {0}": "At max level instead of experience: {0}",
+    "Quelle: im Spiel gesehen am {0}": "Source: seen in the game on {0}",
+    "Quelle: Spieldatenbank von cMaNGOS (Classic) – in WoW Forever kann es Abweichungen geben":
+        "Source: cMaNGOS game database (Classic) – WoW Forever may differ",
+    "Quelle: QuestieDB (Gold unbekannt)": "Source: QuestieDB (gold unknown)",
+    "Gegenstände und Gold: Die Belohnungsdaten werden gerade geladen …": "Items and gold: the reward data is being loaded …",
+    "Gegenstände und Gold: unbekannt. Leeroylink merkt sie sich, sobald einer deiner Charaktere die Quest sieht – bis dahin hilft Wowhead.":
+        "Items and gold: unknown. Leeroylink remembers them as soon as one of your characters sees the quest – until then, Wowhead helps.",
+    "Belohnungen: cMaNGOS ({0} Quests)": "Rewards: cMaNGOS ({0} quests)",
+    "lade Belohnungen …": "loading rewards …",
+    "Questbegleiter im Spiel eingeschaltet – nach dem nächsten Einloggen oder /reload aktiv.":
+        "Quest companion in the game switched on – active after the next login or /reload.",
+    "Questbegleiter im Spiel ausgeschaltet – ab dem nächsten Einloggen oder /reload, ohne Questdaten im Speicher.":
+        "Quest companion in the game switched off – from the next login or /reload, without quest data in memory.",
+    "Questbegleiter im Spiel: AN": "Quest companion in game: ON",
+    "Questbegleiter im Spiel: AUS": "Quest companion in game: OFF",
+    "Die Belohnungsdaten haben ein unbekanntes Format.": "The reward data has an unknown format.",
+    "Im Projekt {0} gibt es keinen Datenbankabzug.": "The project {0} has no database dump.",
+    "Unerwartete Download-Adresse: {0}": "Unexpected download address: {0}",
     "Beide Fraktionen": "Both factions",
     "Horde": "Horde",
     "Zone": "Zone",
@@ -11930,8 +12267,6 @@ TRANSLATIONS["en"].update({
     "Belohnung": "Reward",
     "Eine davon zur Wahl:": "Choose one of these:",
     "Gesehen von einem deiner Charaktere am {0}.": "Seen by one of your characters on {0}.",
-    "Gegenstände und Gold: noch nicht gesehen – Leeroylink merkt sie sich, sobald einer deiner Charaktere die Quest sieht. Bis dahin hilft Wowhead.":
-        "Items and gold: not seen yet – Leeroylink remembers them as soon as one of your characters sees the quest. Until then, Wowhead helps.",
     "Voraussetzungen": "Requirements",
     "Beruf/Fertigkeit {0}: mindestens {1}": "Profession/skill {0}: at least {1}",
     "Erst abschließen ({0}): ": "Complete first ({0}): ",
