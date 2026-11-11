@@ -172,7 +172,44 @@ if PART == 1 then
 	STUB.fire("CHAT_MSG_SYSTEM", "Discovered Steinwacht: 140 experience gained")
 	STUB.fire("UI_INFO_MESSAGE", 0, "Discovered Steinwacht: 140 experience gained")
 	STUB.fire("PLAYER_XP_UPDATE", "player")
-	STUB.fire("CHAT_MSG_COMBAT_FACTION_CHANGE", "Your Sturmwind reputation has increased by 250.")
+	STUB.factions[2][3] = 3250
+	STUB.fire("UPDATE_FACTION")
+	STUB.advance(1.5)
+
+	-- newer clients: protected values in combat must neither break nor spam anything
+	local secretSkill = "Your skill in Schwerter has increased to 101."
+	STUB.secrets[secretSkill] = true
+	STUB.secrets[99999] = true
+	STUB.combat = true
+	STUB.fire("CHAT_MSG_SKILL", secretSkill)
+	STUB.fire("CHAT_MSG_COMBAT_XP_GAIN", secretSkill)
+	STUB.fire("CHAT_MSG_LOOT", secretSkill)
+	STUB.fire("UNIT_SPELLCAST_SUCCEEDED", "player", "Cast-2", 99999)
+	STUB.skills[5][4] = 101               -- the skill-up still arrives via SKILL_LINES_CHANGED
+	STUB.fire("SKILL_LINES_CHANGED")
+	STUB.combat = false
+	STUB.advance(1.5)
+	check(s.prof.skills["Schwerter"].b == 101, "weapon skill-up without the chat line")
+	local own = 0
+	for _, e in pairs(LZ.gdb.errors) do if e.addon == "LeeroyzanLink" then own = own + 1 end end
+	check(own == 0, "no errors from protected values")
+
+	-- a handler that fails is logged once, silently, and the others keep working
+	local realSub = GetSubZoneText
+	GetSubZoneText = function() error("boom") end
+	STUB.fire("ZONE_CHANGED")
+	STUB.fire("ZONE_CHANGED")
+	GetSubZoneText = realSub
+	local logged = 0
+	for sig, e in pairs(LZ.gdb.errors) do
+		if e.addon == "LeeroyzanLink" and e.msg:find("ZONE_CHANGED", 1, true) then
+			logged = logged + e.count
+			LZ.gdb.errors[sig] = nil          -- planted: do not count as a real error below
+		end
+	end
+	LZ.gdb.errorStats.LeeroyzanLink = nil
+	check(logged == 1 and s.recErrors.ZONE_CHANGED == 2, "failing handler logged once: " .. logged)
+	for i = #STUB.chat, 1, -1 do if STUB.chat[i]:find("ERROR", 1, true) and STUB.chat[i]:find("boom", 1, true) then check(false, "popup for a session error") end end
 
 	-- quest turn-in at a vendor: XP, money, reward item
 	STUB.questID, STUB.questTitle = 125, "Die Bedrohung der Gnolle"

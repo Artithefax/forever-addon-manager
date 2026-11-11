@@ -30,6 +30,18 @@ STUB = {
 	errhandler = nil, chat = {},
 }
 
+-- Newer clients: some values are "secret" in combat. Tests mark them in STUB.secrets.
+STUB.secrets = {}
+function issecretvalue(v) return v ~= nil and STUB.secrets[v] == true end
+
+-- reputation list (Classic API)
+STUB.factions = { { "Allianz", true, 0 }, { "Sturmwind", false, 3000 }, { "Eisenschmiede", false, 1200 } }
+function GetNumFactions() return #STUB.factions end
+function GetFactionInfo(i)
+	local f = STUB.factions[i]
+	return f[1], "", 4, 0, 6000, f[3], false, true, f[2], false, f[2] and false or true
+end
+
 -- Lua 5.1 has no bit library; WoW does.
 bit = {
 	band = function(a, b)
