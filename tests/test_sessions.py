@@ -508,6 +508,40 @@ def lua_quote_bytes(raw: bytes) -> bytes:
     return bytes(out + b'"')
 
 
+class SelfUpdateTests(unittest.TestCase):
+    """Sichtbares Manager-Update: Download mit Fortschritt, Abbrechen, Datei ersetzen, Warten aufs Ende."""
+
+    def test_download_progress_and_cancel(self):
+        import io
+
+        class Resp(io.BytesIO):
+            headers = {"Content-Length": str(300_000)}
+        orig = lz.urllib.request.urlopen
+        lz.urllib.request.urlopen = lambda req, timeout=0: Resp(b"x" * 300_000)
+        try:
+            prog = {}
+            self.assertEqual(len(lz.download_with_progress("https://x", progress=prog)), 300_000)
+            self.assertEqual((prog["done"], prog["total"]), (300_000, 300_000))
+            with self.assertRaises(lz.UpdateCancelled):
+                lz.download_with_progress("https://x", progress={"cancel": True})
+        finally:
+            lz.urllib.request.urlopen = orig
+
+    def test_replace_and_wait(self):
+        import subprocess as sp
+        src, dst = TMP / "new.exe", TMP / "Leeroyzan.exe"
+        src.write_bytes(b"MZ new")
+        dst.write_bytes(b"MZ old")
+        lz.replace_exe(src, dst)
+        self.assertEqual(dst.read_bytes(), b"MZ new")
+        self.assertFalse(dst.with_name("Leeroyzan.exe.tmp").exists())
+        p = sp.Popen([sys.executable, "-c", "import time; time.sleep(0.3)"])
+        import threading
+        threading.Thread(target=p.wait, daemon=True).start()
+        self.assertTrue(lz.wait_for_exit(p.pid, 5))
+        self.assertTrue(lz.wait_for_exit(999_999_999 % 4_000_000 + 3_000_000, 0.1))      # gibt es nicht
+
+
 class AuctionatorTests(unittest.TestCase):
     """Auktionshaus: Auctionator-Preisdatenbank (Version 8, CBOR im Lua-String) lesen und auswerten."""
 

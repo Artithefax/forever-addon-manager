@@ -64,7 +64,7 @@ except Exception:                      # noqa – Paket fehlt oder Tk-Erweiterun
     HAS_DND = False
 
 APP_NAME = "Leeroyzan"
-APP_VERSION = "1.8.0"
+APP_VERSION = "1.9.0"
 USER_AGENT = f"Leeroyzan/{APP_VERSION}"
 
 # Selbst-Update über GitHub-Releases dieses Repos
@@ -1549,12 +1549,41 @@ def new_exe_path() -> Path:
     return exe.with_name(exe.stem + ".new.exe")
 
 
-def download_self_update(info: dict, token: str = "") -> Path:
+class UpdateCancelled(Exception):
+    pass
+
+
+def download_with_progress(url: str, token: str = "", accept: str = "application/octet-stream",
+                           progress: dict | None = None) -> bytes:
+    """Wie http_get, meldet aber Fortschritt (progress["done"], ["total"]) und lässt sich abbrechen (["cancel"])."""
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": accept})
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    prog = progress if progress is not None else {}
+    with urllib.request.urlopen(req, timeout=30) as r:
+        prog["total"] = int(r.headers.get("Content-Length") or 0)
+        prog["done"] = 0
+        parts = []
+        while True:
+            if prog.get("cancel"):
+                raise UpdateCancelled()
+            chunk = r.read(64 * 1024)
+            if not chunk:
+                break
+            parts.append(chunk)
+            prog["done"] += len(chunk)
+    return b"".join(parts)
+
+
+def download_self_update(info: dict, token: str = "", progress: dict | None = None) -> Path:
     """Lädt die neue .exe neben die laufende und prüft sie (MZ-Header, ggf. SHA-256)."""
     asset = self_update_asset(info)
     if not asset:
         raise ValueError(tr("Das Release enthält noch keine {0}.", EXE_ASSET))
-    blob = http_get(asset["url"], token, accept="application/octet-stream")
+    prog = progress if progress is not None else {}
+    prog["phase"] = "download"
+    blob = download_with_progress(asset["url"], token, progress=prog)
+    prog["phase"] = "verify"
     if len(blob) < 1_000_000 or blob[:2] != b"MZ":
         raise ValueError(tr("Die heruntergeladene Datei ist keine gültige Windows-Anwendung."))
     sha_asset = next((a for a in info.get("all_assets", [])
@@ -1573,7 +1602,7 @@ def download_self_update(info: dict, token: str = "") -> Path:
     return target
 
 
-def download_script_update(info: dict, token: str = "") -> Path:
+def download_script_update(info: dict, token: str = "", progress: dict | None = None) -> Path:
     """Python-Variante: lädt leeroyzan.py des Releases und prüft Version und Syntax."""
     url = f"https://raw.githubusercontent.com/{UPDATE_REPO}/{urllib.parse.quote(info['tag'])}/{SCRIPT_ASSET}"
     try:
@@ -1659,12 +1688,71 @@ start "" "{old_exe}"
     subprocess.Popen(["cmd", "/c", str(bat)], close_fds=True, creationflags=0x08000000, env=clean_child_env())
 
 
-def cleanup_self_update() -> None:
-    """Räumt ein liegengebliebenes .new.exe nach einem abgebrochenen Update weg."""
-    if is_frozen():
-        new_exe_path().unlink(missing_ok=True)
-    else:
-        Path(__file__).resolve().with_suffix(".new.py").unlink(missing_ok=True)
+def launch_update_finisher(new_exe: Path, tag: str) -> None:
+    """Startet die neue Version selbst (Leeroyzan.new.exe --finish-update …). Sie zeigt ein eigenes Fenster,
+    wartet, bis diese Version beendet ist, setzt sich an ihre Stelle und startet von dort neu.
+    So bleibt der ganze Ablauf sichtbar – ohne unsichtbares Skript dazwischen."""
+    old_exe = Path(sys.executable)
+    pids = [str(os.getpid())]
+    try:
+        pids.append(str(os.getppid()))            # der Starter der .exe (PyInstaller) hält die Datei bis zuletzt
+    except OSError:
+        pass
+    with (config_dir() / "update.log").open("a", encoding="utf-8") as f:
+        f.write(f"{datetime.now():%d.%m.%Y %H:%M:%S} Update {tag}: starte {new_exe.name} zum Einsetzen\n")
+    subprocess.Popen([str(new_exe), FINISH_FLAG, str(old_exe), ",".join(pids), tag], close_fds=True,
+                     creationflags=0x00000008 if os.name == "nt" else 0, env=clean_child_env())
+
+
+FINISH_FLAG = "--finish-update"
+
+
+def wait_for_exit(pid: int, timeout: float) -> bool:
+    """True, sobald der Prozess beendet ist (oder nicht mehr existiert)."""
+    if os.name != "nt":
+        end = time.time() + timeout
+        while time.time() < end:
+            try:
+                os.kill(pid, 0)
+            except OSError:
+                return True
+            time.sleep(0.2)
+        return False
+    import ctypes
+    k32 = ctypes.windll.kernel32
+    handle = k32.OpenProcess(0x00100000, False, pid)          # SYNCHRONIZE
+    if not handle:
+        return True
+    try:
+        return k32.WaitForSingleObject(handle, int(timeout * 1000)) == 0
+    finally:
+        k32.CloseHandle(handle)
+
+
+def replace_exe(src: Path, dst: Path) -> None:
+    """Kopiert die laufende neue .exe an die Stelle der alten (über eine Zwischendatei, dann umbenennen)."""
+    tmp = dst.with_name(dst.name + ".tmp")
+    shutil.copyfile(src, tmp)
+    try:
+        os.replace(tmp, dst)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def cleanup_self_update(tries: int = 0) -> bool:
+    """Räumt ein liegengebliebenes .new.exe weg. False, wenn die Datei noch gesperrt ist (z. B. weil das
+    Einsetz-Fenster der neuen Version sich gerade erst schließt) – dann später noch einmal versuchen."""
+    try:
+        if is_frozen():
+            if Path(sys.executable).name.lower().endswith(".new.exe"):
+                return True                              # diese Instanz IST die neue Datei
+            new_exe_path().unlink(missing_ok=True)
+        else:
+            Path(__file__).resolve().with_suffix(".new.py").unlink(missing_ok=True)
+        return True
+    except OSError:
+        return False
 
 
 # --------------------------------------------------------------------------- #
@@ -4953,6 +5041,148 @@ class Placeholder:
             pass
 
 
+class UpdateSteps:
+    """Schrittliste für das Update-Fenster: ✓ erledigt, ▶ läuft, ○ offen, ✕ Fehler – mit Detailzeile und Balken."""
+
+    def __init__(self, parent, steps: list[tuple[str, str]]):
+        t = THEME
+        fonts = parent.winfo_toplevel().fonts
+        self.parent = parent
+        self.keys = [k for k, _ in steps]
+        self.rows = {}
+        box = ttk.Frame(parent, style="Panel.TFrame")
+        box.pack(fill="x", pady=(14, 0))
+        for i, (key, label) in enumerate(steps):
+            icon = tk.Label(box, text="○", width=2, bg=t["panel"], fg=t["text_faint"], font=fonts["bold"])
+            icon.grid(row=i, column=0, sticky="w", pady=3)
+            text = tk.Label(box, text=label, bg=t["panel"], fg=t["text_dim"], font=fonts["base"], anchor="w")
+            text.grid(row=i, column=1, sticky="w", pady=3)
+            self.rows[key] = (icon, text)
+        self.detail = tk.StringVar(value="")
+        self.detail_lbl = tk.Label(parent, textvariable=self.detail, bg=t["panel"], fg=t["text_dim"], font=fonts["small"],
+                                   anchor="w", justify="left", wraplength=470)
+        self.detail_lbl.pack(fill="x", pady=(12, 0))
+        style = ttk.Style(parent)
+        style.configure("Update.Horizontal.TProgressbar", troughcolor=t["row_a"], background=t["gold"],
+                        bordercolor=t["border_soft"], lightcolor=t["gold"], darkcolor=t["gold_deep"])
+        self.bar = ttk.Progressbar(parent, style="Update.Horizontal.TProgressbar", mode="indeterminate", length=470)
+        self.bar.pack(fill="x", pady=(8, 0))
+        self.bar.start(12)
+        self.current = None
+        self._pending: list = []          # Aufrufe aus Hintergrund-Threads
+
+    def _ui(self, fn):
+        try:
+            self.parent.after(0, fn)
+        except (RuntimeError, tk.TclError):
+            pass
+
+    def set(self, key: str, detail: str = ""):
+        self._ui(lambda: self._set(key, detail))
+
+    def _set(self, key, detail):
+        t = THEME
+        if key != self.current:
+            for k in self.keys:
+                icon, text = self.rows[k]
+                if self.keys.index(k) < self.keys.index(key):
+                    icon.configure(text="✓", fg=t["ok"]); text.configure(fg=t["text_dim"])
+                elif k == key:
+                    icon.configure(text="▶", fg=t["gold"]); text.configure(fg=t["text"])
+                else:
+                    icon.configure(text="○", fg=t["text_faint"]); text.configure(fg=t["text_dim"])
+            self.current = key
+        self.detail_lbl.configure(fg=t["text_dim"])
+        self.detail.set(detail)
+
+    def done(self, key: str):
+        icon, text = self.rows[key]
+        icon.configure(text="✓", fg=THEME["ok"])
+        text.configure(fg=THEME["text_dim"])
+
+    def fraction(self, value: float | None):
+        """Fortschritt 0–1, oder None für „läuft“ ohne bekannte Dauer."""
+        if value is None:
+            if str(self.bar.cget("mode")) != "indeterminate":
+                self.bar.configure(mode="indeterminate")
+                self.bar.start(12)
+        else:
+            if str(self.bar.cget("mode")) != "determinate":
+                self.bar.stop()
+                self.bar.configure(mode="determinate", maximum=1000)
+            self.bar.configure(value=max(0, min(1, value)) * 1000)
+
+    def fail(self, text: str):
+        t = THEME
+        if self.current:
+            icon, label = self.rows[self.current]
+            icon.configure(text="✕", fg=t["warn"])
+        self.bar.stop()
+        self.bar.configure(mode="determinate", value=0)
+        self.detail_lbl.configure(fg=t["warn"])
+        self.detail.set(text)
+
+
+class UpdateWindow:
+    """Das sichtbare Manager-Update: Build auf GitHub → Herunterladen → Prüfen → Neustart."""
+
+    def __init__(self, app, tag: str):
+        t = THEME
+        self.app, self.tag = app, tag
+        self.win = tk.Toplevel(app)
+        self.win.fonts = app.fonts
+        self.win.title(tr("Leeroyzan-Update"))
+        self.win.configure(bg=t["panel"])
+        self.win.resizable(False, False)
+        self.win.transient(app)
+        self.win.protocol("WM_DELETE_WINDOW", self.hide)
+        frame = ttk.Frame(self.win, style="Panel.TFrame", padding=(24, 20))
+        frame.pack(fill="both", expand=True)
+        tk.Label(frame, text=tr("Update auf Leeroyzan {0}", tag), bg=t["panel"], fg=t["gold"], font=app.fonts["page"]).pack(anchor="w")
+        ttk.Label(frame, text=tr("Installiert ist v{0}. Du kannst nebenbei weiterarbeiten – vor dem Neustart wartet "
+                                 "Leeroyzan, bis laufende Vorgänge fertig sind.", APP_VERSION),
+                  style="Panel.TLabel", wraplength=470, justify="left").pack(anchor="w", pady=(4, 0))
+        self.steps = UpdateSteps(frame, [("build", tr("Neue Version auf GitHub bereitstellen")), ("download", tr("Herunterladen")),
+                                         ("verify", tr("Prüfen (Prüfsumme)")), ("restart", tr("Neu starten"))])
+        self.btns = ttk.Frame(frame, style="Panel.TFrame")
+        self.btns.pack(fill="x", pady=(16, 0))
+        self.buttons([])
+        self.win.update_idletasks()
+        x = app.winfo_rootx() + (app.winfo_width() - self.win.winfo_reqwidth()) // 2
+        y = app.winfo_rooty() + (app.winfo_height() - self.win.winfo_reqheight()) // 3
+        self.win.geometry(f"+{max(0, x)}+{max(0, y)}")
+
+    def buttons(self, extra: list[tuple[str, callable]], cancel=True):
+        for w in self.btns.winfo_children():
+            w.destroy()
+        for i, (label, cmd) in enumerate(extra):
+            ttk.Button(self.btns, text=label, command=cmd, style="Primary.TButton" if i == 0 else "TButton").pack(
+                side="left", padx=(0 if i == 0 else 8, 0))
+        if cancel:
+            ttk.Button(self.btns, text=tr("Abbrechen"), command=self.app.cancel_manager_update).pack(side="right")
+        ttk.Button(self.btns, text=tr("Im Hintergrund"), command=self.hide).pack(side="right", padx=(0, 8))
+
+    def show(self):
+        if self.alive():
+            self.win.deiconify()
+            self.win.lift()
+
+    def hide(self):
+        if self.alive():
+            self.win.withdraw()
+            self.app.set_status(tr("Leeroyzan-Update auf {0} läuft im Hintergrund – „Nach Manager-Update suchen“ zeigt den Fortschritt wieder.", self.tag))
+
+    def alive(self) -> bool:
+        try:
+            return bool(self.win.winfo_exists())
+        except tk.TclError:
+            return False
+
+    def close(self):
+        if self.alive():
+            self.win.destroy()
+
+
 SET_ALL_OFF = "— Alle deaktivieren —"
 SET_ALL_ON = "— Alle aktivieren —"
 
@@ -5008,7 +5238,7 @@ class App(BaseTk):
                 log.warning("Drag & Drop nicht verfügbar: %s", e)
         if self.cfg.get("check_on_start") and self.sources():
             self.after(700, lambda: self.check_updates(silent=True))
-        cleanup_self_update()
+        self._cleanup_update_file()
         self.after(10000, self._watch_sessions)
         self.after(900, self._report_self_update)
         if self.cfg.get("self_update_mode") != "off":
@@ -8687,6 +8917,7 @@ class App(BaseTk):
     def run_bg(self, label: str, func, on_done=None, on_error=None):
         """Führt func im Hintergrund aus; on_done(result) läuft im GUI-Thread."""
         self.busy = True
+        self.busy_label = label
         self.set_status(label + " …")
         self.config(cursor="watch")
 
@@ -10727,6 +10958,11 @@ class App(BaseTk):
                     lambda: restore_backup(chosen["path"], root, flavor), done)
 
     # ----- Selbst-Update --------------------------------------------------- #
+    def _cleanup_update_file(self, tries: int = 0):
+        """Leeroyzan.new.exe wegräumen – direkt nach einem Update ist sie noch kurz in Benutzung."""
+        if not cleanup_self_update() and tries < 10:
+            self.after(3000, lambda: self._cleanup_update_file(tries + 1))
+
     def _report_self_update(self):
         """Nach einem Neustart durch das Manager-Update: Erfolg melden oder erklären, was schiefging."""
         pending = self.cfg.pop("pending_self_update", None)
@@ -10743,6 +10979,11 @@ class App(BaseTk):
             self.open_link(f"https://github.com/{UPDATE_REPO}/releases/latest")
 
     def check_manager_update(self, silent: bool = False):
+        w = getattr(self, "update_win", None)
+        if w is not None and w.alive() and (self.watching_build or not getattr(self, "update_progress", {}).get("finished", True)):
+            if not silent:
+                w.show()                     # ein Update läuft schon: dessen Fenster zeigen
+            return
         if self.busy:
             if silent:                       # z. B. während der Addon-Prüfung beim Start
                 self.after(2000, lambda: self.check_manager_update(silent=True))
@@ -10820,28 +11061,71 @@ class App(BaseTk):
             actions.append((tr("Überspringen"), skip))
         self.notify(text, "update", actions, key="manager")
 
-    BUILD_POLL_MS = 60_000          # jede Minute nachsehen (GitHub erlaubt ohne Token 60 Abfragen/Stunde) …
-    BUILD_POLL_TRIES = 30           # … höchstens 30 Minuten lang
+    BUILD_POLL_MS = 30_000          # alle 30 Sekunden nachsehen (GitHub erlaubt ohne Token 60 Abfragen/Stunde) …
+    BUILD_POLL_TRIES = 50           # … höchstens etwa 25 Minuten lang
+
+    def _update_window(self, tag: str, show: bool = True) -> "UpdateWindow":
+        w = getattr(self, "update_win", None)
+        if w is None or not w.alive() or w.tag != tag:
+            if w is not None:
+                w.close()
+            w = self.update_win = UpdateWindow(self, tag)
+        if show:
+            w.show()
+        return w
+
+    def cancel_manager_update(self):
+        self.watching_build = ""
+        prog = getattr(self, "update_progress", None)
+        if prog is not None:
+            prog["cancel"] = True
+        self._update_cancelled = True
+        w = getattr(self, "update_win", None)
+        if w is not None:
+            w.close()
+        self.set_status(tr("Manager-Update abgebrochen."))
+        log.info("Manager-Update abgebrochen")
+
+    def _build_countdown(self, tag: str, started: float, next_at: float):
+        """Zählt im Update-Fenster die Zeit bis zur nächsten Nachfrage bei GitHub herunter."""
+        w = getattr(self, "update_win", None)
+        if self.watching_build != tag or w is None or not w.alive():
+            return
+        waited = int(time.time() - started)
+        left = max(0, int(next_at - time.time()))
+        w.steps.set("build", tr("GitHub baut die neue Leeroyzan.exe – das dauert meist 1–5 Minuten.\n"
+                                "Wartet seit {0}:{1:02d} min · nächste Nachfrage in {2} s.", waited // 60, waited % 60, left))
+        self.after(1000, lambda: self._build_countdown(tag, started, next_at))
 
     def watch_manager_build(self, tag: str, tries: int = 0, manual: bool = False):
         """Wartet im Hintergrund, bis die .exe des Releases gebaut ist, und installiert sie dann automatisch."""
         if tries == 0:
             if self.watching_build == tag:
-                return                               # läuft schon
+                self._update_window(tag)             # läuft schon – Fenster wieder zeigen
+                return
             self.watching_build = tag
             self._watch_manual = manual
+            self._build_started = time.time()
             log.info("Manager-Update %s: warte auf den Build der .exe", tag)
+            w = self._update_window(tag)
+            w.buttons([(tr("Actions-Seite ↗"), lambda: self.open_link(f"https://github.com/{UPDATE_REPO}/actions"))])
         if self.watching_build != tag:
             return
         if tries >= self.BUILD_POLL_TRIES:
             self.watching_build = ""
             log.warning("Manager-Update %s: .exe nach %d Versuchen nicht fertig", tag, tries)
             self.set_status(tr("Für {0} ist auf GitHub keine Leeroyzan.exe erschienen.", tag))
+            w = getattr(self, "update_win", None)
+            if w is not None and w.alive():
+                w.steps.fail(tr("Nach etwa 25 Minuten ist noch keine Leeroyzan.exe am Release – der Build auf GitHub ist "
+                                "wahrscheinlich fehlgeschlagen (rotes X unter „Actions“, dort „Re-run jobs“)."))
+                w.buttons([(tr("Actions-Seite ↗"), lambda: self.open_link(f"https://github.com/{UPDATE_REPO}/actions"))])
             if self._watch_manual:
                 self.notify(tr("Für {0} ist auch nach 30 Minuten keine Leeroyzan.exe am Release – wahrscheinlich ist der automatische Build auf GitHub fehlgeschlagen (rotes X unter „Actions“, dort „Re-run jobs“).", tag), "warn",
                             [(tr("Actions-Seite ↗"), lambda: self.open_link(f"https://github.com/{UPDATE_REPO}/actions"))],
                             key="manager")
             return
+        self.after(10, lambda: self._build_countdown(tag, self._build_started, time.time()))
         mins = tries * self.BUILD_POLL_MS // 60_000
         self.manager_state.set(tr("Installiert: v{0}  ·  {1} wird auf GitHub noch gebaut", APP_VERSION, tag)
                                + (tr(" (seit {0} min)", mins) if mins else "") + tr(" – Installation folgt automatisch."))
@@ -10860,56 +11144,132 @@ class App(BaseTk):
                 self.watching_build = ""
                 self.install_manager_update(info, automatic=True)
                 return
+            next_at = time.time() + self.BUILD_POLL_MS / 1000
+            self.after(10, lambda: self._build_countdown(tag, self._build_started, next_at))
             self.after(self.BUILD_POLL_MS, lambda: self.watch_manager_build(tag, tries + 1))
 
         self.run_quiet(lambda: check_self_update(token), done)
 
-    def install_manager_update(self, info: dict, automatic: bool = False):
-        """Lädt die neue .exe, beendet den Manager und lässt sie per Skript einsetzen."""
-        if self.busy:                         # laufende Vorgänge nie unterbrechen
-            self.after(2000, lambda: self.install_manager_update(info, automatic))
+    def install_manager_update(self, info: dict, automatic: bool = False, _first: bool = True):
+        """Lädt die neue .exe (mit Fortschritt im Update-Fenster) und lässt sie sich selbst einsetzen."""
+        tag = info["tag"]
+        w = self._update_window(tag)
+        if _first:
+            self._update_cancelled = False
+        if self._update_cancelled:
+            return
+        w.steps.done("build")
+        if self.busy:                         # laufende Vorgänge nie unterbrechen – aber sichtbar warten
+            w.steps.set("download", tr("Wartet, bis „{0}“ fertig ist …", getattr(self, "busy_label", tr("ein Vorgang"))))
+            self.after(1000, lambda: self.install_manager_update(info, automatic, _first=False))
             return
         token = self.cfg.get("github_token", "")
+        prog = self.update_progress = {"done": 0, "total": 0, "phase": "download"}
+        w.buttons([])
+        started = time.time()
+
+        def tick():
+            if not w.alive() or self.update_progress is not prog or prog.get("finished"):
+                return
+            if prog.get("phase") == "verify":
+                w.steps.set("verify", tr("Vergleiche die Prüfsumme mit der von GitHub …"))
+                w.steps.fraction(None)
+            else:
+                done_b, total = prog.get("done", 0), prog.get("total", 0)
+                speed = done_b / max(0.5, time.time() - started)
+                if total:
+                    w.steps.fraction(done_b / total)
+                    w.steps.set("download", tr("{0} von {1} MB · {2} MB/s", f"{done_b / 1e6:.1f}", f"{total / 1e6:.1f}",
+                                               f"{speed / 1e6:.1f}"))
+                else:
+                    w.steps.fraction(None)
+                    w.steps.set("download", tr("{0} MB geladen …", f"{done_b / 1e6:.1f}"))
+            self.after(150, tick)
+        tick()
 
         def done(new_exe):
-            log.info("Manager-Update %s geladen (%s), starte neu.", info["tag"],
-                     "automatisch" if automatic else "manuell")
-            if automatic and self.busy:
-                self.after(2000, lambda: done(new_exe))
+            prog["finished"] = True
+            if self._update_cancelled:
+                cleanup_self_update()
                 return
-            try:
-                self.cfg["pending_self_update"] = {"from": APP_VERSION, "to": info["tag"]}
-                save_config(self.cfg)
-                if is_frozen():
-                    launch_replacer(new_exe)
-                else:
-                    apply_script_update(new_exe)
-            except Exception as e:  # noqa
-                self.cfg.pop("pending_self_update", None)
-                save_config(self.cfg)
-                self.error(tr("Update konnte nicht gestartet werden:\n{0}", e))
+            log.info("Manager-Update %s geladen (%s), starte neu.", tag, "automatisch" if automatic else "manuell")
+            w.steps.done("download")
+            w.steps.done("verify")
+            w.steps.fraction(1)
+            if self.busy:
+                w.steps.set("restart", tr("Fertig geladen – wartet, bis „{0}“ fertig ist, dann startet Leeroyzan neu …",
+                                          getattr(self, "busy_label", tr("ein Vorgang"))))
+                self.after(1000, lambda: done(new_exe))
                 return
-            self.destroy()
+            self._restart_countdown(tag, new_exe, 3)
 
         def failed(err):
+            prog["finished"] = True
+            if isinstance(err, UpdateCancelled):
+                cleanup_self_update()
+                return
             log.error("Manager-Update fehlgeschlagen: %s", err)
             if isinstance(err, PermissionError):
                 err = (tr("Keine Schreibrechte im Ordner {0}.\nLege Leeroyzan.exe in einen eigenen Ordner, z. B. Dokumente\\Leeroyzan.", Path(sys.executable).parent))
+            elif isinstance(err, urllib.error.URLError):
+                err = tr("Keine Verbindung zu GitHub ({0}).", getattr(err, "reason", err))
+            if w.alive():
+                w.steps.fail(tr("Das hat nicht geklappt: {0}", err))
+                w.buttons([(tr("Nochmal versuchen"), lambda: self.install_manager_update(info, automatic)),
+                           (tr("Release-Seite ↗"), lambda: self.open_link(info.get("page") or f"https://github.com/{UPDATE_REPO}/releases"))])
             if automatic:
                 self.set_status(tr("Automatisches Manager-Update fehlgeschlagen – siehe Log."))
-                if self.cfg.get("self_update_failed_tag") == info["tag"]:
+                if self.cfg.get("self_update_failed_tag") == tag:
                     return                    # pro Version nur einmal melden
-                self.cfg["self_update_failed_tag"] = info["tag"]
+                self.cfg["self_update_failed_tag"] = tag
                 save_config(self.cfg)
             self.notify(tr("Das Leeroyzan-Update ist fehlgeschlagen: {0}", err), "error",
-                        [(tr("Release-Seite ↗"), lambda: self.open_link(info.get("page") or
-                                                                    f"https://github.com/{UPDATE_REPO}/releases"))],
-                        key="manager")
+                        [(tr("Details"), lambda: self._update_window(tag))], key="manager")
 
-        label = (tr("Neue Version {0} gefunden – wird installiert, der Manager startet gleich neu", info['tag'])
-                 if automatic else tr("Lade Manager {0}", info['tag']))
         fetch = download_self_update if is_frozen() else download_script_update
-        self.run_bg(label, lambda: fetch(info, token), done, failed)
+        self.set_status(tr("{0} Lade Leeroyzan {1} …", UPD_MARK, tag))
+        self.manager_state.set(tr("Installiert: v{0}  ·  {1} wird geladen und eingesetzt.", APP_VERSION, tag))
+        self.run_quiet(lambda: fetch(info, token, prog), lambda res, err: failed(err) if err else done(res))
+
+    def _restart_countdown(self, tag: str, new_exe: Path, seconds: int):
+        """Kurz ankündigen, dann beenden; die neue Version setzt sich in ihrem eigenen Fenster ein."""
+        w = getattr(self, "update_win", None)
+        if self._update_cancelled:
+            cleanup_self_update()
+            return
+        if seconds > 0 and w is not None and w.alive():
+            w.show()
+            w.steps.set("restart", tr("Leeroyzan schließt sich in {0} s – die neue Version zeigt dann ein kleines Fenster, "
+                                      "setzt sich ein und startet von selbst neu.", seconds))
+            w.buttons([(tr("Jetzt neu starten"), lambda: self._restart_countdown(tag, new_exe, 0))])
+            self._restart_job = self.after(1000, lambda: self._restart_countdown(tag, new_exe, seconds - 1))
+            return
+        if getattr(self, "_restart_job", None):
+            try:
+                self.after_cancel(self._restart_job)
+            except tk.TclError:
+                pass
+        if getattr(self, "_restarting", False):
+            return
+        self._restarting = True
+        try:
+            self.cfg["pending_self_update"] = {"from": APP_VERSION, "to": tag}
+            save_config(self.cfg)
+            if is_frozen():
+                launch_update_finisher(new_exe, tag)
+            else:
+                apply_script_update(new_exe)
+        except Exception as e:  # noqa
+            self._restarting = False
+            self.cfg.pop("pending_self_update", None)
+            save_config(self.cfg)
+            if w is not None and w.alive():
+                w.steps.fail(tr("Update konnte nicht gestartet werden: {0}", e))
+            else:
+                self.error(tr("Update konnte nicht gestartet werden:\n{0}", e))
+            return
+        self.destroy()
+
 
     # ----- Drag & Drop ----------------------------------------------------- #
     def on_drop(self, event):
@@ -12728,8 +13088,114 @@ TRANSLATIONS["en"] = {
 }
 
 
+def finish_update_main(old_exe: Path, pids: list[int], tag: str) -> None:
+    """Läuft in der NEUEN Version (als Leeroyzan.new.exe): sichtbares Fenster, das die alte Datei ersetzt."""
+    cfg = load_config()
+    set_language(cfg.get("language", "de"))
+    root = BaseTk()
+    root.withdraw()
+    root.fonts = apply_theme(root)
+    t = THEME
+    root.title(tr("Leeroyzan-Update"))
+    root.configure(bg=t["panel"])
+    root.resizable(False, False)
+    frame = ttk.Frame(root, style="Panel.TFrame", padding=(24, 20))
+    frame.pack(fill="both", expand=True)
+    tk.Label(frame, text=tr("Leeroyzan {0} wird eingesetzt", tag), bg=t["panel"], fg=t["gold"],
+             font=root.fonts["page"]).pack(anchor="w")
+    steps = UpdateSteps(frame, [("wait", tr("Alte Version beenden")), ("replace", tr("Leeroyzan.exe ersetzen")),
+                                ("start", tr("Neue Version starten"))])
+    btns = ttk.Frame(frame, style="Panel.TFrame")
+    btns.pack(fill="x", pady=(16, 0))
+    ulog = config_dir() / "update.log"
+    me = Path(sys.executable)
+
+    def note(text):
+        try:
+            with ulog.open("a", encoding="utf-8") as f:
+                f.write(f"{datetime.now():%d.%m.%Y %H:%M:%S} {text}\n")
+        except OSError:
+            pass
+
+    state = {"result": None}
+
+    def work():
+        steps.set("wait", tr("Warte, bis die alte Version beendet ist …"))
+        for pid in pids:
+            if not wait_for_exit(pid, 30):
+                state["result"] = ("error", tr("Die alte Version (Prozess {0}) hat sich nach 30 Sekunden noch nicht beendet. "
+                                               "Schließe Leeroyzan von Hand (Task-Manager) und versuche es nochmal.", pid))
+                return
+        steps.set("replace", tr("Ersetze {0} …", old_exe.name))
+        last = None
+        for attempt in range(1, 61):
+            try:
+                replace_exe(me, old_exe)
+                note(f"ersetzt durch {tag}")
+                state["result"] = ("ok", None)
+                return
+            except OSError as e:
+                last = e
+                steps.set("replace", tr("Die Datei ist noch gesperrt – Versuch {0} von 60 (oft prüft gerade ein Virenscanner die neue Datei) …", attempt))
+                time.sleep(1)
+        note(f"FEHLER: {old_exe} nicht ersetzt: {last}")
+        state["result"] = ("error", tr("{0} ließ sich nicht ersetzen: {1}\n\nHäufige Ursachen: ein Virenscanner, OneDrive oder ein "
+                                       "geschützter Ordner. Lege Leeroyzan am besten in einen eigenen Ordner.", old_exe.name, last))
+
+    def start_new():
+        steps.set("start", tr("Starte Leeroyzan {0} …", tag))
+        try:
+            subprocess.Popen([str(old_exe)], close_fds=True, env=clean_child_env(),
+                             creationflags=0x00000008 if os.name == "nt" else 0)
+        except OSError as e:
+            show_error(tr("Leeroyzan konnte nicht gestartet werden: {0}", e))
+            return
+        steps.done("start")
+        root.after(1200, root.destroy)
+
+    def show_error(text):
+        steps.fail(text)
+        for w in btns.winfo_children():
+            w.destroy()
+        ttk.Button(btns, text=tr("Nochmal versuchen"), style="Primary.TButton", command=begin).pack(side="left")
+        ttk.Button(btns, text=tr("Neue Version trotzdem starten"),
+                   command=lambda: (subprocess.Popen([str(me)], close_fds=True, env=clean_child_env()), root.destroy())).pack(side="left", padx=(8, 0))
+        ttk.Button(btns, text=tr("Schließen"), command=root.destroy).pack(side="right")
+
+    def poll():
+        res = state["result"]
+        if res is None:
+            root.after(150, poll)
+        elif res[0] == "ok":
+            steps.done("replace")
+            start_new()
+        else:
+            show_error(res[1])
+
+    def begin():
+        for w in btns.winfo_children():
+            w.destroy()
+        state["result"] = None
+        threading.Thread(target=work, daemon=True).start()
+        poll()
+
+    root.update_idletasks()
+    root.geometry(f"+{(root.winfo_screenwidth() - 520) // 2}+{(root.winfo_screenheight() - 300) // 3}")
+    root.deiconify()
+    root.after(200, begin)
+    root.mainloop()
+
+
 def main():
     setup_logging()
+    if len(sys.argv) >= 5 and sys.argv[1] == FINISH_FLAG:
+        try:
+            pids = [int(x) for x in sys.argv[3].split(",") if x.strip().isdigit()]
+        except ValueError:
+            pids = []
+        log.info("Update %s: setze die neue Version ein (%s)", sys.argv[4], sys.argv[2])
+        finish_update_main(Path(sys.argv[2]), pids, sys.argv[4])
+        return
     app = App()
     app.mainloop()
 
@@ -12771,6 +13237,53 @@ TRANSLATIONS["en"].update({
     "Leeroyzan Link heißt jetzt Leeroylink. Ein Klick stellt um und übernimmt deine Daten (WoW muss dafür geschlossen sein).":
         "Leeroyzan Link is now called Leeroylink. One click switches over and keeps your data (WoW has to be closed).",
     "Umstellen": "Switch",
+    "Leeroyzan-Update": "Leeroyzan update",
+    "Leeroyzan {0} wird eingesetzt": "Setting up Leeroyzan {0}",
+    "Alte Version beenden": "Close the old version",
+    "Leeroyzan.exe ersetzen": "Replace Leeroyzan.exe",
+    "Neue Version starten": "Start the new version",
+    "Warte, bis die alte Version beendet ist …": "Waiting for the old version to close …",
+    "Die alte Version (Prozess {0}) hat sich nach 30 Sekunden noch nicht beendet. Schließe Leeroyzan von Hand (Task-Manager) und versuche es nochmal.":
+        "The old version (process {0}) has not closed after 30 seconds. Close Leeroyzan by hand (Task Manager) and try again.",
+    "Ersetze {0} …": "Replacing {0} …",
+    "Die Datei ist noch gesperrt – Versuch {0} von 60 (oft prüft gerade ein Virenscanner die neue Datei) …":
+        "The file is still locked – attempt {0} of 60 (often a virus scanner is checking the new file) …",
+    "{0} ließ sich nicht ersetzen: {1}\n\nHäufige Ursachen: ein Virenscanner, OneDrive oder ein geschützter Ordner. Lege Leeroyzan am besten in einen eigenen Ordner.":
+        "{0} could not be replaced: {1}\n\nCommon causes: a virus scanner, OneDrive or a protected folder. Best keep Leeroyzan in a folder of its own.",
+    "Starte Leeroyzan {0} …": "Starting Leeroyzan {0} …",
+    "Leeroyzan konnte nicht gestartet werden: {0}": "Leeroyzan could not be started: {0}",
+    "Nochmal versuchen": "Try again",
+    "Neue Version trotzdem starten": "Start the new version anyway",
+    "Schließen": "Close",
+    "Update auf Leeroyzan {0}": "Update to Leeroyzan {0}",
+    "Installiert ist v{0}. Du kannst nebenbei weiterarbeiten – vor dem Neustart wartet Leeroyzan, bis laufende Vorgänge fertig sind.":
+        "Installed is v{0}. You can keep working – before restarting, Leeroyzan waits until running tasks are done.",
+    "Neue Version auf GitHub bereitstellen": "New version provided on GitHub",
+    "Herunterladen": "Download",
+    "Prüfen (Prüfsumme)": "Verify (checksum)",
+    "Neu starten": "Restart",
+    "Im Hintergrund": "In the background",
+    "Leeroyzan-Update auf {0} läuft im Hintergrund – „Nach Manager-Update suchen“ zeigt den Fortschritt wieder.":
+        "Leeroyzan update to {0} is running in the background – \"Check for manager update\" shows the progress again.",
+    "Manager-Update abgebrochen.": "Manager update cancelled.",
+    "GitHub baut die neue Leeroyzan.exe – das dauert meist 1–5 Minuten.\nWartet seit {0}:{1:02d} min · nächste Nachfrage in {2} s.":
+        "GitHub is building the new Leeroyzan.exe – this usually takes 1–5 minutes.\nWaiting for {0}:{1:02d} min · next check in {2} s.",
+    "Nach etwa 25 Minuten ist noch keine Leeroyzan.exe am Release – der Build auf GitHub ist wahrscheinlich fehlgeschlagen (rotes X unter „Actions“, dort „Re-run jobs“).":
+        "After about 25 minutes there is still no Leeroyzan.exe on the release – the build on GitHub probably failed (red X under \"Actions\", there \"Re-run jobs\").",
+    "Wartet, bis „{0}“ fertig ist …": "Waiting until \"{0}\" is done …",
+    "ein Vorgang": "a task",
+    "Vergleiche die Prüfsumme mit der von GitHub …": "Comparing the checksum with GitHub's …",
+    "{0} von {1} MB · {2} MB/s": "{0} of {1} MB · {2} MB/s",
+    "{0} MB geladen …": "{0} MB downloaded …",
+    "Fertig geladen – wartet, bis „{0}“ fertig ist, dann startet Leeroyzan neu …":
+        "Downloaded – waiting until \"{0}\" is done, then Leeroyzan restarts …",
+    "Das hat nicht geklappt: {0}": "That did not work: {0}",
+    "{0} Lade Leeroyzan {1} …": "{0} Downloading Leeroyzan {1} …",
+    "Leeroyzan schließt sich in {0} s – die neue Version zeigt dann ein kleines Fenster, setzt sich ein und startet von selbst neu.":
+        "Leeroyzan closes in {0} s – the new version then shows a small window, sets itself up and restarts on its own.",
+    "Jetzt neu starten": "Restart now",
+    "Installiert: v{0}  ·  {1} wird geladen und eingesetzt.": "Installed: v{0}  ·  {1} is being downloaded and set up.",
+    "Update konnte nicht gestartet werden: {0}": "The update could not be started: {0}",
     "Die Daten von „Leeroyzan Link“ sind für Leeroylink übernommen (Charaktere, Rezepte, Fehlerlog, Sitzungen).":
         "The data of \"Leeroyzan Link\" has been carried over to Leeroylink (characters, recipes, error log, sessions).",
     "Alle Kategorien": "All categories",
