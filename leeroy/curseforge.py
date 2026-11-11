@@ -345,7 +345,8 @@ def cf_check(src: dict, key: str, flavor: str, game_ver: str) -> dict:
     return info
 
 
-def cf_install_asset(asset: dict, info: dict, root: str, flavor: str, key: str) -> list[str]:
+def cf_install_asset(asset: dict, info: dict, root: str, flavor: str, key: str,
+                     rollback: tuple[str, dict] | None = None) -> list[str]:
     page = info.get("page", "").rstrip("/") + "/files"
     if not info.get("allow_dl", True):
         raise ManualDownload(page, tr("Der Autor erlaubt keinen Download über Programme wie diesen."))
@@ -369,7 +370,7 @@ def cf_install_asset(asset: dict, info: dict, root: str, flavor: str, key: str) 
         tmp.write(blob)
         tmp_path = Path(tmp.name)
     try:
-        return install_zip(tmp_path, root, flavor)
+        return install_zip(tmp_path, root, flavor, rollback=rollback)
     finally:
         tmp_path.unlink(missing_ok=True)
 

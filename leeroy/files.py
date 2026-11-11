@@ -8,13 +8,14 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
 from datetime import datetime
 from pathlib import Path
 
 from .constants import APP_NAME, APP_VERSION
 from .i18n import tr
-from .config import AUTO_BACKUPS_KEEP, BACKUP_DIR, config_dir
+from .config import AUTO_BACKUPS_KEEP, BACKUP_DIR, config_dir, log, write_text_atomic
 from .wow import Addon, clean_wow_text
 
 
@@ -72,32 +73,135 @@ def find_addon_folders(base: Path, max_depth: int = 3) -> list[Path]:
     return found
 
 
-def install_zip(zip_path: Path, root: str, flavor: str) -> list[str]:
-    target = addons_dir(root, flavor)
-    target.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp_p = Path(tmp)
+STAGING_PREFIX = ".leeroyzan-"
+
+
+def staging_dir(root: str, flavor: str) -> Path:
+    """Arbeitsordner auf demselben Laufwerk wie AddOns (Interface/.leeroyzan-…): Einsetzen und Beiseitelegen
+    sind dann ein Umbenennen statt Kopieren. WoW lädt nur Interface/AddOns, der Ordner stört das Spiel nicht."""
+    base = addons_dir(root, flavor).parent
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+        return Path(tempfile.mkdtemp(prefix=STAGING_PREFIX, dir=base))
+    except OSError:
+        return Path(tempfile.mkdtemp(prefix=STAGING_PREFIX))
+
+
+def recover_staging(root: str, flavor: str, min_age: float = 600) -> list[str]:
+    """Räumt Arbeitsordner abgebrochener Vorgänge auf. Liegt darin noch ein beiseitegelegtes Addon, das im
+    AddOns-Ordner fehlt (Absturz mitten im Tausch), kommt es zurück. Gibt die zurückgeholten Namen zurück."""
+    base = addons_dir(root, flavor).parent
+    back = []
+    try:
+        leftovers = [d for d in base.iterdir() if d.is_dir() and d.name.startswith(STAGING_PREFIX)
+                     and time.time() - d.stat().st_mtime >= min_age]
+    except OSError:
+        return back
+    for work in leftovers:
+        trash = work / "old"
+        for d in sorted(trash.iterdir()) if trash.is_dir() else []:
+            name = d.name.split("_", 1)[-1]
+            if d.is_dir() and valid_addon_name(name) and not (addons_dir(root, flavor) / name).exists() \
+                    and not (disabled_dir(root, flavor) / name).exists():
+                try:
+                    shutil.move(str(d), str(addons_dir(root, flavor) / name))
+                    back.append(name)
+                except OSError as e:
+                    log.warning("Konnte %s nicht zurückholen: %s", name, e)
+        shutil.rmtree(work, ignore_errors=True)
+    if back:
+        log.warning("Nach einem abgebrochenen Vorgang zurückgeholt: %s", ", ".join(back))
+    return back
+
+
+class FolderSwap:
+    """Ordner tauschen mit Rückweg: Altes wird in den Arbeitsordner gelegt, Neues hineinbewegt. Geht ein Schritt
+    schief, macht undo() alles rückgängig – ein Addon fehlt nie, weil das Kopieren mittendrin scheiterte."""
+
+    def __init__(self, work: Path):
+        self.trash = work / "old"
+        self.trash.mkdir(parents=True, exist_ok=True)
+        self.steps: list[tuple[Path, Path]] = []      # (wohin zurück, wo es jetzt liegt)
+
+    def take_out(self, path: Path) -> Path:
+        dest = self.trash / f"{len(self.steps)}_{path.name}"
+        shutil.move(str(path), str(dest))
+        self.steps.append((path, dest))
+        return dest
+
+    def put_in(self, src: Path, dest: Path) -> None:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(src), str(dest))
+        self.steps.append((src, dest))
+
+    def undo(self) -> None:
+        for back, now in reversed(self.steps):
+            try:
+                if now.exists() and not back.exists():
+                    shutil.move(str(now), str(back))
+            except OSError as e:
+                log.error("Rückgängig fehlgeschlagen (%s -> %s): %s", now, back, e)
+        self.steps.clear()
+
+
+def addon_target_name(folder: Path) -> str:
+    """Ordnernamen von GitHub-Zipballs wie „Repo-1.2.3“ bereinigen."""
+    name = folder.name
+    tocs = [t.stem for t in folder.glob("*.toc")]
+    if tocs and not any(t.lower().startswith(name.lower()) for t in tocs):
+        name = re.split(r"[_-]", tocs[0])[0]
+    return name
+
+
+def swap_addon_folders(plan: list[tuple[Path, str]], root: str, flavor: str, work: Path) -> dict[str, tuple[Path, bool]]:
+    """Setzt die Ordner aus plan (Quelle, Name) in AddOns ein. Gibt die beiseitegelegten alten Fassungen zurück:
+    Name -> (Pfad im Arbeitsordner, war aktiviert). Bei einem Fehler ist alles wie vorher."""
+    target, disabled = addons_dir(root, flavor), disabled_dir(root, flavor)
+    swap = FolderSwap(work)
+    olds: dict[str, tuple[Path, bool]] = {}
+    try:
+        for src, name in plan:
+            dest, dis = target / name, disabled / name
+            if dest.exists():
+                olds[name] = (swap.take_out(dest), True)
+            if dis.exists():
+                moved = swap.take_out(dis)
+                olds.setdefault(name, (moved, False))
+            swap.put_in(src, dest)
+    except Exception:
+        swap.undo()
+        raise
+    return olds
+
+
+def install_zip(zip_path: Path, root: str, flavor: str, rollback: tuple[str, dict] | None = None) -> list[str]:
+    """Installiert alle Addons aus einem ZIP. rollback=(Quellen-ID, Quelle): die alte Fassung wird für
+    „Rückgängig“ aufbewahrt – verschoben, nicht kopiert."""
+    addons_dir(root, flavor).mkdir(parents=True, exist_ok=True)
+    work = staging_dir(root, flavor)
+    try:
+        ext = work / "new"
+        ext.mkdir()
         with zipfile.ZipFile(zip_path) as zf:
-            safe_extract(zf, tmp_p)
-        folders = find_addon_folders(tmp_p)
+            safe_extract(zf, ext)
+        folders = find_addon_folders(ext)
         if not folders:
             raise ValueError(tr("Im Archiv wurde kein Addon (Ordner mit passender .toc) gefunden."))
-        installed = []
+        plan, seen = [], set()
         for f in folders:
-            # Ordnernamen von GitHub-Zipballs wie "Repo-1.2.3" bereinigen
-            name = f.name
-            tocs = [t.stem for t in f.glob("*.toc")]
-            if tocs and not any(t.lower().startswith(name.lower()) for t in tocs):
-                name = re.split(r"[_-]", tocs[0])[0]
-            dest = target / name
-            dis = disabled_dir(root, flavor) / name
-            if dis.exists():
-                shutil.rmtree(dis)
-            if dest.exists():
-                shutil.rmtree(dest)
-            shutil.copytree(f, dest)
-            installed.append(name)
-        return installed
+            name = addon_target_name(f)
+            if valid_addon_name(name) and name.lower() not in seen:
+                seen.add(name.lower())
+                plan.append((f, name))
+        olds = swap_addon_folders(plan, root, flavor, work)
+        if rollback:
+            try:
+                keep_rollback(root, flavor, rollback[0], rollback[1], olds, {n for _, n in plan})
+            except Exception as e:  # noqa – Rückgängig ist ein Extra, das Update ist schon drin
+                log.warning("Vorversion von %s nicht aufbewahrt: %s", rollback[0], e)
+        return [n for _, n in plan]
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
 
 
 def set_enabled(addon: Addon, root: str, flavor: str, enable: bool) -> None:
@@ -157,9 +261,16 @@ def restore_backup(backup: Path, root: str, flavor: str) -> Path | None:
         new = tmp_p / "WTF"
         if not new.is_dir():
             raise ValueError(tr("Das Backup enthält keinen WTF-Ordner."))
+        old = None
         if wtf.exists():
-            shutil.rmtree(wtf)
-        shutil.move(str(new), str(wtf))
+            old = tmp_p / "WTF.alt"
+            wtf.rename(old)                       # gleicher Ordner: Umbenennen, nichts geht verloren
+        try:
+            new.rename(wtf)
+        except OSError:
+            if old is not None and not wtf.exists():
+                old.rename(wtf)
+            raise
     return safety
 
 
@@ -171,30 +282,90 @@ def rollback_dir(flavor: str, sid: str) -> Path:
     return config_dir() / "rollback" / (flavor.strip("_") or "wow") / re.sub(r"[^\w.-]", "_", sid)
 
 
-def save_rollback(root: str, flavor: str, sid: str, src: dict) -> bool:
-    """Kopiert die installierten Ordner einer Quelle vor einem Update weg (je Addon nur die letzte Version)."""
-    found = []
-    for name in src.get("folders", []):
-        if not valid_addon_name(name):
-            continue
-        for base, on in ((addons_dir(root, flavor), True), (disabled_dir(root, flavor), False)):
-            if (base / name).is_dir():
-                found.append((base / name, on))
-                break
-    if not found:
-        return False
+def keep_rollback(root: str, flavor: str, sid: str, src: dict, olds: dict[str, tuple[Path, bool]],
+                  replaced: set[str]) -> bool:
+    """Bewahrt die alte Fassung einer Quelle für „Rückgängig“ auf (je Addon nur die letzte Version).
+    olds kommt von swap_addon_folders und wird verschoben; Ordner der Quelle, die das Update nicht
+    angefasst hat, werden kopiert, damit „Rückgängig“ wieder den vollständigen Stand herstellt."""
     dest = rollback_dir(flavor, sid)
     tmp = dest.with_name(dest.name + ".tmp")
     shutil.rmtree(tmp, ignore_errors=True)
     (tmp / "AddOns").mkdir(parents=True)
-    for path, _ in found:
-        shutil.copytree(path, tmp / "AddOns" / path.name)
-    meta = {"sid": sid, "source": src, "saved": datetime.now().isoformat(timespec="seconds"),
-            "enabled": {path.name: on for path, on in found}}
-    (tmp / "rollback.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
+    enabled: dict[str, bool] = {}
+    for name, (path, on) in olds.items():
+        shutil.move(str(path), str(tmp / "AddOns" / name))
+        enabled[name] = on
+    for name in src.get("folders", []):
+        if name in enabled or name in replaced or not valid_addon_name(name):
+            continue
+        for base, on in ((addons_dir(root, flavor), True), (disabled_dir(root, flavor), False)):
+            if (base / name).is_dir():
+                shutil.copytree(base / name, tmp / "AddOns" / name)
+                enabled[name] = on
+                break
+    if not enabled:
+        shutil.rmtree(tmp, ignore_errors=True)
+        return False
+    meta = {"sid": sid, "source": src, "saved": datetime.now().isoformat(timespec="seconds"), "enabled": enabled}
+    write_text_atomic(tmp / "rollback.json", json.dumps(meta, ensure_ascii=False, indent=1))
     shutil.rmtree(dest, ignore_errors=True)
     tmp.rename(dest)
     return True
+
+
+def save_rollback(root: str, flavor: str, sid: str, src: dict) -> bool:
+    """Kopiert die installierten Ordner einer Quelle weg (für Wege, die nicht über install_zip laufen)."""
+    return keep_rollback(root, flavor, sid, src, {}, set())
+
+
+def rollback_root() -> Path:
+    return config_dir() / "rollback"
+
+
+def rollback_usage() -> tuple[int, int]:
+    """(Bytes, Anzahl) aller aufbewahrten Vorversionen."""
+    size = count = 0
+    base = rollback_root()
+    if not base.is_dir():
+        return 0, 0
+    for meta in base.glob("*/*/rollback.json"):
+        count += 1
+        for f in meta.parent.rglob("*"):
+            try:
+                if f.is_file():
+                    size += f.stat().st_size
+            except OSError:
+                pass
+    return size, count
+
+
+ROLLBACK_MAX_DAYS = 60
+
+
+def prune_rollbacks(flavor: str, keep: set[str] | None = None, max_days: int = ROLLBACK_MAX_DAYS,
+                    everything: bool = False) -> int:
+    """Löscht Vorversionen von Addons, die es nicht mehr gibt (keep = bekannte Quellen-IDs), solche, die älter
+    als max_days sind, und Reste abgebrochener Vorgänge. everything=True löscht alle dieser Spielversion."""
+    base = rollback_root() / (flavor.strip("_") or "wow")
+    if not base.is_dir():
+        return 0
+    removed = 0
+    limit = time.time() - max_days * 86400
+    for d in base.iterdir():
+        if not d.is_dir():
+            continue
+        meta = None
+        try:
+            meta = json.loads((d / "rollback.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            pass
+        sid = meta.get("sid") if isinstance(meta, dict) else None
+        old = (d / "rollback.json").exists() and (d / "rollback.json").stat().st_mtime < limit
+        gone = keep is not None and sid is not None and sid not in keep
+        if everything or meta is None or old or gone:
+            shutil.rmtree(d, ignore_errors=True)
+            removed += 1
+    return removed
 
 
 def read_rollback(flavor: str, sid: str) -> dict | None:
@@ -206,24 +377,32 @@ def read_rollback(flavor: str, sid: str) -> dict | None:
 
 
 def restore_rollback(root: str, flavor: str, sid: str, current: list[str]) -> dict:
-    """Ersetzt die installierte Version durch die gesicherte und gibt deren Daten zurück."""
+    """Ersetzt die installierte Version durch die gesicherte und gibt deren Daten zurück.
+    Getauscht wird über einen Arbeitsordner: Scheitert ein Schritt, bleibt die installierte Version."""
     d = rollback_dir(flavor, sid)
     meta = read_rollback(flavor, sid)
     saved = [p for p in (d / "AddOns").iterdir() if p.is_dir() and valid_addon_name(p.name)] \
         if meta and (d / "AddOns").is_dir() else []
     if not saved:
         raise FileNotFoundError(tr("Für dieses Addon ist keine vorherige Version gespeichert."))
-    for name in {*current, *(p.name for p in saved)}:
-        if not valid_addon_name(name):
-            continue
-        for base in (addons_dir(root, flavor), disabled_dir(root, flavor)):
-            if (base / name).is_dir():
-                shutil.rmtree(base / name)
     enabled = meta.get("enabled") or {}
-    for p in saved:
-        base = addons_dir(root, flavor) if enabled.get(p.name, True) else disabled_dir(root, flavor)
-        base.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(p, base / p.name)
+    work = staging_dir(root, flavor)
+    swap = FolderSwap(work)
+    try:
+        for name in {*current, *(p.name for p in saved)}:
+            if not valid_addon_name(name):
+                continue
+            for base in (addons_dir(root, flavor), disabled_dir(root, flavor)):
+                if (base / name).is_dir():
+                    swap.take_out(base / name)
+        for p in saved:
+            base = addons_dir(root, flavor) if enabled.get(p.name, True) else disabled_dir(root, flavor)
+            swap.put_in(p, base / p.name)
+    except Exception:
+        swap.undo()
+        shutil.rmtree(work, ignore_errors=True)
+        raise
+    shutil.rmtree(work, ignore_errors=True)
     shutil.rmtree(d, ignore_errors=True)
     return meta
 
@@ -305,30 +484,27 @@ def read_pack(path: Path) -> dict:
 def import_pack(path: Path, root: str, flavor: str, folders: list[str]) -> list[str]:
     """Installiert die angegebenen Addon-Ordner aus einem Paket."""
     wanted = set(folders)
-    target = addons_dir(root, flavor)
-    target.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory() as tmp, zipfile.ZipFile(path) as zf:
-        tmp_p = Path(tmp).resolve()
-        members = []
-        for m in zf.infolist():
-            parts = m.filename.split("/")
-            if len(parts) >= 3 and parts[0] == "AddOns" and parts[1] in wanted:
-                dest = (tmp_p / m.filename).resolve()
-                if tmp_p not in dest.parents:
-                    raise ValueError(tr("Unsicherer Pfad im Paket: {0}", m.filename))
-                members.append(m)
-        zf.extractall(tmp_p, members=members)
-        installed = []
-        for name in folders:
-            src = tmp_p / "AddOns" / name
-            if not src.is_dir():
-                continue
-            for old in (target / name, disabled_dir(root, flavor) / name):
-                if old.exists():
-                    shutil.rmtree(old)
-            shutil.copytree(src, target / name)
-            installed.append(name)
-    return installed
+    addons_dir(root, flavor).mkdir(parents=True, exist_ok=True)
+    work = staging_dir(root, flavor)
+    try:
+        tmp_p = (work / "new").resolve()
+        tmp_p.mkdir()
+        with zipfile.ZipFile(path) as zf:
+            members = []
+            for m in zf.infolist():
+                parts = m.filename.split("/")
+                if len(parts) >= 3 and parts[0] == "AddOns" and parts[1] in wanted:
+                    dest = (tmp_p / m.filename).resolve()
+                    if tmp_p not in dest.parents:
+                        raise ValueError(tr("Unsicherer Pfad im Paket: {0}", m.filename))
+                    members.append(m)
+            zf.extractall(tmp_p, members=members)
+        plan = [(tmp_p / "AddOns" / name, name) for name in folders
+                if valid_addon_name(name) and (tmp_p / "AddOns" / name).is_dir()]
+        swap_addon_folders(plan, root, flavor, work)
+        return [n for _, n in plan]
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
 
 
 def open_in_explorer(path: Path) -> None:
