@@ -1060,19 +1060,22 @@ local function tick()
 	if dt <= 0 or dt > 5 then return end -- loading screens and freezes do not count
 
 	local tm = s.time
-	if UnitIsAFK and UnitIsAFK("player") then tm.afk = tm.afk + dt end
-	if UnitAffectingCombat and UnitAffectingCombat("player") then tm.combat = tm.combat + dt end
-	if IsResting and IsResting() then tm.rest = tm.rest + dt end
-	local dead = UnitIsDeadOrGhost and UnitIsDeadOrGhost("player")
+	local function yes(v) return v and not isSecret(v) end
+	if yes(UnitIsAFK and UnitIsAFK("player")) then tm.afk = tm.afk + dt end
+	if yes(UnitAffectingCombat and UnitAffectingCombat("player")) then tm.combat = tm.combat + dt end
+	if yes(IsResting and IsResting()) then tm.rest = tm.rest + dt end
+	local dead = yes(UnitIsDeadOrGhost and UnitIsDeadOrGhost("player"))
 	if dead then tm.dead = tm.dead + dt end
-	local taxi = UnitOnTaxi and UnitOnTaxi("player")
+	local taxi = yes(UnitOnTaxi and UnitOnTaxi("player"))
 	if taxi then tm.taxi = tm.taxi + dt end
 	if rt.run then tm.instance = tm.instance + dt end
 
 	local z = zoneEntry(zoneName())
 	z.sec = z.sec + dt
 
+	-- the speed is protected in combat on newer clients: no distance then, everything else still counts
 	local speed = GetUnitSpeed and GetUnitSpeed("player") or 0
+	if isSecret(speed) then speed = 0 end
 	if speed > 0 and dt <= 2 then
 		local mv = s.move
 		local mode
