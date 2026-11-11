@@ -8,7 +8,6 @@ import os
 import shutil
 import sys
 import tempfile
-import time
 import unittest
 from pathlib import Path
 
@@ -18,7 +17,7 @@ os.environ["APPDATA"] = str(TMP / "appdata")          # Leeroyzan-Daten in einen
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
 
-import leeroyzan as lz  # noqa: E402
+import leeroy.api as lz  # noqa: E402
 
 try:
     import run_addon_test
@@ -167,7 +166,7 @@ class ImportTests(unittest.TestCase):
     def test_untranslated(self):
         """Every German UI text of the session feature has an English translation."""
         import re
-        src = (ROOT / "leeroyzan.py").read_text(encoding="utf-8")
+        src = "\n".join(p.read_text(encoding="utf-8") for p in [ROOT / "leeroyzan.py", *sorted((ROOT / "leeroy").rglob("*.py"))])
         start = src.index("# Leeroylink: Spielsitzungen")
         end = src.index("# Theme (Braun/Gold")
         block = src[start:end]
@@ -300,7 +299,8 @@ def cbor_encode(v) -> bytes:
 
 def baked_toc(quests: dict, npcs: dict, de_names: dict) -> str:
     """Eine kleine QuestieDB_Forever.toc im gebackenen Format (Base64 → zlib → CBOR)."""
-    import base64, zlib
+    import base64
+    import zlib
     b64 = lambda raw: base64.b64encode(raw).decode()
     lines = ["## Interface: 16001", "## Title: QuestieDB", "## Version: 9.9.9", "## X-Mode: baked", "## X-Flavor: Forever"]
 
@@ -464,7 +464,8 @@ class QuestDBTests(unittest.TestCase):
         calls = {"api": 0, "dl": 0}
         listing = [{"name": "README.md", "sha": "a"}, {"name": "ClassicDB_1_12_1_z2815.sql.gz", "sha": "s1",
                     "download_url": "https://raw.githubusercontent.com/cmangos/classic-db/master/Full_DB/ClassicDB_1_12_1_z2815.sql.gz"}]
-        orig_get, orig_open = lz.http_get, lz.urllib.request.urlopen
+        qmod = lz.module_of("fetch_reward_data")
+        orig_get, orig_open = qmod.http_get, qmod.urllib.request.urlopen
 
         def fake_get(url, token=""):
             calls["api"] += 1
@@ -474,7 +475,7 @@ class QuestDBTests(unittest.TestCase):
         def fake_open(req, timeout=0):
             calls["dl"] += 1
             return io.BytesIO(path.read_bytes())
-        lz.http_get, lz.urllib.request.urlopen = fake_get, fake_open
+        qmod.http_get, qmod.urllib.request.urlopen = fake_get, fake_open
         try:
             lz.rewards_file("_forever_").unlink(missing_ok=True)
             self.assertTrue(lz.rewards_due("_forever_"))
@@ -486,7 +487,7 @@ class QuestDBTests(unittest.TestCase):
             self.assertEqual(calls["dl"], 1)
             self.assertIsNone(lz.rewards_file("_retail_"))
         finally:
-            lz.http_get, lz.urllib.request.urlopen = orig_get, orig_open
+            qmod.http_get, qmod.urllib.request.urlopen = orig_get, orig_open
 
 
 def lua_quote_bytes(raw: bytes) -> bytes:

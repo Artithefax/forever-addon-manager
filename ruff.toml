@@ -1,0 +1,15 @@
+# Code-Prüfung: ruff check .   (läuft auch im Test-Job vor jedem Release)
+line-length = 140
+target-version = "py310"
+extend-exclude = ["build", "dist", ".build_venv", ".build_tools"]
+
+[lint]
+select = ["F", "E", "W", "B", "PLE"]
+ignore = [
+    "E501",   # lange Zeilen: deutsche Texte lassen sich schlecht umbrechen
+    "E741",   # Namen wie l für Zeilen
+    "E731",   # kurze lambdas als Hilfsfunktionen
+    "E702",   # mehrere kurze Anweisungen in einer Zeile
+    "B905",   # zip() ohne strict
+    "B007",   # ungenutzte Schleifenvariable
+]
