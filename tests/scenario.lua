@@ -181,6 +181,7 @@ if PART == 1 then
 	STUB.secrets[secretSkill] = true
 	STUB.secrets[99999] = true
 	STUB.combat = true
+	local killsBefore = s.kills.n
 	STUB.fire("CHAT_MSG_SKILL", secretSkill)
 	STUB.fire("CHAT_MSG_COMBAT_XP_GAIN", secretSkill)
 	STUB.fire("CHAT_MSG_LOOT", secretSkill)
@@ -197,6 +198,44 @@ if PART == 1 then
 	STUB.combat = false
 	STUB.advance(1.5)
 	check(s.prof.skills["Schwerter"].b == 101, "weapon skill-up without the chat line")
+	check(s.kills.n == killsBefore + 1, "protected XP line in combat counted as a kill")
+
+	-- WoW Forever has no combat log: kills come from dead units we fought and from the XP lines
+	local K = s.kills
+	local n0, elite0 = K.n, K.elite
+	-- the kill behind the protected XP line above shows up as a dead unit: gets its name, no 2nd kill
+	STUB.units.target = { name = "Murloc-Späher", guid = mob(44, 25), level = 21 }
+	STUB.combat = true
+	STUB.fire("PLAYER_TARGET_CHANGED")
+	STUB.advance(1)
+	STUB.units.target.dead = true
+	STUB.fire("UNIT_HEALTH", "target")
+	check(K.n == n0 and K.mobs["Murloc-Späher"] and K.mobs["Murloc-Späher"].n == 1, "protected kill named by its unit")
+	STUB.units.target = { name = "Kobold-Tunnelgräber", guid = mob(40, 21), class = "elite", level = 22 }
+	STUB.combat = true
+	STUB.fire("PLAYER_TARGET_CHANGED")
+	STUB.advance(1)                                   -- the ticker sees it fighting us
+	STUB.fire("CHAT_MSG_COMBAT_XP_GAIN", "Kobold-Tunnelgräber dies, you gain 50 experience.")
+	STUB.units.target.dead = true
+	STUB.fire("UNIT_HEALTH", "target")                -- same kill: must not count twice
+	STUB.units.nameplate3 = { name = "Graue Ratte", guid = mob(41, 22) }   -- grey, no XP
+	STUB.advance(1)
+	STUB.units.nameplate3.dead = true
+	STUB.fire("NAME_PLATE_UNIT_REMOVED", "nameplate3")
+	STUB.units.nameplate3 = nil
+	STUB.units.mouseover = { name = "Fremder Kobold", guid = mob(43, 24) }  -- someone else's mob
+	STUB.tapDenied = true
+	STUB.advance(1)
+	STUB.units.mouseover.dead = true
+	STUB.advance(1)
+	STUB.units.mouseover, STUB.tapDenied = nil, nil
+	STUB.combat = false
+	STUB.units.target = { name = "Alter Kadaver", guid = mob(42, 23), dead = true }  -- old corpse
+	STUB.fire("PLAYER_TARGET_CHANGED")
+	STUB.advance(1)
+	STUB.units.target = nil
+	check(K.n == n0 + 2, "kills without combat log: " .. (K.n - n0))
+	check(K.elite == elite0 + 1 and K.mobs["Kobold-Tunnelgräber"].n == 1 and K.mobs["Graue Ratte"].n == 1, "kills without combat log classified")
 	local own = 0
 	for _, e in pairs(LZ.gdb.errors) do if e.addon == "LeeroyzanLink" then own = own + 1 end end
 	check(own == 0, "no errors from protected values")
@@ -254,11 +293,11 @@ if PART == 1 then
 	STUB.afk, STUB.resting = false, false
 
 	local z = s.explore.zones["Rotkammgebirge"]
-	check(z.kills == 6 and z.xp > 3000 and z.money == 3825, "zone stats: " .. tostring(z.kills) .. "/" .. tostring(z.xp) .. "/" .. tostring(z.money))
-	check(s.kills.n == 6, "kills counted (incl. pet kill, excl. foreign): " .. s.kills.n)
-	check(s.kills.elite == 1 and s.kills.rare == 1, "elite/rare classified")
+	check(z.kills == 9 and z.xp > 3000 and z.money == 3825, "zone stats: " .. tostring(z.kills) .. "/" .. tostring(z.xp) .. "/" .. tostring(z.money))
+	check(s.kills.n == 9, "kills counted (incl. pet kill, excl. foreign): " .. s.kills.n)
+	check(s.kills.elite == 2 and s.kills.rare == 1, "elite/rare classified")
 	check(s.kills.blows == 5, "killing blows: " .. s.kills.blows)
-	check(s.xp.kills == 1060, "xp from kills incl. rested messages: " .. s.xp.kills)
+	check(s.xp.kills == 1110, "xp from kills incl. rested messages: " .. s.xp.kills)
 	check(s.xp.quests == 1250, "xp from quests")
 	check(s.xp.explore == 140, "xp from exploring (deduplicated): " .. s.xp.explore)
 	check(#s.explore.found == 1, "discovery deduplicated")
@@ -291,7 +330,7 @@ else
 	-- after /reload: the same session continues
 	check(#LZ.gdb.sessionLog == 1, "no new session after reload: " .. #LZ.gdb.sessionLog)
 	check(s.resumes == 1, "resume counted")
-	check(s.kills.n == 6, "kills kept across reload")
+	check(s.kills.n == 9, "kills kept across reload")
 
 	-- dungeon run with boss, wipe and death
 	STUB.instance = { "Die Todesminen", "party", 1, "Normal", 5, 0, false, 36 }

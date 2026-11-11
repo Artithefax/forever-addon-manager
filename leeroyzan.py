@@ -1992,6 +1992,10 @@ def normalize_session(raw, flavor: str = "", account: str = "") -> dict | None:
     if x["combat"] > x["kills"]:
         x["kills"] = x["combat"]
         x["other"] = max(0, x["total"] - x["kills"] - x["quests"] - x["explore"])
+    # Ältere Sitzungen aus WoW Forever (kein Kampflog, Link ≤ 0.3.1): Kills aus den XP-Zeilen nehmen
+    k = s["kills"]
+    if k["n"] == 0 and x["killsN"] > 0:
+        k["n"] = k["normal"] = x["killsN"]
     # Spielzeit fehlt (z. B. Absturz vor dem ersten Speichern): Zeitraum nehmen
     if s["played"] <= 0:
         s["played"] = max(0, s["stop"] - s["start"])
@@ -2099,6 +2103,9 @@ def load_sessions(flavor: str) -> list[dict]:
             continue
         if isinstance(s, dict) and s.get("char") and s.get("start"):
             s["_file"] = key
+            k, x = s.get("kills"), s.get("xp")       # schon archivierte Forever-Sitzungen ohne Kills
+            if isinstance(k, dict) and isinstance(x, dict) and not k.get("n") and x.get("killsN"):
+                k["n"] = k["normal"] = x["killsN"]
             out.append(s)
     out.sort(key=lambda s: s.get("start", 0), reverse=True)
     return out
