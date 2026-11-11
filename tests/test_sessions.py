@@ -489,6 +489,65 @@ class QuestDBTests(unittest.TestCase):
             lz.http_get, lz.urllib.request.urlopen = orig_get, orig_open
 
 
+def lua_quote_bytes(raw: bytes) -> bytes:
+    """Wie WoW Binärdaten in SavedVariables schreibt: \\ddd für Steuerzeichen, \\" und \\\\."""
+    out = bytearray(b'"')
+    for c in raw:
+        if c == 0x22:
+            out += b'\\"'
+        elif c == 0x5C:
+            out += b"\\\\"
+        elif c == 10:
+            out += b"\\n"
+        elif c == 13:
+            out += b"\\r"
+        elif c < 32 or c == 127:
+            out += b"\\%03d" % c
+        else:
+            out.append(c)
+    return bytes(out + b'"')
+
+
+class AuctionatorTests(unittest.TestCase):
+    """Auktionshaus: Auctionator-Preisdatenbank (Version 8, CBOR im Lua-String) lesen und auswerten."""
+
+    def test_read_and_rows(self):
+        realm = {"version": 2,
+                 "2589": {"a": {"2505": 40, "2506": 12}, "l": {"2506": 34}, "h": {"2505": 60, "2506": 50}, "m": 34},
+                 "4306": {"a": {"2506": 3}, "l": [], "h": {"2506": 1000}, "m": 1000},
+                 "g:6085:1": {"a": {"2501": 1}, "l": [], "h": {"2501": 25092}, "m": 25092}}
+        blob = cbor_encode(realm) + bytes([0, 10, 13, 34, 92, 255])         # Sonderbytes am Ende stören nicht
+        text = (b"\r\nAUCTIONATOR_CONFIG = {\r\n[\"x\"] = true,\r\n}\r\nAUCTIONATOR_PRICE_DATABASE = {\r\n"
+                b"[\"__dbversion\"] = 8,\r\n[\"Mein \\\"Realm\\\"\"] = " + lua_quote_bytes(blob) + b",\r\n"
+                b"[\"Leer\"] = " + lua_quote_bytes(cbor_encode({"version": 2})) + b",\r\n}\r\n"
+                b"AUCTIONATOR_VENDOR_PRICE_CACHE = {\r\n[\"2589\"] = 10,\r\n[\"4306\"] = 1200.5,\r\n}\r\n")
+        wow = TMP / "auc" / "World of Warcraft"
+        sv = wow / "_forever_" / "WTF" / "Account" / "9#1" / "SavedVariables"
+        sv.mkdir(parents=True)
+        (sv / "Auctionator.lua").write_bytes(text)
+        data = lz.load_auctionator(str(wow), "_forever_")
+        self.assertEqual(list(data["realms"]), ['Mein "Realm"'])                  # Realm ohne Preise fehlt
+        entries = data["realms"]['Mein "Realm"']
+        self.assertEqual(set(entries), {"2589", "4306", "g:6085:1"})
+        self.assertEqual(data["vendor"], {"2589": 10.0, "4306": 1200.5})
+        r = lz.auction_row("2589", entries["2589"], data["vendor"])
+        self.assertEqual((r["id"], r["price"], r["last"], r["avail"], r["days"], r["vendor"]), (2589, 34, 2506, 12, 2, 10))
+        self.assertEqual(r["hist"], [(2505, 60, 60, 40), (2506, 34, 50, 12)])
+        self.assertAlmostEqual(r["change"], 34 / 60 - 1)
+        self.assertEqual(lz.auc_day_date(2506).date().isoformat(), "2026-11-11")
+        g = lz.auction_row("g:6085:1", entries["g:6085:1"], {})
+        self.assertEqual((g["id"], g["change"]), (6085, None))
+        cheap = lz.auction_row("4306", entries["4306"], data["vendor"])
+        self.assertTrue(cheap["price"] < cheap["vendor"])                             # unter Händlerpreis
+        state = {"items": {"4306": {"name": "Seidenstoff", "q": 1}},
+                 "chars": {"a": {"bags": {"4306": 5}, "bank": {"4306": 20, "2589": 3}}}}
+        self.assertEqual(lz.owned_counts(state), {4306: 25, 2589: 3})
+        self.assertEqual(lz.item_details(4306, None, None, state, "deDE")["name"], "Seidenstoff")
+        cm = {"all_items": {"2589": ["Linen Cloth", 1, 7, 0, 5, 0, 13]}}
+        info = lz.item_details(2589, None, cm, state, "deDE")
+        self.assertEqual((info["name"], info["cls"], info["sell"]), ("Linen Cloth", 7, 13))
+
+
 @unittest.skipIf(run_addon_test is None, "lupa not installed")
 class GameDataTests(unittest.TestCase):
     """Spiel -> Leeroyzan: Fehler, Charaktere, Rezepte, Einkaufsliste, Auswertung."""

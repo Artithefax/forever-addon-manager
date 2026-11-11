@@ -31,6 +31,7 @@ One window, no pop-ups. A sidebar with the game version, the pages and a big **P
 | **Leeroylink** | Every play session recorded by the companion addon **Leeroylink** – a summary per session, totals, charts, forecast, records, death statistics, farming spots and dungeon history; optionally posted to Discord (see below). |
 | **Characters** | All your characters with level, gold, professions, bags and bank; *Who has what?* search and a shopping list for any stored recipe across all characters. |
 | **Quests** | Search the quest database of QuestieDB (read straight from its addon folder): quest chains, quest givers with coordinates, objectives, requirements, XP and reputation – plus the item rewards your characters have seen. |
+| **Auction house** | Prices from Auctionator's database (scan the auction house in the game): current minimum price, 14-day average, change, quantity and a price chart per item; filter by name, category, quality and level, find bargains, items below vendor price and what your characters own (with its worth). |
 | **Wowhead** | Search Wowhead while you type, preview results (tooltip), open them in the browser and keep favorites. |
 | **Diagnostics** | Lua errors per addon and version (with one-click rollback), load problems and missing dependencies, memory ranking, wishlist from the game. |
 | **Share** | Create a download-list code for Discord/SMS or a `.lzpack` package – and paste a code you received to install it. |
