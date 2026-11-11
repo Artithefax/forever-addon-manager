@@ -335,18 +335,20 @@ if PART == 1 then
 		q = {
 			[783] = { "Die Bedrohung von innen", 1, 1, 12, "A", 7, false, { "Deputy Willem", 12, 48.2, 42.9 }, { "Marshal McBride", 12, 48.9, 41.6 }, { "Sprecht mit Marshal McBride." }, { 72, 50 }, 40 },
 			[7] = { "Säuberung im Koboldlager", 2, 1, 12, "A", 15, { 783 }, { "Marshal McBride", 12, 48.9, 41.6 }, { "Marshal McBride", 12, 48.9, 41.6 }, { "Tötet 10 Koboldgezücht." }, { 72, 100 }, 170 },
-			[15] = { "Überprüfung der Echokammmine", 3, 1, 12, "A", false, { 7 }, { "Marshal McBride", 12, 48.9, 41.6 }, false, { "Tötet 10 Koboldarbeiter." }, { 72, 100 }, 250 },
+			[15] = { "Überprüfung der Echokammmine", 3, 1, 12, "A", false, { 7 }, { "Marshal McBride", 12, 48.9, 41.6 }, false, { "Tötet 10 Koboldarbeiter." }, { 72, 100 }, 250,
+				false, false, { 2589, 2 }, { 6085, 1, 6084, 1 }, 95 },
+			[18] = { "Neue Forever-Quest", 4, 1, 12, "A", false, { 15 }, false, false, false, false, 300, false, false, false, false, false, false, { 270000 } },
 			[16] = { "Nur für die Horde", 3, 1, 12, "H", false, { 7 } },
 			[17] = { "Briefe nach Goldhain", 3, 1, 12, "A", false, { 7 }, { "Wache Thomas", 12, 74, 72 } },
 		} }
 	local list, pos = QG:Chain(7)
-	check(#list == 3 and list[1] == 783 and list[3] == 15 and pos == 2, "quest chain built: " .. table.concat(list, ","))
+	check(#list == 4 and list[1] == 783 and list[4] == 18 and pos == 2, "quest chain built: " .. table.concat(list, ","))
 	STUB.factionNames = { [72] = "Sturmwind" }
 	STUB.fire("QUEST_DETAIL")
 	local win = _G.LeeroylinkQuestGuide
 	check(win and win.shown, "window opens at the quest giver (own frame)")
 	local txt = QG:Text(783)
-	for _, want in ipairs({ "Teil 1 von 3", "Säuberung im Koboldlager", "Rekrutenhemd", "40 XP", "Sturmwind +50", "Bis zum Ende der Reihe (3 Quests)", "460 XP", "Bei: Marshal McBride" }) do
+	for _, want in ipairs({ "Teil 1 von 4", "Säuberung im Koboldlager", "Rekrutenhemd", "40 XP", "Sturmwind +50", "Bis zum Ende der Reihe (4 Quests)", "760 XP", "Bei: Marshal McBride" }) do
 		check(txt:find(want, 1, true), "companion text has: " .. want)
 	end
 	check(QG:Text(7):find("Briefe nach Goldhain", 1, true) and not QG:Text(7):find("Nur für die Horde", 1, true), "branches of my faction only")
@@ -363,6 +365,18 @@ if PART == 1 then
 	win:Hide()
 	LZ:HandleSlash("quest echokammmine")
 	check(win.shown, "/lz quest <name> opens the window")
+	-- rewards that no character has seen yet come from the data file (cMaNGOS / QuestieDB)
+	LeeroylinkQuests.items = { [2589] = { "Leinenstoff", 1 }, [6085] = { "Fußsoldatentunika", 2 }, [6084] = { "Gamaschen", 2 }, [270000] = { "Fackel", 1 } }
+	local t15 = QG:Text(15)
+	for _, want in ipairs({ "Leinenstoff", "x2", "95", "Wahl: ", "Fußsoldatentunika", "Gamaschen", "Neue Forever-Quest", "Fackel" }) do
+		check(t15:find(want, 1, true), "rewards from the data file: " .. want)
+	end
+	check(not t15:find("unbekannt", 1, true), "no 'unknown' when the data file has the rewards")
+	-- switch it off and on in the game, also while it is off
+	LZ:HandleSlash("quest aus")
+	check(not QG.enabled and LeeroylinkDB.settings.toggledAt.QuestGuide, "/lz quest aus switches it off")
+	LZ:HandleSlash("quest an")
+	check(QG.enabled, "/lz quest an switches it on again")
 	STUB.areaNames = { [12] = "Wald von Elwynn" }
 	QG:CollectNames()
 	check(LZ.gdb.names.zones[12] == "Wald von Elwynn" and LZ.gdb.names.factions[72] == "Sturmwind", "zone and faction names for Leeroyzan")

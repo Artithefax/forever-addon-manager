@@ -200,7 +200,8 @@ class LinkDataTests(unittest.TestCase):
                "profiles": [{"name": "Raid", "enable": ["Details", "Bagnon"]}],
                "whatsnew": [{"id": "gh:x@9.3.0", "addon": "Questie", "version": "9.3.0",
                              "lines": lz.notes_lines("## Changes\n- **Neue** Quests für Forever\n\n* \"Fix\" für \\Pfade")}],
-               "knownIssues": [{"addon": "Bagnon", "text": "In Leeroyzan festgehalten"}]}
+               "knownIssues": [{"addon": "Bagnon", "text": "In Leeroyzan festgehalten"}],
+               "questGuide": {"on": False, "at": 1794300000}}
 
     def test_lua_text_parses_back(self):
         text = lz.link_data_text(self.PAYLOAD)
@@ -417,6 +418,75 @@ class QuestDBTests(unittest.TestCase):
     def test_missing(self):
         with self.assertRaises(lz.QuestDBError):
             lz.load_questdb(str(TMP / "nowhere"), "_forever_")
+
+    def test_rewards(self):
+        """Belohnungen: cMaNGOS-Abzug lesen, Quellen kombinieren, in Quests.lua schreiben, ausschalten."""
+        import gzip
+        cols = ["entry", "Title", "RewChoiceItemId1", "RewChoiceItemId2", "RewChoiceItemCount1", "RewChoiceItemCount2",
+                "RewItemId1", "RewItemCount1", "RewOrReqMoney", "RewMoneyMaxLevel", "RewSpell"]
+        dump = "\n".join([
+            "CREATE TABLE `quest_template` (", *[f"  `{c}` int NOT NULL DEFAULT '0'," for c in cols], ") ENGINE=MyISAM;",
+            "INSERT INTO `quest_template` VALUES (176,'WANTED: \\'Hogger\\'',6085,6084,1,1,0,0,0,525,0),"
+            "(7,'Kobold (Camp), Cleanup',0,0,0,0,2589,3,25,102,0),(54,'Report',0,0,0,0,0,0,-10,0,0);",
+            "CREATE TABLE `item_template` (", "  `entry` int,", "  `class` int,", "  `name` varchar(1),", "  `Quality` int,", ") ENGINE=MyISAM;",
+            "INSERT INTO `item_template` VALUES (6085,4,'Footman Tunic',2),(6084,4,'Stormwind Guard Leggings',2),(2589,7,'Linen Cloth',1),(9,1,'x',0);",
+        ])
+        path = TMP / "dump.sql.gz"
+        with gzip.open(path, "wt", encoding="utf-8") as f:
+            f.write(dump + "\n")
+        cm = lz.parse_quest_rewards_dump(path)
+        self.assertEqual(cm["q"]["176"], {"c": [[6085, 1], [6084, 1]], "mx": 525})
+        self.assertEqual(cm["q"]["7"], {"i": [[2589, 3]], "m": 25, "mx": 102})
+        self.assertNotIn("54", cm["q"])                                    # Gold verlangt, nicht gegeben
+        self.assertEqual(cm["items"]["6085"], ["Footman Tunic", 2])
+        self.assertNotIn("9", cm["items"])
+        db = self.db
+        r = lz.quest_rewards(db, 176, cm, None, "deDE")
+        self.assertEqual((r["src"], [x["name"] for x in r["choice"]], r["choice"][0]["q"]), ("cmangos", ["Footman Tunic", "Stormwind Guard Leggings"], 2))
+        seen = {"t": 1, "money": 50, "xp": 0, "lvl": 5, "items": [{"id": 1, "n": 1, "q": 3, "name": "Gesehen"}], "choice": [], "spell": ""}
+        r = lz.quest_rewards(db, 176, cm, seen, "deDE")
+        self.assertEqual((r["src"], r["money"], r["items"][0]["name"]), ("game", 50, "Gesehen"))
+        text = lz.quest_data_text(db, "deDE", cm=cm)
+        self.assertIn("[7]={", text)
+        line7 = next(l for l in text.splitlines() if l.startswith("[7]="))
+        self.assertTrue(line7.endswith(",{2589,3},false,25},"), line7)
+        self.assertIn('[6085]={"Footman Tunic",2}', text)
+        # switched off: an empty data file, no memory in the game
+        addon = self.wow / "_forever_" / "Interface" / "AddOns" / "Leeroylink"
+        addon.mkdir(parents=True, exist_ok=True)
+        (addon / "Leeroylink.toc").write_text("## Version: 0.5.0\n", encoding="utf-8")
+        self.assertEqual(lz.write_quest_data(str(self.wow), "_forever_", enabled=False), "off")
+        self.assertIn("LeeroylinkQuests = nil", (addon / "Quests.lua").read_text(encoding="utf-8"))
+        self.assertEqual(lz.write_quest_data(str(self.wow), "_forever_", cm=cm), "written")
+
+        # download from GitHub (faked): only once, and again only when the dump changed
+        import io
+        calls = {"api": 0, "dl": 0}
+        listing = [{"name": "README.md", "sha": "a"}, {"name": "ClassicDB_1_12_1_z2815.sql.gz", "sha": "s1",
+                    "download_url": "https://raw.githubusercontent.com/cmangos/classic-db/master/Full_DB/ClassicDB_1_12_1_z2815.sql.gz"}]
+        orig_get, orig_open = lz.http_get, lz.urllib.request.urlopen
+
+        def fake_get(url, token=""):
+            calls["api"] += 1
+            self.assertIn("api.github.com/repos/cmangos/classic-db/contents/Full_DB", url)
+            return json.dumps(listing).encode()
+
+        def fake_open(req, timeout=0):
+            calls["dl"] += 1
+            return io.BytesIO(path.read_bytes())
+        lz.http_get, lz.urllib.request.urlopen = fake_get, fake_open
+        try:
+            lz.rewards_file("_forever_").unlink(missing_ok=True)
+            self.assertTrue(lz.rewards_due("_forever_"))
+            data = lz.fetch_reward_data("_forever_")
+            self.assertEqual((data["sha"], data["q"]["7"]["m"], calls["dl"]), ("s1", 25, 1))
+            self.assertFalse(lz.rewards_due("_forever_"))
+            self.assertEqual(lz.load_reward_data("_forever_")["source"], "ClassicDB_1_12_1_z2815.sql.gz")
+            lz.fetch_reward_data("_forever_")                                  # same sha: no second download
+            self.assertEqual(calls["dl"], 1)
+            self.assertIsNone(lz.rewards_file("_retail_"))
+        finally:
+            lz.http_get, lz.urllib.request.urlopen = orig_get, orig_open
 
 
 @unittest.skipIf(run_addon_test is None, "lupa not installed")

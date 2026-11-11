@@ -4,7 +4,7 @@ local C = LZ.C
 
 _G.Leeroylink = LZ
 LZ.addon = ADDON
-LZ.version = C.GetMetadata(ADDON, "Version") or "0.5.0"
+LZ.version = C.GetMetadata(ADDON, "Version") or "0.6.0"
 LZ.schema = 1
 LZ.lang = (type(GetLocale) == "function" and GetLocale() == "deDE") and "de" or "en"
 LZ.modules, LZ.moduleList, LZ.commands, LZ.helpLines = {}, {}, {}, {}
@@ -279,6 +279,9 @@ end
 
 function LZ:SetModuleEnabled(mod, enabled)
 	LZ.settings.modules[mod.name] = enabled and true or false
+	-- when it was switched by hand – Leeroyzan only overrides newer than this
+	LZ.settings.toggledAt = LZ.settings.toggledAt or {}
+	LZ.settings.toggledAt[mod.name] = time()
 	if enabled then LZ:EnableModule(mod) else LZ:DisableModule(mod) end
 	if LZ.UI and LZ.UI.frame then LZ.UI:Refresh() end
 end

@@ -2,9 +2,9 @@
 -- not the quest frame of the game or of DialogueUI) that shows where a quest belongs
 -- in its quest chain and what the next quests ask for and give.
 --
--- Data: Quests.lua (LeeroylinkQuests), written by Leeroyzan from QuestieDB. Rewards
--- are not in that data: every character remembers the rewards it sees at a quest giver
--- or in the quest log (global.questRewards) – alts then know them in advance.
+-- Data: Quests.lua (LeeroylinkQuests), written by Leeroyzan from QuestieDB, with the
+-- rewards from the cMaNGOS game database (Classic). What a character actually sees at a
+-- quest giver or in the quest log wins (global.questRewards) – for all characters.
 local ADDON, LZ = ...
 local T, P, C = LZ.T, LZ.P, LZ.C
 
@@ -35,6 +35,7 @@ local QUALITY = { [0] = "9d9d9d", "ffffff", "1eff00", "0070dd", "a335ee", "ff800
 
 -- fields of LeeroylinkQuests.q[id]
 local NAME, LVL, REQ, ZONE, SIDE, NEXT, PRE, START, FINISH, TEXT, REP, XP = 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12
+local ITEMS, CHOICE, MONEY, SPELL, UNSURE = 15, 16, 17, 18, 19
 
 local frame, shownID, autoShown
 local nextOf, prevOf
@@ -252,11 +253,41 @@ local function where(g)
 	return s
 end
 
+local waitingForItems = false
+
+-- name and quality from the game (in its language); unknown items are requested from the server
+local function gameItem(id)
+	if not id or not _G.GetItemInfo then return nil end
+	local ok, name, _, quality = pcall(GetItemInfo, id)
+	if ok and type(known(name)) == "string" then return name, known(quality) end
+	waitingForItems = true
+end
+
 local function itemText(e)
-	local name = e.name or (e.id and C.GetItemName(e.id)) or ("#" .. tostring(e.id))
-	local s = LZ.Color(QUALITY[e.q or 1] or "ffffff", "[" .. name .. "]")
+	local gname, gq = gameItem(e.id)
+	local d = data()
+	local dd = d and d.items and e.id and d.items[e.id]
+	local name = gname or e.name or (dd and dd[1]) or ("#" .. tostring(e.id))
+	local q = tonumber(gq) or e.q or (dd and dd[2]) or 1
+	local s = LZ.Color(QUALITY[q] or "ffffff", "[" .. name .. "]")
 	if (e.n or 1) > 1 then s = s .. " x" .. e.n end
 	return s
+end
+
+-- {id, n, id, n, …} from the data file → item entries
+local function pairsList(flat, withCount)
+	local out = {}
+	if type(flat) ~= "table" then return out end
+	local step = withCount and 2 or 1
+	for i = 1, #flat, step do out[#out + 1] = { id = flat[i], n = withCount and flat[i + 1] or 1 } end
+	return out
+end
+
+local function spellName(id)
+	if type(id) ~= "number" then return id end
+	local f = (_G.C_Spell and C_Spell.GetSpellName) or _G.GetSpellInfo
+	local ok, n = pcall(f, id)
+	return ok and type(known(n)) == "string" and n or (T("Zauber ", "spell ") .. id)
 end
 
 -- one line with everything a quest gives; sums go into total (optional)
@@ -268,9 +299,10 @@ local function rewardLine(id, total)
 		parts[#parts + 1] = LZ.Num and LZ.Num(xp) .. " XP" or (xp .. " XP")
 		if total then total.xp = total.xp + xp end
 	end
-	if r and (r.m or 0) > 0 then
-		parts[#parts + 1] = LZ.FormatMoney(r.m)
-		if total then total.m = total.m + r.m end
+	local money = r and r.m or (q and q[MONEY]) or 0
+	if money > 0 then
+		parts[#parts + 1] = LZ.FormatMoney(money)
+		if total then total.m = total.m + money end
 	end
 	if q and type(q[REP]) == "table" then
 		for i = 1, #q[REP], 2 do
@@ -279,24 +311,33 @@ local function rewardLine(id, total)
 			if total then total.rep[f] = (total.rep[f] or 0) + v end
 		end
 	end
-	if r then
-		for _, e in ipairs(r.items or {}) do
-			parts[#parts + 1] = itemText(e)
-			if total then total.items = total.items + 1 end
-		end
-		if r.choice and #r.choice > 0 then
-			local c = {}
-			for _, e in ipairs(r.choice) do c[#c + 1] = itemText(e) end
-			parts[#parts + 1] = T("Wahl: ", "choice: ") .. table.concat(c, T(" oder ", " or "))
-			if total then total.items = total.items + 1 end
-		end
-		if r.spell then parts[#parts + 1] = r.spell end
-	elseif total then
-		total.unknown = total.unknown + 1
+	-- seen in the game > data file (cMaNGOS) > data file (QuestieDB: which items, not how)
+	local items = r and r.items or (q and pairsList(q[ITEMS], true)) or {}
+	local choice = r and r.choice or (q and pairsList(q[CHOICE], true)) or {}
+	local unsure = (not r and q and pairsList(q[UNSURE], false)) or {}
+	for _, e in ipairs(items) do
+		parts[#parts + 1] = itemText(e)
+		if total then total.items = total.items + 1 end
 	end
+	if #choice > 0 then
+		local c = {}
+		for _, e in ipairs(choice) do c[#c + 1] = itemText(e) end
+		parts[#parts + 1] = T("Wahl: ", "choice: ") .. table.concat(c, T(" oder ", " or "))
+		if total then total.items = total.items + 1 end
+	end
+	if #unsure > 0 then
+		local c = {}
+		for _, e in ipairs(unsure) do c[#c + 1] = itemText(e) end
+		parts[#parts + 1] = table.concat(c, ", ")
+		if total then total.items = total.items + 1 end
+	end
+	local spell = r and r.spell or (q and q[SPELL])
+	if spell then parts[#parts + 1] = spellName(spell) end
+	local unknown = not r and q and not q[ITEMS] and not q[CHOICE] and not q[UNSURE] and not q[MONEY]
+	if unknown and total then total.unknown = total.unknown + 1 end
 	if #parts == 0 then return nil end
 	local s = table.concat(parts, " · ")
-	if not r then s = s .. LZ.Color("808080", "  " .. T("(Gegenstände noch nicht gesehen)", "(items not seen yet)")) end
+	if unknown then s = s .. LZ.Color("808080", "  " .. T("(Gegenstände/Gold unbekannt)", "(items/gold unknown)")) end
 	return s
 end
 
@@ -386,7 +427,7 @@ function mod:Text(id)
 		add(LZ.Color("ffd100", string.format(T("Bis zum Ende der Reihe (%d Quests)", "Until the end of the chain (%d quests)"), #list - pos + 1)))
 		add(#parts > 0 and table.concat(parts, " · ") or "–")
 		if total.unknown > 0 then
-			add(LZ.Color("808080", string.format(T("Gegenstände von %d Quests noch nicht gesehen.", "Items of %d quests not seen yet."), total.unknown)))
+			add(LZ.Color("808080", string.format(T("Von %d Quests sind Gegenstände und Gold unbekannt.", "Items and gold of %d quests are unknown."), total.unknown)))
 		end
 	end
 	return table.concat(lines, "\n")
@@ -540,6 +581,24 @@ mod:Event("QUEST_FINISHED", function()
 	if autoShown and frame then frame:Hide() end
 end)
 
+local function refresh(self)
+	if frame and frame:IsShown() and shownID and not self.refreshing then
+		self.refreshing = true
+		LZ.After(0.5, function()
+			self.refreshing = nil
+			if frame:IsShown() and shownID then
+				waitingForItems = false
+				frame.text:SetText(self:Text(shownID))
+				frame.content:SetHeight(math.max(20, (frame.text:GetStringHeight() or 0) + 8))
+			end
+		end)
+	end
+end
+
+mod:Event("GET_ITEM_INFO_RECEIVED", function(self)
+	if waitingForItems then refresh(self) end
+end)
+
 -- completed/accepted quests change the markers in an open window
 mod:Event("QUEST_LOG_UPDATE", function(self)
 	if frame and frame:IsShown() and shownID and not self.refreshing then
@@ -553,6 +612,17 @@ mod:Event("QUEST_LOG_UPDATE", function(self)
 		end)
 	end
 end)
+
+-- Leeroyzan can switch the companion on or off (Data.lua); the newer change wins
+function mod:OnInit()
+	local qg = LZ.import and LZ.import.questGuide
+	if not qg then return end
+	LZ.settings.toggledAt = LZ.settings.toggledAt or {}
+	if qg.at > (LZ.settings.toggledAt[self.name] or 0) then
+		LZ.settings.modules[self.name] = qg.on
+		LZ.settings.toggledAt[self.name] = qg.at
+	end
+end
 
 local hooked = false
 function mod:OnEnable()
@@ -619,8 +689,23 @@ function mod:Find(text)
 	return best
 end
 
-mod:Command({ "quest", "quests", "questbegleiter" }, function(self, rest)
+local ON = { an = true, on = true, ein = true }
+local OFF = { aus = true, off = true }
+
+local function command(self, rest)
 	rest = LZ.Trim(rest)
+	local word = rest:lower()
+	if ON[word] or OFF[word] then
+		LZ:SetModuleEnabled(self, ON[word] and true or false)
+		self:Print(ON[word] and T("eingeschaltet.", "switched on.") or
+			T("ausgeschaltet. Leeroyzan lässt die Questdaten dann beim nächsten Start weg (kein Speicher).",
+				"switched off. Leeroyzan then leaves out the quest data next time (no memory)."))
+		return
+	end
+	if not self.enabled then
+		self:Print(T("ist ausgeschaltet – einschalten mit /lz quest an", "is switched off – switch it on with /lz quest on"))
+		return
+	end
 	if rest == "" then
 		if frame and frame:IsShown() then return self:Hide() end
 		if logQuestID() then return self:ShowSelected(true) end
@@ -629,7 +714,14 @@ mod:Command({ "quest", "quests", "questbegleiter" }, function(self, rest)
 	end
 	local id = self:Find(rest)
 	if id then self:Show(id) else self:Print(T("Keine Quest gefunden: ", "No quest found: ") .. rest) end
-end, { "quest [Name|ID]", "Questbegleiter: Questreihe und Folgequests", "quest companion: quest chain and follow-up quests" })
+end
+
+-- a core command, so that "/lz quest an" also works while the module is switched off
+for _, name in ipairs({ "quest", "quests", "questbegleiter" }) do
+	LZ.coreCommands[name] = function(rest) LZ:Safe(command, mod, rest) end
+end
+LZ.helpLines[#LZ.helpLines + 1] = { usage = "quest [Name|ID|an|aus]", de = "Questbegleiter: Questreihe und Folgequests; an/aus schaltet ihn",
+	en = "quest companion: quest chain and follow-up quests; on/off switches it" }
 
 function mod:Summary()
 	local d = data()
@@ -645,13 +737,17 @@ function mod:Report()
 	local lines = {}
 	if d then
 		lines[#lines + 1] = string.format(T("Questdaten: %s (%s), %s", "Quest data: %s (%s), %s"), tostring(d.src), tostring(d.locale), self:Summary())
+		if d.rewards and d.rewards ~= "" then
+			lines[#lines + 1] = T("Belohnungen: cMaNGOS-Spieldatenbank (Classic), ergänzt um alles, was deine Charaktere sehen.",
+				"Rewards: cMaNGOS game database (Classic), completed by everything your characters see.")
+		end
 	else
 		lines[#lines + 1] = T("Noch keine Questdaten. Leeroyzan schreibt sie aus QuestieDB (muss nur installiert sein, nicht geladen) – danach /reload.",
 			"No quest data yet. Leeroyzan writes it from QuestieDB (only needs to be installed, not loaded) – then /reload.")
 	end
 	lines[#lines + 1] = ""
-	lines[#lines + 1] = T("Das Fenster öffnet sich beim Questgeber und beim Auswählen einer Quest im Questlog (abschaltbar unter Einstellungen). /lz quest <Name> sucht eine Quest.",
-		"The window opens at quest givers and when you select a quest in the quest log (can be turned off in the settings). /lz quest <name> looks up a quest.")
+	lines[#lines + 1] = T("Das Fenster öffnet sich beim Questgeber und beim Auswählen einer Quest im Questlog (abschaltbar unter Einstellungen). /lz quest <Name> sucht eine Quest, /lz quest aus schaltet den Questbegleiter ganz ab (auch in Leeroyzan auf der Seite „Quests“).",
+		"The window opens at quest givers and when you select a quest in the quest log (can be turned off in the settings). /lz quest <name> looks up a quest, /lz quest off switches the companion off completely (also in Leeroyzan on the \"Quests\" page).")
 	return table.concat(lines, "\n")
 end
 
