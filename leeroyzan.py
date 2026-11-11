@@ -24,6 +24,7 @@ Arbeitet ausschließlich mit Dateien im Addon-/WTF-Ordner – kein Eingriff in d
 """
 
 import base64
+import bisect
 import hashlib
 import html
 import json
@@ -33,6 +34,7 @@ import os
 import queue
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -61,7 +63,7 @@ except Exception:                      # noqa – Paket fehlt oder Tk-Erweiterun
     HAS_DND = False
 
 APP_NAME = "Leeroyzan"
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.6.0"
 USER_AGENT = f"Leeroyzan/{APP_VERSION}"
 
 # Selbst-Update über GitHub-Releases dieses Repos
@@ -2284,14 +2286,15 @@ def install_link_addon(root: str, flavor: str, base: Path | None = None) -> str:
     current = installed_link_dir(root, flavor)
     dest = current or ((base or addons_dir(root, flavor)) / LINK_ADDON)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    keep = None
-    if (dest / "Data.lua").is_file():
-        keep = (dest / "Data.lua").read_bytes()
+    keep = {}
+    for name in ("Data.lua", QUEST_DATA_FILE):               # schreibt Leeroyzan – bleiben erhalten
+        if (dest / name).is_file():
+            keep[name] = (dest / name).read_bytes()
     tmp = dest.parent / f".{LINK_ADDON}.new"
     shutil.rmtree(tmp, ignore_errors=True)
     shutil.copytree(src, tmp)
-    if keep is not None:
-        (tmp / "Data.lua").write_bytes(keep)
+    for name, data in keep.items():
+        (tmp / name).write_bytes(data)
     old = dest.parent / f".{LINK_ADDON}.old"
     shutil.rmtree(old, ignore_errors=True)
     if dest.exists():
@@ -3040,7 +3043,8 @@ def link_state_from_dbs(dbs: list[tuple[str, dict]]) -> dict:
     """Fasst die Addon-Daten aller WoW-Accounts dieser Spielversion zusammen."""
     st = {"accounts": [], "errors": [], "errorStats": {}, "blocked": [], "addons": {}, "addonsAt": 0,
           "memory": {"t": 0, "total": 0, "list": []}, "wishlist": [], "reports": {}, "chars": {}, "items": {},
-          "interface": 0, "addonVersion": "", "writtenAt": 0, "importSeen": 0}
+          "interface": 0, "addonVersion": "", "writtenAt": 0, "importSeen": 0,
+          "questRewards": {}, "zoneNames": {}, "factionNames": {}}
     seen_wish = set()
     for account, db in dbs:
         g = _map(db.get("global"))
@@ -3101,6 +3105,22 @@ def link_state_from_dbs(dbs: list[tuple[str, dict]]) -> dict:
             it = _map(it)
             if _text(it.get("name")):
                 st["items"][k] = {"name": _text(it.get("name")), "q": _int(it.get("q"), 1)}
+        # Questbegleiter: Belohnungen, die ein Charakter im Spiel gesehen hat, und Namen aus dem Spiel
+        for qid, r in _map(g.get("questRewards")).items():
+            r = _map(r)
+            if _int(qid) and _int(r.get("t")) >= _int(st["questRewards"].get(_int(qid), {}).get("t"), -1):
+                st["questRewards"][_int(qid)] = {
+                    "t": _int(r.get("t")), "money": _int(r.get("m")), "xp": _int(r.get("xp")), "lvl": _int(r.get("lvl")),
+                    "items": [{"id": _int(_map(x).get("id")), "n": _int(_map(x).get("n"), 1), "q": _int(_map(x).get("q"), 1),
+                               "name": _text(_map(x).get("name"))} for x in _list(r.get("items"))],
+                    "choice": [{"id": _int(_map(x).get("id")), "n": _int(_map(x).get("n"), 1), "q": _int(_map(x).get("q"), 1),
+                                "name": _text(_map(x).get("name"))} for x in _list(r.get("choice"))],
+                    "spell": _text(r.get("spell"))}
+        names = _map(g.get("names"))
+        for key, target in (("zones", "zoneNames"), ("factions", "factionNames")):
+            for k, v in _map(names.get(key)).items():
+                if _int(k) and _text(v):
+                    st[target][_int(k)] = _text(v)
     st["wishlist"].sort(key=lambda w: w["added"])
     return st
 
@@ -3606,6 +3626,550 @@ def wowhead_tooltip(kind: str, wid, edition: str) -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# Questdatenbank: liest QuestieDB (das Daten-Addon von Questie) direkt aus dem Addon-Ordner.
+# QuestieDB legt seine Daten "gebacken" in den Metadaten seiner .toc ab: Base64 → (zlib) → CBOR.
+# Leeroyzan liest nur; im Spiel braucht Leeroylink QuestieDB dadurch nicht geladen zu haben.
+# --------------------------------------------------------------------------- #
+QDB_ADDON = "QuestieDB"
+QDB_FLAVORS = {"_forever_": "Forever", "_classic_era_": "Era", "_classic_": "Classic", "_anniversary_": "Era",
+               "_classic_era_ptr_": "Era", "_retail_": "Retail"}
+QDB_LOCALES = ("deDE", "enUS")
+# Rassen-Bits (requiredRaces): Allianz / Horde
+RACES_ALLIANCE = 1 | 4 | 8 | 64 | 1024 | 2097152 | 16777216
+RACES_HORDE = 2 | 16 | 32 | 128 | 256 | 512 | 33554432
+QUEST_SORTS_DE = {"WARRIOR": "Krieger", "PALADIN": "Paladin", "HUNTER": "Jäger", "ROGUE": "Schurke", "PRIEST": "Priester",
+                  "SHAMAN": "Schamane", "MAGE": "Magier", "WARLOCK": "Hexenmeister", "DRUID": "Druide",
+                  "FIRST_AID": "Erste Hilfe", "COOKING": "Kochkunst", "FISHING": "Angeln", "ALCHEMY": "Alchemie",
+                  "BLACKSMITHING": "Schmiedekunst", "LEATHERWORKING": "Lederverarbeitung", "TAILORING": "Schneiderei",
+                  "ENGINEERING": "Ingenieurskunst", "HERBALISM": "Kräuterkunde", "REPUTATION": "Ruf", "SPECIAL": "Besonderes",
+                  "SEASONAL": "Saisonal", "LEGENDARY": "Legendär", "EPIC": "Episch", "TREASURE_MAP": "Schatzkarte"}
+
+
+class QuestDBError(RuntimeError):
+    pass
+
+
+def cbor_decode(data: bytes):
+    """Kleiner CBOR-Decoder (RFC 8949) – genug für QuestieDB: Zahlen, Texte, Listen, Tabellen."""
+    pos = 0
+    brk = object()
+
+    def head():
+        nonlocal pos
+        b = data[pos]
+        pos += 1
+        mt, ai = b >> 5, b & 31
+        if ai < 24:
+            return mt, ai, b
+        if ai in (24, 25, 26, 27):
+            n = 1 << (ai - 24)
+            v = int.from_bytes(data[pos:pos + n], "big")
+            pos += n
+            return mt, v, b
+        if ai == 31:
+            return mt, None, b
+        raise QuestDBError(f"CBOR: unbekanntes Format {b:#x}")
+
+    def item():
+        nonlocal pos
+        b = data[pos]
+        if b == 0xFF:
+            pos += 1
+            return brk
+        if b in (0xF9, 0xFA, 0xFB):
+            pos += 1
+            n, fmt = {0xF9: (2, ">e"), 0xFA: (4, ">f"), 0xFB: (8, ">d")}[b]
+            v = struct.unpack(fmt, data[pos:pos + n])[0]
+            pos += n
+            return v
+        mt, v, _ = head()
+        if mt == 0:
+            return v
+        if mt == 1:
+            return -1 - v
+        if mt in (2, 3):
+            if v is None:
+                parts = []
+                while (x := item()) is not brk:
+                    parts.append(x.encode("utf-8") if isinstance(x, str) else x)
+                raw = b"".join(parts)
+            else:
+                raw = data[pos:pos + v]
+                pos += v
+            return raw.decode("utf-8", "replace")          # WoW behandelt beides als Text
+        if mt == 4:
+            out = []
+            if v is None:
+                while (x := item()) is not brk:
+                    out.append(x)
+            else:
+                for _ in range(v):
+                    out.append(item())
+            return out
+        if mt == 5:
+            out = {}
+            if v is None:
+                while (k := item()) is not brk:
+                    out[k] = item()
+            else:
+                for _ in range(v):
+                    k = item()
+                    out[k] = item()
+            return out
+        if mt == 6:
+            return item()
+        if mt == 7:
+            return {20: False, 21: True}.get(v)
+        raise QuestDBError("CBOR: unbekannter Typ")
+
+    return item()
+
+
+def _slot(t, i):
+    """Feld i (1-basiert, wie in Lua) aus einer CBOR-Liste oder -Tabelle."""
+    if isinstance(t, list):
+        return t[i - 1] if 0 < i <= len(t) else None
+    if isinstance(t, dict):
+        return t.get(i)
+    return None
+
+
+def _ids(v) -> list[int]:
+    if isinstance(v, dict):
+        v = [v[k] for k in sorted(v) if isinstance(k, int)]
+    return [int(x) for x in (v or []) if isinstance(x, (int, float)) and x]
+
+
+def _pretty_enum(name: str) -> str:
+    return " ".join(w.capitalize() if w not in ("OF", "THE") else w.lower() for w in name.split("_"))
+
+
+def find_questie_toc(root: str, flavor: str) -> Path | None:
+    """Die passende QuestieDB-.toc (gebackene Daten) für diese Spielversion."""
+    if not root or not flavor:
+        return None
+    want = QDB_FLAVORS.get(flavor, "")
+    for base in (addons_dir(root, flavor), disabled_dir(root, flavor)):
+        d = base / QDB_ADDON
+        if not d.is_dir():
+            continue
+        tocs = sorted(d.glob(f"{QDB_ADDON}*.toc"))
+        if want and (d / f"{QDB_ADDON}_{want}.toc") in tocs:
+            return d / f"{QDB_ADDON}_{want}.toc"
+        for t in tocs:
+            try:
+                with t.open(encoding="utf-8", errors="replace") as f:
+                    head = f.read(4000)
+            except OSError:
+                continue
+            if "X-Mode: baked" in head and (not want or f"X-Flavor: {want}" in head):
+                return t
+    return None
+
+
+def game_locale(root: str, flavor: str) -> str:
+    """Sprache des Spiels (WTF/Config.wtf), sonst die von Leeroyzan."""
+    try:
+        text = (Path(root) / flavor / "WTF" / "Config.wtf").read_text(encoding="utf-8", errors="replace")
+        m = re.search(r'^SET textLocale "(\w{4})"', text, re.M)
+        if m:
+            return m.group(1)
+    except OSError:
+        pass
+    return "deDE" if LANG == "de" else "enUS"
+
+
+class QuestDB:
+    """Die Questdatenbank aus QuestieDB – Quests, NPCs, Objekte, Gegenstände, Quest-XP."""
+
+    def __init__(self, toc: Path):
+        self.toc = toc
+        self.folder = toc.parent
+        st = toc.stat()
+        self.signature = f"{toc.name}:{st.st_size}:{int(st.st_mtime)}"
+        self.meta: dict[str, str] = {}
+        with toc.open(encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if line.startswith("## "):
+                    k, _, v = line[3:].rstrip("\r\n").partition(": ")
+                    self.meta[k] = v
+        if self.meta.get("X-Mode") != "baked":
+            raise QuestDBError(tr("Diese QuestieDB-Version speichert ihre Daten in einem unbekannten Format."))
+        self.version = self.meta.get("Version", "?")
+        self.flavor_name = self.meta.get("X-Flavor", "")
+        self._ids = {}
+        self._rows = {"Quest": {}, "Npc": {}, "Object": {}, "Item": {}}
+        self._l10n = {}
+        self.quests: dict[int, dict] = {}
+        for qid in self.all_ids("Quest"):
+            q = self._quest(qid)
+            if q:
+                self.quests[qid] = q
+        self.xp = self._read_xp()
+        self.zone_names, self.sort_names, self.faction_names = self._read_enums()
+        self.next_of: dict[int, list[int]] = {}
+        self.prev_of: dict[int, list[int]] = {}
+        for qid, q in self.quests.items():
+            for p in q["pre"]:
+                if p in self.quests:
+                    self.next_of.setdefault(p, []).append(qid)
+                    self.prev_of.setdefault(qid, []).append(p)
+            if q["next"] and q["next"] in self.quests:
+                lst = self.next_of.setdefault(qid, [])
+                if q["next"] not in lst:
+                    lst.insert(0, q["next"])
+                back = self.prev_of.setdefault(q["next"], [])
+                if qid not in back:
+                    back.append(qid)
+
+    # ----- Rohdaten ----------------------------------------------------- #
+    def _stored(self, key: str) -> str | None:
+        v = self.meta.get(key)
+        if v and v.startswith("~") and v.endswith("~") and v[1:-1].isdigit():
+            parts = []
+            for i in range(1, int(v[1:-1]) + 1):
+                part = self.meta.get(f"{key}-{i}")
+                if part is None:
+                    raise QuestDBError(f"QuestieDB: {key}-{i} fehlt")
+                parts.append(part)
+            return "".join(parts)
+        return v
+
+    @staticmethod
+    def _decode(text: str, packed: bool = False):
+        raw = base64.b64decode(text)
+        if packed:
+            raw = zlib.decompress(raw)
+        return cbor_decode(raw)
+
+    def all_ids(self, kind: str) -> list[int]:
+        if kind not in self._ids:
+            enc = self._stored(f"X-{kind}-IDS")
+            self._ids[kind] = sorted(int(x) for x in (self._decode(enc, True) if enc else []))
+        return self._ids[kind]
+
+    def row(self, kind: str, eid: int, fields: int) -> dict | None:
+        cache = self._rows[kind]
+        if eid in cache:
+            return cache[eid]
+        enc = self._stored(f"X-{kind}-{eid}-S")
+        if enc is None:
+            cache[eid] = None
+            return None
+        r = self._decode(enc)
+        if isinstance(r, list):
+            r = {i + 1: v for i, v in enumerate(r) if v is not None}
+        presence = r.pop("p", 0) or 0
+        for fi in range(1, fields + 1):
+            if int(presence) >> (fi - 1) & 1:
+                t = self._stored(f"X-{kind}-{eid}-{fi}")
+                if t:
+                    r[fi] = self._decode(t)
+        cache[eid] = r
+        return r
+
+    def localized(self, kind: str, eid: int, column: int, locale: str):
+        """Übersetzter Text (Spalte 1 = Name, 2 = Ziele/Untertitel) – None, wenn keiner da ist."""
+        if locale == "enUS":
+            return None
+        key = (kind, locale)
+        if key not in self._l10n:
+            enc = self._stored(f"X-l10n-{locale}-{kind}")
+            try:
+                self._l10n[key] = self._decode(enc, True) if enc else None
+            except Exception:  # noqa – fehlende Übersetzung ist kein Fehler
+                self._l10n[key] = None
+        block = self._l10n[key]
+        col = _slot(block, column) if block is not None else None
+        if col is None:
+            return None
+        ids = self.all_ids(kind)
+        i = bisect.bisect_left(ids, eid)
+        if i >= len(ids) or ids[i] != eid:
+            return None
+        return _slot(col, i + 1)
+
+    # ----- Quests ------------------------------------------------------- #
+    def _quest(self, qid: int) -> dict | None:
+        r = self.row("Quest", qid, 36)
+        if not r or not r.get(1):
+            return None
+        races = int(r.get(6) or 0) & 0xFFFFFFFF
+        a, h = races & RACES_ALLIANCE, races & RACES_HORDE
+        side = "A" if a and not h else "H" if h and not a else ""
+        starts, ends = r.get(2), r.get(3)
+        objectives = r.get(10)
+        pre = _ids(r.get(12)) + [x for x in _ids(r.get(13)) if x not in _ids(r.get(12))]
+        return {
+            "id": qid, "name": str(r[1]), "lvl": int(r.get(5) or 0), "req": int(r.get(4) or 0), "side": side,
+            "classes": int(r.get(7) or 0), "zone": int(r.get(17) or 0),
+            "start": {"npc": _ids(_slot(starts, 1)), "obj": _ids(_slot(starts, 2)), "item": _ids(_slot(starts, 3))},
+            "end": {"npc": _ids(_slot(ends, 1)), "obj": _ids(_slot(ends, 2))},
+            "text": [str(x) for x in (r.get(8) or []) if isinstance(x, str)],
+            "kill": [int(_slot(e, 1)) for e in (_slot(objectives, 1) or []) if isinstance(_slot(e, 1), (int, float))],
+            "objs": [int(_slot(e, 1)) for e in (_slot(objectives, 2) or []) if isinstance(_slot(e, 1), (int, float))],
+            "items": [int(_slot(e, 1)) for e in (_slot(objectives, 3) or []) if isinstance(_slot(e, 1), (int, float))],
+            "pre": pre, "pre_all": bool(_ids(r.get(12))), "next": int(r.get(22) or 0),
+            "exclusive": _ids(r.get(16)), "rep": [(int(_slot(x, 1)), int(_slot(x, 2))) for x in (r.get(26) or [])
+                                                   if isinstance(x, (list, dict)) and _slot(x, 1) and _slot(x, 2)],
+            "skill": (int(_slot(r[18], 1) or 0), int(_slot(r[18], 2) or 0)) if r.get(18) else None,
+            "repeatable": bool(int(r.get(24) or 0) & 1), "breadcrumb_for": int(r.get(27) or 0),
+            "src_item": int(r.get(11) or 0),
+        }
+
+    def _read_xp(self) -> dict[int, tuple[int, int]]:
+        out = {}
+        for f in sorted((self.folder / "support").glob(f"{self.flavor_name or '*'}/QuestXP/xpDB-*.lua")):
+            try:
+                text = f.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            for m in re.finditer(r"\[(\d+)\]\s*=\s*\{\s*(\d+)\s*,\s*(\d+)\s*\}", text):
+                out.setdefault(int(m.group(1)), (int(m.group(2)), int(m.group(3))))
+        return out
+
+    def _read_enums(self):
+        zones, sorts, factions = {}, {}, {}
+        for name, target, sign in (("zones.lua", zones, 1), ("quests.lua", sorts, -1), ("factions.lua", factions, 1)):
+            try:
+                text = (self.folder / "src" / "corrections" / "enum" / name).read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if name == "quests.lua":
+                m = re.search(r"sortKeys\s*=\s*\{(.*?)\n\}", text, re.S)
+                text = m.group(1) if m else ""
+            for m in re.finditer(r"^\s*([A-Z][A-Z0-9_]*)\s*=\s*(-?\d+)\s*,", text, re.M):
+                v = int(m.group(2))
+                if (v < 0) == (sign < 0) and v not in target:
+                    target[v] = m.group(1)
+        # Unterzonen (z. B. Nordhaintal) mit ihren englischen Namen aus den Kommentaren
+        self.zone_parent, self.zone_plain = {}, {}
+        for f in (self.folder / "support").glob(f"{self.flavor_name or '*'}/Zones/subZoneToParentZone.lua"):
+            try:
+                text = f.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            for m in re.finditer(r"\[(\d+)\]\s*=\s*(\d+)\s*,\s*--\s*(.+?)\s*->\s*(.+?)\s*$", text, re.M):
+                sub, parent = int(m.group(1)), int(m.group(2))
+                self.zone_parent.setdefault(sub, parent)
+                self.zone_plain.setdefault(sub, m.group(3))
+                self.zone_plain.setdefault(parent, m.group(4))
+        return zones, sorts, factions
+
+    # ----- Namen -------------------------------------------------------- #
+    def quest_name(self, qid: int, locale: str) -> str:
+        q = self.quests.get(qid)
+        return (self.localized("Quest", qid, 1, locale) or (q["name"] if q else f"#{qid}")) if q else f"#{qid}"
+
+    def quest_text(self, qid: int, locale: str) -> list[str]:
+        loc = self.localized("Quest", qid, 2, locale)
+        if isinstance(loc, dict):
+            loc = [loc[k] for k in sorted(loc)]
+        if isinstance(loc, list) and any(isinstance(x, str) for x in loc):
+            return [x for x in loc if isinstance(x, str)]
+        return self.quests.get(qid, {}).get("text", [])
+
+    def npc(self, nid: int, locale: str) -> dict | None:
+        r = self.row("Npc", nid, 20)
+        if not r:
+            return None
+        name = self.localized("Npc", nid, 1, locale) or r.get(1) or f"NPC {nid}"
+        sub = self.localized("Npc", nid, 2, locale) or r.get(14) or ""
+        zone, pos = int(r.get(9) or 0), None
+        spawns = r.get(7)
+        if isinstance(spawns, dict) and spawns:
+            z = zone if zone in spawns else next(iter(spawns))
+            pts = spawns.get(z) or []
+            if pts and isinstance(pts[0], list) and len(pts[0]) >= 2 and pts[0][0] is not None:
+                pos = (float(pts[0][0]), float(pts[0][1]))
+            zone = int(z)
+        return {"id": nid, "name": str(name), "sub": str(sub or ""), "zone": zone, "pos": pos,
+                "level": (int(r.get(4) or 0), int(r.get(5) or 0)), "rank": int(r.get(6) or 0)}
+
+    def obj_name(self, oid: int, locale: str) -> str:
+        r = self.row("Object", oid, 10) or {}
+        return str(self.localized("Object", oid, 1, locale) or r.get(1) or f"#{oid}")
+
+    def item_name(self, iid: int, locale: str) -> str:
+        r = self.row("Item", iid, 20) or {}
+        return str(self.localized("Item", iid, 1, locale) or r.get(1) or f"#{iid}")
+
+    def zone_name(self, zid: int, learned: dict | None = None) -> str:
+        if learned and learned.get(zid):
+            return learned[zid]
+        if zid < 0:
+            key = self.sort_names.get(zid, "")
+            return tr(QUEST_SORTS_DE.get(key, _pretty_enum(key))) if key else ""
+        if zid in self.zone_plain:
+            return self.zone_plain[zid]
+        key = self.zone_names.get(zid)
+        return _pretty_enum(key) if key else (f"#{zid}" if zid else "")
+
+    def faction_name(self, fid: int, learned: dict | None = None) -> str:
+        if learned and learned.get(fid):
+            return learned[fid]
+        key = self.faction_names.get(fid)
+        return _pretty_enum(key) if key else f"#{fid}"
+
+    # ----- Questreihen -------------------------------------------------- #
+    def chain(self, qid: int) -> list[int]:
+        """Die Questreihe als Liste: Anfang … qid … Ende (Verzweigungen: der Hauptpfad)."""
+        seen = {qid}
+        back, cur = [], qid
+        while len(back) < 40:
+            prev = [p for p in self.prev_of.get(cur, []) if p not in seen]
+            nxt = [p for p in prev if self.quests[p]["next"] == cur] or prev
+            if not nxt:
+                break
+            cur = nxt[0]
+            seen.add(cur)
+            back.append(cur)
+        fwd, cur = [], qid
+        while len(fwd) < 40:
+            nxt = [n for n in self.next_of.get(cur, []) if n not in seen]
+            if not nxt:
+                break
+            cur = nxt[0]
+            seen.add(cur)
+            fwd.append(cur)
+        return list(reversed(back)) + [qid] + fwd
+
+    def search(self, text: str, locale: str, side: str = "", lmin: int = 0, lmax: int = 0, limit: int = 300) -> list[int]:
+        text = text.strip().lower()
+        npc_hits: set[int] = set()
+        if text and not text.isdigit() and len(text) >= 3:
+            for qid, q in self.quests.items():           # Questgeber/-abgabe nach Name
+                for nid in q["start"]["npc"][:3] + q["end"]["npc"][:3]:
+                    n = self.npc(nid, locale)
+                    if n and text in n["name"].lower():
+                        npc_hits.add(qid)
+                        break
+        out = []
+        for qid, q in self.quests.items():
+            if side and q["side"] and q["side"] != side:
+                continue
+            if lmin and q["lvl"] < lmin or lmax and q["lvl"] > lmax:
+                continue
+            if text:
+                if text.isdigit():
+                    if str(qid) != text:
+                        continue
+                elif (text not in self.quest_name(qid, locale).lower() and text not in q["name"].lower()
+                      and qid not in npc_hits and text not in self.zone_name(q["zone"]).lower()):
+                    continue
+            out.append(qid)
+        out.sort(key=lambda i: (self.quests[i]["lvl"], self.quest_name(i, locale)))
+        return out[:limit]
+
+
+QUEST_DATA_FORMAT = 1
+QUEST_DATA_FILE = "Quests.lua"
+
+
+def _lua_num(v) -> str:
+    if isinstance(v, float):
+        return f"{v:.1f}".rstrip("0").rstrip(".")
+    return str(int(v))
+
+
+def quest_data_text(db: QuestDB, locale: str, zone_names: dict | None = None, faction_names: dict | None = None) -> str:
+    """Quests.lua für Leeroylink: alle Quests kompakt in der Sprache des Spiels.
+    q[id] = {Name, Stufe, Mindeststufe, Zone, Seite, Folgequest, {Vorquests}, Questgeber, Abgabe,
+             {Ziele}, {Fraktion, Ruf, …}, XP, Klassen, wiederholbar}; Questgeber = {Name, Zone, x, y, Art}"""
+    zone_names, faction_names = zone_names or {}, faction_names or {}
+    zones_used, factions_used = set(), set()
+    L = lua_string
+
+    def giver(g) -> str:
+        for nid in g.get("npc", [])[:2]:
+            n = db.npc(nid, locale)
+            if n:
+                zones_used.add(n["zone"])
+                x, y = n["pos"] or (None, None)
+                return "{%s,%s,%s,%s}" % (L(n["name"]), n["zone"] or "false",
+                                          _lua_num(x) if x is not None else "false", _lua_num(y) if y is not None else "false")
+        for oid in g.get("obj", [])[:1]:
+            return "{%s,false,false,false,\"o\"}" % L(db.obj_name(oid, locale))
+        for iid in g.get("item", [])[:1]:
+            return "{%s,false,false,false,\"i\"}" % L(db.item_name(iid, locale))
+        return "false"
+
+    rows = []
+    for qid in sorted(db.quests):
+        q = db.quests[qid]
+        zones_used.add(q["zone"])
+        texts = db.quest_text(qid, locale)
+        rep = []
+        for fid, val in q["rep"]:
+            factions_used.add(fid)
+            rep += [str(fid), str(val)]
+        xp = db.xp.get(qid)
+        fields = [L(db.quest_name(qid, locale)), str(q["lvl"]), str(q["req"]), str(q["zone"] or "false"),
+                  L(q["side"]) if q["side"] else "false", str(q["next"]) if q["next"] else "false",
+                  "{%s}" % ",".join(str(p) for p in q["pre"]) if q["pre"] else "false",
+                  giver(q["start"]), giver(q["end"]),
+                  "{%s}" % ",".join(L(t) for t in texts) if texts else "false",
+                  "{%s}" % ",".join(rep) if rep else "false",
+                  str(xp[1]) if xp else "false", str(q["classes"]) if q["classes"] else "false",
+                  "true" if q["repeatable"] else "false"]
+        while fields and fields[-1] == "false":
+            fields.pop()
+        rows.append(f"[{qid}]={{{','.join(fields)}}},")
+    zl = ",".join(f"[{z}]={L(db.zone_name(z, zone_names))}" for z in sorted(zones_used) if z and db.zone_name(z, zone_names))
+    fl = ",".join(f"[{f}]={L(db.faction_name(f, faction_names))}" for f in sorted(factions_used))
+    return ("-- Quests.lua: geschrieben von Leeroyzan aus QuestieDB " + db.version + " (" + locale + ").\n"
+            "-- Nicht von Hand ändern – Leeroyzan schreibt die Datei neu, wenn sich QuestieDB ändert.\n"
+            f"LeeroylinkQuests = {{\nv={QUEST_DATA_FORMAT},src={L('QuestieDB ' + db.version)},locale={L(locale)},\n"
+            f"zones={{{zl}}},\nfactions={{{fl}}},\nq={{\n" + "\n".join(rows) + "\n},\n}\n")
+
+
+def write_quest_data(root: str, flavor: str, zone_names: dict | None = None, faction_names: dict | None = None) -> str:
+    """Schreibt Quests.lua ins installierte Leeroylink. Ergebnis: written | unchanged | missing | noqdb."""
+    folder = installed_link_dir(root, flavor)
+    if not folder:
+        return "missing"
+    toc = find_questie_toc(root, flavor)
+    if not toc:
+        return "noqdb"
+    st = toc.stat()
+    locale = game_locale(root, flavor)
+    names_key = hashlib.sha1(json.dumps([sorted((zone_names or {}).items()), sorted((faction_names or {}).items())],
+                                        ensure_ascii=False).encode("utf-8")).hexdigest()[:10]
+    sig = f"-- sig: {toc.name}:{st.st_size}:{int(st.st_mtime)}|{locale}|{QUEST_DATA_FORMAT}|{names_key}"
+    target = folder / QUEST_DATA_FILE
+    try:
+        with target.open(encoding="utf-8", errors="replace") as f:
+            if f.readline().strip() == sig:
+                return "unchanged"
+    except OSError:
+        pass
+    try:
+        db = load_questdb(root, flavor)
+    except QuestDBError:
+        return "noqdb"
+    text = sig + "\n" + quest_data_text(db, locale, zone_names, faction_names)
+    tmp = target.with_name(QUEST_DATA_FILE + ".tmp")
+    tmp.write_text(text, encoding="utf-8", newline="\n")
+    os.replace(tmp, target)
+    return "written"
+
+
+_QDB_CACHE: dict[str, QuestDB] = {}
+
+
+def load_questdb(root: str, flavor: str) -> QuestDB:
+    toc = find_questie_toc(root, flavor)
+    if not toc:
+        raise QuestDBError(tr("QuestieDB ist in dieser Spielversion nicht installiert."))
+    st = toc.stat()
+    key = f"{toc}:{st.st_size}:{int(st.st_mtime)}"
+    if key not in _QDB_CACHE:
+        _QDB_CACHE.clear()
+        _QDB_CACHE[key] = QuestDB(toc)
+    return _QDB_CACHE[key]
+
+
+# --------------------------------------------------------------------------- #
 # Theme (Braun/Gold im Stil eines Fantasy-MMO-Interfaces)
 # --------------------------------------------------------------------------- #
 
@@ -3794,13 +4358,13 @@ def apply_theme(root) -> dict:
     style.configure("SideKicker.TLabel", background=t["header"], foreground=t["gold"], font=fonts["label"])
     style.configure("Nav.TButton", background=t["header"], foreground=t["text"], font=fonts["base"],
                     bordercolor=t["header"], lightcolor=t["header"], darkcolor=t["header"],
-                    anchor="w", padding=(14, 9), relief="flat")
+                    anchor="w", padding=(14, 7), relief="flat")
     style.map("Nav.TButton", background=[("active", t["panel"])], foreground=[("active", t["gold"])],
               bordercolor=[("active", t["header"])], lightcolor=[("active", t["panel"])],
               darkcolor=[("active", t["panel"])])
     style.configure("NavActive.TButton", background=t["active"], foreground=t["gold"], font=fonts["bold"],
                     bordercolor=t["gold"], lightcolor=t["active"], darkcolor=t["active"],
-                    anchor="w", padding=(14, 9), relief="flat")
+                    anchor="w", padding=(14, 7), relief="flat")
     style.map("NavActive.TButton", background=[("active", t["active"])])
     style.configure("Kicker.TLabel", background=t["bg"], foreground=t["gold"], font=fonts["label"])
     style.configure("PageTitle.TLabel", background=t["bg"], foreground=t["text"], font=fonts["page"])
@@ -4062,7 +4626,7 @@ class App(BaseTk):
 
     # ----- Aufbau ---------------------------------------------------------- #
     PAGES = [("addons", "Meine Addons"), ("discover", "Entdecken"), ("updates", "Updates"),
-             ("sessions", "Leeroylink"), ("characters", "Charaktere"), ("wowhead", "Wowhead"), ("diagnose", "Diagnose"),
+             ("sessions", "Leeroylink"), ("characters", "Charaktere"), ("quests", "Quests"), ("wowhead", "Wowhead"), ("diagnose", "Diagnose"),
              ("share", "Teilen"), ("sets", "Sets & Backups"), ("settings", "Einstellungen")]
     TREE_SHOWN = ("status", "name", "version", "source", "update")
 
@@ -4125,6 +4689,7 @@ class App(BaseTk):
         self._link_hint_shown = False
         self.link_state = empty_link_state()
         self._link_write_job = None
+        self._quest_write_running = False
         self.diag_state_var = tk.StringVar()
         self._diag_rows: list = []
         self.chars_total_var = tk.StringVar()
@@ -4206,6 +4771,7 @@ class App(BaseTk):
         self._page_updates()
         self._page_sessions()
         self._page_characters()
+        self._page_quests()
         self._page_wowhead()
         self._page_diagnose()
         self._page_share()
@@ -4607,6 +5173,8 @@ class App(BaseTk):
             self.refresh_characters()
         elif key == "wowhead":
             self.after(50, self.wh_entry.focus_set)
+        elif key == "quests":
+            self.qdb_open()
         elif key == "sessions":
             self.refresh_sessions_page()
             if not self._sess_importing and self.root_path and self.flavor \
@@ -5532,6 +6100,18 @@ class App(BaseTk):
             return
         if res == "written":
             log.info("Data.lua für Leeroylink geschrieben (%s)", self.flavor)
+        if not self._quest_write_running:
+            self._quest_write_running = True
+            root, flavor = self.root_path, self.flavor
+            zn, fn = dict(self.link_state.get("zoneNames", {})), dict(self.link_state.get("factionNames", {}))
+
+            def done(res, err):
+                self._quest_write_running = False
+                if err:
+                    log.warning("Quests.lua für Leeroylink: %s", err)
+                elif res == "written":
+                    log.info("Quests.lua für Leeroylink geschrieben (%s)", flavor)
+            self.run_quiet(lambda: write_quest_data(root, flavor, zn, fn), done)
 
     def _link_state_changed(self):
         """Neue Daten aus dem Spiel: Seiten auffrischen, Hinweise zeigen, Data.lua anpassen."""
@@ -6231,6 +6811,363 @@ class App(BaseTk):
             self.info(tr("Noch keine Sitzung zum Senden."))
             return
         self.send_session_discord(latest[0])
+
+    # --- Quests (Questdatenbank aus QuestieDB) --------------------------------------- #
+    QDB_SIDES = [("", "Beide Fraktionen"), ("A", "Allianz"), ("H", "Horde")]
+    CLASS_BITS = [(1, "WARRIOR"), (2, "PALADIN"), (4, "HUNTER"), (8, "ROGUE"), (16, "PRIEST"), (32, "DEATHKNIGHT"),
+                  (64, "SHAMAN"), (128, "MAGE"), (256, "WARLOCK"), (1024, "DRUID")]
+
+    def _page_quests(self):
+        page, head = self._page("quests", "QuestieDB", tr("Quests"))
+        self.qdb = None
+        self.qdb_key = None
+        self.qdb_seq = 0
+        self.qdb_rows: list[int] = []
+        self.qdb_current = None
+        self.qdb_history: list[int] = []
+        self.qdb_status_var = tk.StringVar(value="")
+        self.qdb_info_var = tk.StringVar(value=tr("Suche nach Quest, NPC, Zone oder Quest-ID – oder grenze nur die Stufe ein."))
+        self.qdb_var = tk.StringVar()
+        self.qdb_side_var = tk.StringVar(value=tr(self.QDB_SIDES[0][1]))
+        self.qdb_lmin = tk.StringVar(value="")
+        self.qdb_lmax = tk.StringVar(value="")
+        ttk.Label(head, textvariable=self.qdb_status_var, style="Body.TLabel").pack(side="right", anchor="s")
+
+        row = ttk.Frame(page)
+        row.pack(fill="x", pady=(12, 0))
+        self.qdb_entry = ttk.Entry(row, textvariable=self.qdb_var)
+        self.qdb_entry.pack(side="left", fill="x", expand=True)
+        Placeholder(self.qdb_entry, self.qdb_var, tr("Quest, NPC, Zone oder ID, z. B. Hogger"))
+        self.qdb_entry.bind("<Return>", lambda e: self.qdb_search())
+        cb = ttk.Combobox(row, textvariable=self.qdb_side_var, state="readonly", width=16,
+                          values=[tr(label) for _, label in self.QDB_SIDES])
+        cb.pack(side="left", padx=(8, 0))
+        cb.bind("<<ComboboxSelected>>", lambda e: self.qdb_search())
+        ttk.Label(row, text=tr("Stufe"), style="Body.TLabel").pack(side="left", padx=(10, 4))
+        for var in (self.qdb_lmin, self.qdb_lmax):
+            sp = ttk.Spinbox(row, from_=0, to=80, width=4, textvariable=var, command=self.qdb_search)
+            sp.pack(side="left", padx=(0, 2))
+            sp.bind("<Return>", lambda e: self.qdb_search())
+        ttk.Button(row, text=tr("Suchen"), style="Primary.TButton", command=self.qdb_search).pack(side="left", padx=(8, 0))
+        ttk.Label(page, textvariable=self.qdb_info_var, style="Body.TLabel").pack(anchor="w", pady=(8, 0))
+
+        body = ttk.Frame(page)
+        body.pack(fill="both", expand=True, pady=(8, 0))
+        left = ttk.Frame(body, width=500)
+        left.pack(side="left", fill="y")
+        left.pack_propagate(False)
+        frame, self.qdb_tree = self._list(left, (("name", tr("Quest")), ("lvl", tr("Stufe")), ("zone", tr("Zone")), ("id", "ID")),
+                                          (226, 66, 142, 52), stretch=("name",))
+        frame.pack(fill="both", expand=True)
+        self.qdb_tree.tag_configure("A", foreground="#7fb2ff")
+        self.qdb_tree.tag_configure("H", foreground="#ff7f7f")
+        self.qdb_tree.bind("<<TreeviewSelect>>", lambda e: self._qdb_selected())
+        self.qdb_tree.bind("<Double-1>", lambda e: self.qdb_wowhead())
+        box = self._card_box(body, pady=(0, 0), side="left", fill="both", expand=True, padx=(14, 0), title=tr("Details"))
+        tf, self.qdb_text = self._text(box, height=8)
+        tf.pack(fill="both", expand=True)
+        self._tag_text(self.qdb_text)
+        self.qdb_text.tag_configure("A", foreground="#7fb2ff")
+        self.qdb_text.tag_configure("H", foreground="#ff7f7f")
+        btns = ttk.Frame(box, style="Panel.TFrame")
+        btns.pack(fill="x", pady=(10, 0))
+        self.qdb_back_btn = ttk.Button(btns, text=tr("← Zurück"), command=self.qdb_back, state="disabled")
+        self.qdb_back_btn.pack(side="left")
+        self.qdb_wh_btn = ttk.Button(btns, text=tr("Auf Wowhead öffnen ↗"), style="Primary.TButton",
+                                     command=self.qdb_wowhead, state="disabled")
+        self.qdb_wh_btn.pack(side="left", padx=(6, 0))
+        self.qdb_fav_btn = ttk.Button(btns, text=tr("☆ Favorit"), command=self.qdb_fav, state="disabled")
+        self.qdb_fav_btn.pack(side="right")
+        self._set_text(self.qdb_text, parts=[(tr("Die Quests kommen aus QuestieDB, der Datenbank von Questie. Leeroyzan "
+                                                   "liest sie direkt aus dem Addon-Ordner – QuestieDB muss dafür nur "
+                                                   "installiert sein. Belohnungen mit Gegenständen kennt Leeroyzan, sobald "
+                                                   "einer deiner Charaktere die Quest gesehen hat (Leeroylink)."), "dim")])
+        self.qdb_text.configure(state="disabled")
+
+    def _qdb_locale(self) -> str:
+        return "deDE" if LANG == "de" else "enUS"
+
+    def qdb_open(self):
+        """Lädt die Datenbank beim ersten Öffnen der Seite (im Hintergrund)."""
+        self.after(50, self.qdb_entry.focus_set)
+        if not self.root_path or not self.flavor:
+            self.qdb_status_var.set("")
+            self.qdb_info_var.set(tr("Wähle zuerst den WoW-Ordner."))
+            return
+        key = (self.root_path, self.flavor)
+        if self.qdb is not None and self.qdb_key == key:
+            return
+        self.qdb, self.qdb_key = None, key
+        self.qdb_status_var.set(tr("Lade QuestieDB …"))
+        root, flavor = key
+
+        def done(db, err):
+            if (self.root_path, self.flavor) != key:
+                return
+            if err:
+                self.qdb_status_var.set("")
+                if isinstance(err, QuestDBError):
+                    self.qdb_info_var.set(str(err) + " " + tr("Installiere Questie (bringt QuestieDB mit) über „Entdecken“ – danach hier neu öffnen."))
+                else:
+                    log.warning("QuestieDB: %s", err)
+                    self.qdb_info_var.set(tr("QuestieDB konnte nicht gelesen werden: {0}", str(err)[:160]))
+                self.qdb_key = None
+                return
+            self.qdb = db
+            self.qdb_status_var.set(tr("QuestieDB {0} · {1} Quests", db.version, fmt_int(len(db.quests))))
+            if self.qdb_var.get().strip() or self.qdb_lmin.get().strip() or self.qdb_lmax.get().strip():
+                self.qdb_search()
+        self.run_quiet(lambda: load_questdb(root, flavor), done)
+
+    def _qdb_side(self) -> str:
+        label = self.qdb_side_var.get()
+        return next((k for k, l in self.QDB_SIDES if tr(l) == label), "")
+
+    def qdb_search(self):
+        if self.qdb is None:
+            self.qdb_open()
+            return
+        q = self.qdb_var.get().strip()
+        try:
+            lmin, lmax = int(self.qdb_lmin.get() or 0), int(self.qdb_lmax.get() or 0)
+        except ValueError:
+            lmin = lmax = 0
+        if not q and not lmin and not lmax and not self._qdb_side():
+            self.qdb_info_var.set(tr("Suche nach Quest, NPC, Zone oder Quest-ID – oder grenze nur die Stufe ein."))
+            return
+        self.qdb_seq += 1
+        seq, db, side, loc = self.qdb_seq, self.qdb, self._qdb_side(), self._qdb_locale()
+        self.qdb_info_var.set(tr("Suche …"))
+        self.run_quiet(lambda: db.search(q, loc, side, lmin, lmax), lambda res, err: self._qdb_results(seq, res, err))
+
+    def _qdb_results(self, seq, res, err):
+        if seq != self.qdb_seq:
+            return
+        self.qdb_tree.delete(*self.qdb_tree.get_children())
+        self.qdb_rows = res or []
+        if err:
+            log.warning("Quest-Suche: %s", err)
+            self.qdb_info_var.set(tr("Die Suche ist fehlgeschlagen: {0}", str(err)[:160]))
+            return
+        db, loc = self.qdb, self._qdb_locale()
+        zn = self.link_state.get("zoneNames", {})
+        for i, qid in enumerate(self.qdb_rows):
+            q = db.quests[qid]
+            tags = [q["side"]] if q["side"] else []
+            if i % 2:
+                tags.append("odd")
+            self.qdb_tree.insert("", "end", iid=str(qid), values=(db.quest_name(qid, loc), q["lvl"],
+                                                               db.zone_name(q["zone"], zn), qid), tags=tags)
+        n = len(self.qdb_rows)
+        self.qdb_info_var.set((plural(n, "{0} Quest", "{0} Quests") + (tr(" (die ersten 300)") if n >= 300 else "")
+                               + "  ·  " + tr("Doppelklick öffnet die Quest auf Wowhead.")) if n else tr("Nichts gefunden."))
+        if n:
+            self.qdb_tree.selection_set(str(self.qdb_rows[0]))
+
+    def _qdb_selected(self):
+        sel = self.qdb_tree.selection()
+        if sel:
+            self.qdb_show(int(sel[0]), remember=False)
+
+    def qdb_show(self, qid: int, remember: bool = True):
+        db = self.qdb
+        if db is None or qid not in db.quests:
+            return
+        if remember and self.qdb_current and self.qdb_current != qid:
+            self.qdb_history.append(self.qdb_current)
+        self.qdb_current = qid
+        for b in (self.qdb_wh_btn, self.qdb_fav_btn):
+            b.configure(state="normal")
+        self.qdb_back_btn.configure(state="normal" if self.qdb_history else "disabled")
+        self.qdb_fav_btn.configure(text=tr("★ Favorit entfernen") if self._qdb_is_fav(qid) else tr("☆ Favorit"))
+        self._set_text(self.qdb_text, parts=self._qdb_parts(qid))
+        self.qdb_text.configure(state="disabled")
+        self.qdb_text.yview_moveto(0)
+
+    def _qdb_link(self, txt_parts, qid: int, text: str, tag: str = ""):
+        """Klickbarer Questname im Detailtext."""
+        name = f"qlink{qid}"
+        self.qdb_text.tag_configure(name, underline=False)
+        self.qdb_text.tag_bind(name, "<Button-1>", lambda e, i=qid: self.qdb_show(i))
+        self.qdb_text.tag_bind(name, "<Enter>", lambda e: self.qdb_text.configure(cursor="hand2"))
+        self.qdb_text.tag_bind(name, "<Leave>", lambda e: self.qdb_text.configure(cursor=""))
+        txt_parts.append((text, (name, "hl") if not tag else (name, tag)))
+
+    def _qdb_where(self, g: dict) -> str:
+        db, loc = self.qdb, self._qdb_locale()
+        zn = self.link_state.get("zoneNames", {})
+        out = []
+        for nid in g.get("npc", [])[:3]:
+            n = db.npc(nid, loc)
+            if n:
+                s = n["name"] + (f" <{n['sub']}>" if n["sub"] else "")
+                if n["zone"]:
+                    s += " – " + db.zone_name(n["zone"], zn)
+                    if n["pos"]:
+                        s += f" {n['pos'][0]:.0f}, {n['pos'][1]:.0f}"
+                out.append(s)
+        for oid in g.get("obj", [])[:2]:
+            out.append(db.obj_name(oid, loc) + " " + tr("(Objekt)"))
+        for iid in g.get("item", [])[:2]:
+            out.append(db.item_name(iid, loc) + " " + tr("(Gegenstand)"))
+        return "; ".join(out)
+
+    def _qdb_parts(self, qid: int) -> list:
+        db, loc = self.qdb, self._qdb_locale()
+        q = db.quests[qid]
+        zn, fn = self.link_state.get("zoneNames", {}), self.link_state.get("factionNames", {})
+        parts: list = []
+
+        def line(text="", tag=""):
+            parts.append((text + "\n", tag))
+
+        def head(text):
+            parts.append(("\n" + text + "\n", "head"))
+
+        line(db.quest_name(qid, loc), "title")
+        meta = [tr("Stufe {0}", q["lvl"])]
+        if q["req"] > 1:
+            meta.append(tr("ab Stufe {0}", q["req"]))
+        if q["zone"]:
+            meta.append(db.zone_name(q["zone"], zn))
+        meta.append({"A": tr("Allianz"), "H": tr("Horde")}.get(q["side"], tr("beide Fraktionen")))
+        classes = [tr(CLASS_NAMES[c]) for bit, c in self.CLASS_BITS if q["classes"] & bit]
+        if classes and len(classes) < 9:
+            meta.append(", ".join(classes))
+        if q["repeatable"]:
+            meta.append(tr("wiederholbar"))
+        line("  ·  ".join(meta) + f"  ·  ID {qid}", "dim")
+
+        chain = db.chain(qid)
+        if len(chain) > 1:
+            pos = chain.index(qid) + 1
+            head(tr("Questreihe – Teil {0} von {1}", pos, len(chain)))
+            for i, cid in enumerate(chain, 1):
+                c = db.quests[cid]
+                parts.append((f"{i:>2}. ", "dim"))
+                if cid == qid:
+                    parts.append((db.quest_name(cid, loc), "title"))
+                else:
+                    self._qdb_link(parts, cid, db.quest_name(cid, loc), c["side"] or "hl")
+                parts.append((f"  [{c['lvl']}]\n", "dim"))
+        start, end = self._qdb_where(q["start"]), self._qdb_where(q["end"])
+        if start or end:
+            head(tr("Questgeber und Abgabe"))
+            if start:
+                line(tr("Beginnt bei: {0}", start))
+            if end:
+                line(tr("Abgabe bei: {0}", end))
+        texts = db.quest_text(qid, loc)
+        if texts:
+            head(tr("Aufgabe"))
+            for t in texts:
+                line(t)
+        goals = ([tr("Besiegen: {0}", ", ".join((db.npc(n, loc) or {}).get("name", f"#{n}") for n in q["kill"][:6]))] if q["kill"] else []) + \
+                ([tr("Sammeln: {0}", ", ".join(db.item_name(i, loc) for i in q["items"][:6]))] if q["items"] else []) + \
+                ([tr("Benutzen: {0}", ", ".join(db.obj_name(o, loc) for o in q["objs"][:6]))] if q["objs"] else [])
+        for g in goals:
+            line("• " + g, "dim")
+
+        head(tr("Belohnung"))
+        rw = self.link_state.get("questRewards", {}).get(qid)
+        xp = (rw or {}).get("xp") or (db.xp.get(qid) or (0, 0))[1]
+        bits = []
+        if xp:
+            bits.append(f"{fmt_int(xp)} XP")
+        if rw and rw["money"]:
+            bits.append(fmt_money(rw["money"]))
+        for fid, val in q["rep"]:
+            bits.append(f"{db.faction_name(fid, fn)} {'+' if val > 0 else ''}{val}")
+        line("  ·  ".join(bits) if bits else "–")
+        if rw:
+            for it in rw["items"]:
+                parts.append(("• ", ""))
+                parts.append((it["name"] or item_name(self.link_state, it["id"]), f"q{min(max(it['q'], 0), 6)}"))
+                parts.append(((f" ×{it['n']}" if it["n"] > 1 else "") + "\n", ""))
+            if rw["choice"]:
+                line(tr("Eine davon zur Wahl:"), "dim")
+                for it in rw["choice"]:
+                    parts.append(("• ", ""))
+                    parts.append((it["name"] or item_name(self.link_state, it["id"]), f"q{min(max(it['q'], 0), 6)}"))
+                    parts.append(((f" ×{it['n']}" if it["n"] > 1 else "") + "\n", ""))
+            if rw["spell"]:
+                line("• " + rw["spell"])
+            line(tr("Gesehen von einem deiner Charaktere am {0}.",
+                    datetime.fromtimestamp(rw["t"]).strftime(tr("%d.%m.%Y"))) if rw["t"] else "", "dim")
+        else:
+            line(tr("Gegenstände und Gold: noch nicht gesehen – Leeroylink merkt sie sich, sobald einer deiner "
+                    "Charaktere die Quest sieht. Bis dahin hilft Wowhead."), "dim")
+
+        pre = [p for p in q["pre"] if p in db.quests and p not in chain]
+        if pre or q["skill"]:
+            head(tr("Voraussetzungen"))
+            if q["skill"]:
+                line(tr("Beruf/Fertigkeit {0}: mindestens {1}", q["skill"][0], q["skill"][1]))
+            if pre:
+                parts.append((tr("Erst abschließen ({0}): ", tr("alle") if q["pre_all"] else tr("eine davon")), ""))
+                for i, p in enumerate(pre[:8]):
+                    if i:
+                        parts.append((", ", ""))
+                    self._qdb_link(parts, p, db.quest_name(p, loc), db.quests[p]["side"] or "hl")
+                parts.append(("\n", ""))
+        more = [n for n in db.next_of.get(qid, []) if n not in chain]
+        if more:
+            head(tr("Schaltet außerdem frei"))
+            for n in more[:10]:
+                parts.append(("• ", ""))
+                self._qdb_link(parts, n, db.quest_name(n, loc), db.quests[n]["side"] or "hl")
+                parts.append((f"  [{db.quests[n]['lvl']}]\n", "dim"))
+        excl = [x for x in q["exclusive"] if x in db.quests]
+        if excl:
+            head(tr("Schließt sich aus mit"))
+            for x in excl[:6]:
+                parts.append(("• ", ""))
+                self._qdb_link(parts, x, db.quest_name(x, loc))
+                parts.append(("\n", ""))
+        if len(chain) > 1 and chain.index(qid) < len(chain) - 1:
+            rest = chain[chain.index(qid):]
+            total_xp = sum(((self.link_state.get("questRewards", {}).get(c) or {}).get("xp") or
+                            (db.xp.get(c) or (0, 0))[1]) for c in rest)
+            reps: dict[int, int] = {}
+            for c in rest:
+                for fid, val in db.quests[c]["rep"]:
+                    reps[fid] = reps.get(fid, 0) + val
+            head(tr("Bis zum Ende der Reihe ({0} Quests)", len(rest)))
+            line("  ·  ".join([f"{fmt_int(total_xp)} XP"] + [f"{db.faction_name(f, fn)} +{v}" for f, v in reps.items()]))
+        return parts
+
+    def qdb_back(self):
+        if self.qdb_history:
+            self.qdb_show(self.qdb_history.pop(), remember=False)
+            self.qdb_back_btn.configure(state="normal" if self.qdb_history else "disabled")
+
+    def _qdb_fav_entry(self, qid: int) -> dict:
+        ed = self.cfg.get("wowhead_edition", "classic")
+        return {"kind": "quest", "kind_name": "Quest", "id": qid, "name": self.qdb.quest_name(qid, self._qdb_locale()),
+                "quality": None, "edition": ed, "url": wowhead_url(ed, "quest", qid)}
+
+    def _qdb_is_fav(self, qid: int) -> bool:
+        return self._wh_is_fav(self._qdb_fav_entry(qid))
+
+    def qdb_fav(self):
+        qid = self.qdb_current
+        if qid is None:
+            return
+        e = self._qdb_fav_entry(qid)
+        favs = self._wh_favs()
+        if self._wh_is_fav(e):
+            favs[:] = [f for f in favs if self._wh_key(f) != self._wh_key(e)]
+            self.set_status(tr("Aus den Favoriten entfernt: {0}", e["name"]))
+        else:
+            favs.insert(0, e)
+            self.set_status(tr("Zu den Favoriten hinzugefügt: {0}", e["name"]))
+        save_config(self.cfg)
+        self._wh_mode_buttons()
+        self.qdb_fav_btn.configure(text=tr("★ Favorit entfernen") if self._qdb_is_fav(qid) else tr("☆ Favorit"))
+
+    def qdb_wowhead(self):
+        if self.qdb_current is not None:
+            self.open_link(wowhead_url(self.cfg.get("wowhead_edition", "classic"), "quest", self.qdb_current))
 
     # --- Wowhead ---------------------------------------------------------------------- #
     def _page_wowhead(self):
@@ -10933,7 +11870,6 @@ TRANSLATIONS["en"].update({
     "Wowhead ist gerade nicht erreichbar ({0}). „Auf Wowhead suchen ↗“ öffnet die Suche im Browser.":
         "Wowhead can't be reached right now ({0}). \"Search on Wowhead ↗\" opens the search in your browser.",
     "Nichts gefunden für „{0}“.": "Nothing found for \"{0}\".",
-    "{0} Treffer": "{0} results",
     "Doppelklick öffnet die Seite auf Wowhead.": "Double-click opens the page on Wowhead.",
     "Lade Kurzinfo …": "Loading preview …",
     "Keine Kurzinfo verfügbar – die ganze Seite gibt es auf Wowhead.": "No preview available – the full page is on Wowhead.",
@@ -10957,6 +11893,55 @@ TRANSLATIONS["en"].update({
     "Leeroyzan Link heißt jetzt Leeroylink. Ein Klick stellt um und übernimmt deine Daten (WoW muss dafür geschlossen sein).":
         "Leeroyzan Link is now called Leeroylink. One click switches over and keeps your data (WoW has to be closed).",
     "Umstellen": "Switch",
+    "Beide Fraktionen": "Both factions",
+    "Horde": "Horde",
+    "Zone": "Zone",
+    "Allianz": "Alliance",
+    "Suche nach Quest, NPC, Zone oder Quest-ID – oder grenze nur die Stufe ein.":
+        "Search for a quest, NPC, zone or quest ID – or just narrow the level.",
+    "Quest, NPC, Zone oder ID, z. B. Hogger": "Quest, NPC, zone or ID, e.g. Hogger",
+    "Quest": "Quest",
+    "← Zurück": "← Back",
+    "Die Quests kommen aus QuestieDB, der Datenbank von Questie. Leeroyzan liest sie direkt aus dem Addon-Ordner – QuestieDB muss dafür nur installiert sein. Belohnungen mit Gegenständen kennt Leeroyzan, sobald einer deiner Charaktere die Quest gesehen hat (Leeroylink).":
+        "The quests come from QuestieDB, Questie's database. Leeroyzan reads it straight from the addon folder – QuestieDB only needs to be installed. Item rewards are known as soon as one of your characters has seen the quest (Leeroylink).",
+    "Wähle zuerst den WoW-Ordner.": "Choose the WoW folder first.",
+    "Lade QuestieDB …": "Loading QuestieDB …",
+    "Installiere Questie (bringt QuestieDB mit) über „Entdecken“ – danach hier neu öffnen.":
+        "Install Questie (it includes QuestieDB) on the \"Discover\" page – then open this page again.",
+    "QuestieDB konnte nicht gelesen werden: {0}": "QuestieDB could not be read: {0}",
+    "QuestieDB {0} · {1} Quests": "QuestieDB {0} · {1} quests",
+    "Suche …": "Searching …",
+    "Die Suche ist fehlgeschlagen: {0}": "The search failed: {0}",
+    " (die ersten 300)": " (the first 300)",
+    "Doppelklick öffnet die Quest auf Wowhead.": "Double-click opens the quest on Wowhead.",
+    "(Objekt)": "(object)",
+    "(Gegenstand)": "(item)",
+    "ab Stufe {0}": "from level {0}",
+    "beide Fraktionen": "both factions",
+    "wiederholbar": "repeatable",
+    "Questreihe – Teil {0} von {1}": "Quest chain – part {0} of {1}",
+    "Questgeber und Abgabe": "Quest giver and turn-in",
+    "Beginnt bei: {0}": "Starts at: {0}",
+    "Abgabe bei: {0}": "Turn in at: {0}",
+    "Aufgabe": "Objective",
+    "Besiegen: {0}": "Defeat: {0}",
+    "Sammeln: {0}": "Collect: {0}",
+    "Benutzen: {0}": "Use: {0}",
+    "Belohnung": "Reward",
+    "Eine davon zur Wahl:": "Choose one of these:",
+    "Gesehen von einem deiner Charaktere am {0}.": "Seen by one of your characters on {0}.",
+    "Gegenstände und Gold: noch nicht gesehen – Leeroylink merkt sie sich, sobald einer deiner Charaktere die Quest sieht. Bis dahin hilft Wowhead.":
+        "Items and gold: not seen yet – Leeroylink remembers them as soon as one of your characters sees the quest. Until then, Wowhead helps.",
+    "Voraussetzungen": "Requirements",
+    "Beruf/Fertigkeit {0}: mindestens {1}": "Profession/skill {0}: at least {1}",
+    "Erst abschließen ({0}): ": "Complete first ({0}): ",
+    "alle": "all",
+    "eine davon": "one of them",
+    "Schaltet außerdem frei": "Also unlocks",
+    "Schließt sich aus mit": "Excludes",
+    "Bis zum Ende der Reihe ({0} Quests)": "Until the end of the chain ({0} quests)",
+    "QuestieDB ist in dieser Spielversion nicht installiert.": "QuestieDB is not installed for this game version.",
+    "Diese QuestieDB-Version speichert ihre Daten in einem unbekannten Format.": "This QuestieDB version stores its data in an unknown format.",
     "☆ Favorit": "☆ Favorite",
     "★ Favorit entfernen": "★ Remove favorite",
     "Treffer ({0})": "Results ({0})",

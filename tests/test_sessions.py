@@ -270,6 +270,155 @@ class RenameTests(unittest.TestCase):
         self.assertEqual(again["copied"], [])
 
 
+def cbor_encode(v) -> bytes:
+    """Gegenstück zu lz.cbor_decode für die Testdaten."""
+    def head(mt, n):
+        if n < 24:
+            return bytes([mt << 5 | n])
+        for ai, size in ((24, 1), (25, 2), (26, 4), (27, 8)):
+            if n < 1 << (8 * size):
+                return bytes([mt << 5 | ai]) + n.to_bytes(size, "big")
+    if v is None:
+        return b"\xf6"
+    if isinstance(v, bool):
+        return b"\xf5" if v else b"\xf4"
+    if isinstance(v, int):
+        return head(0, v) if v >= 0 else head(1, -1 - v)
+    if isinstance(v, float):
+        import struct
+        return b"\xfb" + struct.pack(">d", v)
+    if isinstance(v, str):
+        raw = v.encode("utf-8")
+        return head(2, len(raw)) + raw                    # QuestieDB speichert Texte als Bytes
+    if isinstance(v, list):
+        return head(4, len(v)) + b"".join(cbor_encode(x) for x in v)
+    if isinstance(v, dict):
+        return head(5, len(v)) + b"".join(cbor_encode(k) + cbor_encode(x) for k, x in v.items())
+    raise TypeError(v)
+
+
+def baked_toc(quests: dict, npcs: dict, de_names: dict) -> str:
+    """Eine kleine QuestieDB_Forever.toc im gebackenen Format (Base64 → zlib → CBOR)."""
+    import base64, zlib
+    b64 = lambda raw: base64.b64encode(raw).decode()
+    lines = ["## Interface: 16001", "## Title: QuestieDB", "## Version: 9.9.9", "## X-Mode: baked", "## X-Flavor: Forever"]
+
+    def entity(prefix, rows, table_fields):
+        ids = sorted(rows)
+        lines.append(f"## X-{prefix}-IDS: " + b64(zlib.compress(cbor_encode(ids))))
+        for eid in ids:
+            scal, presence = {}, 0
+            for fi, val in rows[eid].items():
+                if fi in table_fields:
+                    presence |= 1 << (fi - 1)
+                    lines.append(f"## X-{prefix}-{eid}-{fi}: " + b64(cbor_encode(val)))
+                else:
+                    scal[fi] = val
+            scal["p"] = presence
+            lines.append(f"## X-{prefix}-{eid}-S: " + b64(cbor_encode(scal)))
+        return ids
+    qids = entity("Quest", quests, {2, 3, 8, 10, 12, 13, 14, 16, 26})
+    entity("Npc", npcs, {7, 10, 11})
+    block = b64(zlib.compress(cbor_encode([[de_names.get(i, [None, None])[0] for i in qids],
+                                           [de_names.get(i, [None, None])[1] for i in qids]])))
+    half = len(block) // 2                                 # lange Werte stehen in Teilen: ~2~
+    lines += ["## X-l10n-deDE-Quest: ~2~", "## X-l10n-deDE-Quest-1: " + block[:half], "## X-l10n-deDE-Quest-2: " + block[half:]]
+    return "\n".join(lines) + "\n"
+
+
+ALLIANCE = 4294967296 + 77
+QUESTS = {
+    783: {1: "A Threat Within", 2: [[823]], 3: [[197]], 4: 1, 5: 1, 6: ALLIANCE, 8: ["Speak with Marshal McBride."], 17: 9, 22: 7, 26: [[72, 50]]},
+    7: {1: "Kobold Camp Cleanup", 2: [[197]], 3: [[197]], 4: 1, 5: 2, 6: ALLIANCE, 8: ["Kill 10 Kobold Vermin."],
+        10: [[[6, None, 0]]], 13: [783], 17: 9, 22: 15, 26: [[72, 100]]},
+    15: {1: "Investigate Echo Ridge", 2: [[197]], 3: [[197]], 4: 1, 5: 3, 6: ALLIANCE, 13: [7], 17: 9},
+    16: {1: "Horde Only", 2: [[3143]], 3: [[3143]], 4: 1, 5: 3, 6: 4294967296 + 178, 13: [7], 17: 14},
+    176: {1: 'WANTED: "Hogger"', 2: [None, [68]], 3: [[240]], 4: 5, 5: 11, 6: ALLIANCE, 10: {3: [[1931, None, 0]]}, 17: 12},
+}
+NPCS = {823: {1: "Deputy Willem", 9: 12, 7: {12: [[48.17, 42.94]]}}, 197: {1: "Marshal McBride", 9: 12, 7: {12: [[48.92, 41.61]]}},
+        240: {1: "Marshal Dughan", 9: 12, 7: {12: [[42.1, 65.9]]}}, 3143: {1: "Gornek", 9: 14}}
+DE = {783: ["Die Bedrohung von innen", ["Sprecht mit Marshal McBride."]], 7: ["Säuberung im Koboldlager", None]}
+
+
+class QuestDBTests(unittest.TestCase):
+    """QuestieDB lesen (gebackenes TOC-Format), suchen, Questreihen und Quests.lua fürs Addon."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.wow = TMP / "qdb" / "World of Warcraft"
+        qdb = cls.wow / "_forever_" / "Interface" / "AddOns" / "QuestieDB"
+        (qdb / "support" / "Forever" / "QuestXP").mkdir(parents=True)
+        (qdb / "src" / "corrections" / "enum").mkdir(parents=True)
+        (qdb / "QuestieDB_Forever.toc").write_text(baked_toc(QUESTS, NPCS, DE), encoding="utf-8")
+        (qdb / "QuestieDB_Camelot.toc").write_text("## X-Mode: baked\n## X-Flavor: Camelot\n", encoding="utf-8")
+        (qdb / "support" / "Forever" / "QuestXP" / "xpDB-classic.lua").write_text(
+            "QuestXP.db = {\n  [783] = {1, 40}, -- x\n  [7] = {2, 170},\n  [15] = {3, 250},\n}\n", encoding="utf-8")
+        (qdb / "src" / "corrections" / "enum" / "zones.lua").write_text(
+            "constants.zoneIDs = {\n  DUN_MOROGH = 1,\n  ELWYNN_FOREST = 12,\n  DUROTAR = 14,\n}\n", encoding="utf-8")
+        (cls.wow / "_forever_" / "WTF").mkdir(parents=True)
+        (cls.wow / "_forever_" / "WTF" / "Config.wtf").write_text('SET textLocale "deDE"\n', encoding="utf-8")
+        cls.db = lz.load_questdb(str(cls.wow), "_forever_")
+
+    def test_read(self):
+        db = self.db
+        self.assertEqual(db.version, "9.9.9")
+        self.assertEqual(set(db.quests), {783, 7, 15, 16, 176})
+        self.assertEqual(db.quest_name(783, "deDE"), "Die Bedrohung von innen")
+        self.assertEqual(db.quest_name(15, "deDE"), "Investigate Echo Ridge")          # keine Übersetzung: Englisch
+        self.assertEqual(db.quest_text(783, "deDE"), ["Sprecht mit Marshal McBride."])
+        self.assertEqual(db.quest_text(7, "deDE"), ["Kill 10 Kobold Vermin."])
+        q = db.quests[176]
+        self.assertEqual((q["side"], q["lvl"], q["req"], q["start"]["obj"], q["items"]), ("A", 11, 5, [68], [1931]))
+        self.assertEqual(db.quests[16]["side"], "H")
+        self.assertEqual(db.quests[7]["kill"], [6])
+        self.assertEqual(db.quests[783]["rep"], [(72, 50)])
+        self.assertEqual(db.xp[7], (2, 170))
+        self.assertEqual(db.npc(197, "deDE")["pos"], (48.92, 41.61))
+        self.assertEqual(db.zone_name(12), "Elwynn Forest")
+        self.assertEqual(db.zone_name(12, {12: "Wald von Elwynn"}), "Wald von Elwynn")
+
+    def test_chain_and_search(self):
+        db = self.db
+        self.assertEqual(db.chain(7), [783, 7, 15])
+        self.assertEqual(db.chain(15), [783, 7, 15])
+        self.assertIn(16, db.next_of[7])
+        self.assertEqual(db.search("kobold", "deDE"), [7])
+        self.assertEqual(db.search("säuberung", "deDE"), [7])
+        self.assertEqual(db.search("176", "deDE"), [176])
+        self.assertEqual(sorted(db.search("mcbride", "deDE")), [7, 15, 783])         # nach Questgeber
+        self.assertNotIn(16, db.search("", "deDE", side="A", lmin=1, lmax=60))
+        self.assertEqual(db.search("", "deDE", lmin=10, lmax=12), [176])
+
+    def test_quest_data_for_the_addon(self):
+        text = lz.quest_data_text(self.db, "deDE", {12: "Wald von Elwynn"})
+        self.assertIn('[783]={"Die Bedrohung von innen",1,1,9,"A",7,false,{"Deputy Willem",12,48.2,42.9}', text)
+        self.assertIn('[12]="Wald von Elwynn"', text)
+        if run_addon_test is not None:
+            from lupa import lua51
+            lua = lua51.LuaRuntime(unpack_returned_tuples=True)
+            lua.execute(text)
+            q = lua.globals().LeeroylinkQuests
+            self.assertEqual(q.q[7][1], "Säuberung im Koboldlager")
+            self.assertEqual(q.q[7][7][1], 783)
+            self.assertEqual(q.q[176][8][5], "o")                            # Quest startet an einem Objekt
+            self.assertEqual(q.zones[12], "Wald von Elwynn")
+        # written once into the installed addon, then left alone until something changes
+        addon = self.wow / "_forever_" / "Interface" / "AddOns" / "Leeroylink"
+        addon.mkdir(parents=True, exist_ok=True)
+        (addon / "Leeroylink.toc").write_text("## Version: 0.4.0\n", encoding="utf-8")
+        self.assertEqual(lz.write_quest_data(str(self.wow), "_forever_"), "written")
+        self.assertEqual(lz.write_quest_data(str(self.wow), "_forever_"), "unchanged")
+        self.assertEqual(lz.write_quest_data(str(self.wow), "_forever_", {12: "Wald von Elwynn"}), "written")
+        # an addon update keeps the file
+        lz.install_link_addon(str(self.wow), "_forever_")
+        self.assertIn("Wald von Elwynn", (addon / "Quests.lua").read_text(encoding="utf-8"))
+        self.assertEqual(lz.write_quest_data(str(self.wow), "_forever_", {12: "Wald von Elwynn"}), "unchanged")
+
+    def test_missing(self):
+        with self.assertRaises(lz.QuestDBError):
+            lz.load_questdb(str(TMP / "nowhere"), "_forever_")
+
+
 @unittest.skipIf(run_addon_test is None, "lupa not installed")
 class GameDataTests(unittest.TestCase):
     """Spiel -> Leeroyzan: Fehler, Charaktere, Rezepte, Einkaufsliste, Auswertung."""
