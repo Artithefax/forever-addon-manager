@@ -7,7 +7,10 @@ import logging.handlers
 import os
 import shutil
 import sys
+import time
 from pathlib import Path
+
+from . import vault
 
 
 # --------------------------------------------------------------------------- #
@@ -94,6 +97,18 @@ def load_config() -> dict:
             cfg = json.load(f)
     except (OSError, json.JSONDecodeError):
         cfg = {}
+    if not isinstance(cfg, dict):
+        cfg = {}
+    SECRETS_LOST.clear()
+    for key in SECRET_KEYS:
+        value = cfg.get(key)
+        if isinstance(value, dict):
+            try:
+                cfg[key] = vault.unseal(value)
+            except Exception as e:  # noqa – anderer PC oder anderes Windows-Konto
+                log.warning("%s ließ sich nicht entschlüsseln: %s", key, e)
+                cfg[key] = ""
+                SECRETS_LOST.append(key)
     cfg.setdefault("wow_root", "")
     cfg.setdefault("flavor", "")
     cfg.setdefault("sources", {})   # flavor -> {source_id: {...}}
@@ -116,8 +131,69 @@ def load_config() -> dict:
     return cfg
 
 
+def write_text_atomic(path: Path, text: str, newline: str | None = None) -> None:
+    """Schreibt über eine Zwischendatei: Ein Abbruch mittendrin hinterlässt nie eine halbe Datei."""
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "w", encoding="utf-8", newline=newline) as f:
+        f.write(text)
+    os.replace(tmp, path)
+
+
+SECRET_KEYS = ("github_token", "curseforge_key", "discord_webhook")
+SECRETS_LOST: list[str] = []          # Schlüssel, die auf diesem PC nicht entschlüsselt werden konnten
+_LAST_SAVED: dict[str, str] = {}
+
+
 def save_config(cfg: dict) -> None:
-    tmp = CONFIG_FILE.with_suffix(".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, indent=2, ensure_ascii=False)
-    tmp.replace(CONFIG_FILE)
+    """Speichert nur, wenn sich etwas geändert hat. Schlüssel und Tokens landen unter Windows verschlüsselt
+    (an dein Windows-Konto gebunden) in der Datei, im Programm bleiben sie lesbar."""
+    plain = json.dumps(cfg, indent=2, ensure_ascii=False)
+    if _LAST_SAVED.get(str(CONFIG_FILE)) == plain and CONFIG_FILE.exists():
+        return
+    data = dict(cfg)
+    for key in SECRET_KEYS:
+        if data.get(key):
+            data[key] = vault.seal(data[key])
+    write_text_atomic(CONFIG_FILE, json.dumps(data, indent=2, ensure_ascii=False))
+    _LAST_SAVED[str(CONFIG_FILE)] = plain
+
+
+SOURCE_PARK_DAYS = 30
+
+
+def reconcile_sources(cfg: dict, flavor: str, present: set[str], healthy: bool, now: float | None = None) -> bool:
+    """Gleicht die Quellen (Zuordnung Ordner -> CurseForge/GitHub) mit den gefundenen Ordnern ab.
+
+    Nur bei einem gesunden Scan (AddOns-Ordner da, Addons gefunden) – ein nicht erreichbares Laufwerk löscht
+    so nichts mehr. Quellen ohne Ordner werden geparkt statt gelöscht und kommen zurück, sobald ihr Ordner
+    wieder auftaucht; nach SOURCE_PARK_DAYS Tagen verfallen sie. Gibt zurück, ob sich etwas geändert hat."""
+    if not healthy:
+        return False
+    now = time.time() if now is None else now
+    sources = cfg.setdefault("sources", {}).setdefault(flavor, {})
+    parked = cfg.setdefault("parked_sources", {}).setdefault(flavor, {})
+    changed = False
+    for sid in list(parked):
+        entry = parked[sid]
+        if sid not in sources and any(f in present for f in entry.get("folders", [])):
+            sources[sid] = {k: v for k, v in entry.items() if k != "parked"}
+            del parked[sid]
+            changed = True
+            log.info("Quelle %s wieder zugeordnet (Ordner ist zurück)", sid)
+        elif sid in sources or now - entry.get("parked", now) > SOURCE_PARK_DAYS * 86400:
+            del parked[sid]
+            changed = True
+    for sid in list(sources):
+        src = sources[sid]
+        folders = src.get("folders", [])
+        keep = [f for f in folders if f in present]
+        if keep == folders:
+            continue
+        changed = True
+        if keep:
+            src["folders"] = keep
+        else:
+            parked[sid] = {**src, "parked": int(now)}
+            del sources[sid]
+            log.info("Quelle %s geparkt: Ordner %s nicht gefunden", sid, ", ".join(folders))
+    return changed

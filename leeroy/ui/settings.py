@@ -9,7 +9,8 @@ from ..constants import HEADER_LINKS
 from ..i18n import LANGUAGES, cur_lang, set_language, tr
 from ..config import PORTABLE_DIR_NAME, config_dir, portable_dir, save_config
 from ..wow import flavor_label, list_flavors
-from ..files import open_in_explorer
+from ..files import ROLLBACK_MAX_DAYS, open_in_explorer, prune_rollbacks, rollback_usage
+from ..reports import fmt_bytes
 from ..curseforge import CF_GAME_ID, CF_KEY_URL, cf_request
 from ..sharing import LIST_PART_SIZES
 from .theme import THEME
@@ -36,6 +37,15 @@ class SettingsPage:
         cbox = self._card_box(lf, pady=(12, 0), title="CurseForge")
         self.cf_key_widget = self._w_cf_key(cbox, panel=True)
         self.cf_key_widget.pack(fill="x")
+        sbox = self._card_box(lf, pady=(12, 0), title=tr("Speicher"))
+        self.rb_label = ttk.Label(sbox, style="Panel.TLabel", text=tr("Rückgängig-Versionen: wird berechnet …"))
+        self.rb_label.pack(anchor="w")
+        ttk.Label(sbox, style="Panel.TLabel", foreground=THEME["text_faint2"], wraplength=520, justify="left",
+                  text=tr("Vor jedem Update bewahrt Leeroyzan die alte Fassung auf, damit „Rückgängig“ geht. "
+                          "Vorversionen entfernter Addons und alles, was älter als {0} Tage ist, löscht es von selbst.",
+                          ROLLBACK_MAX_DAYS)).pack(anchor="w", pady=(4, 0))
+        ttk.Button(sbox, text=tr("Alle Rückgängig-Versionen löschen"), command=self.clear_rollbacks).pack(
+            anchor="w", pady=(8, 0))
         gbox = self._card_box(rf, pady=(0, 0), title=tr("Allgemein"))
         lrow = ttk.Frame(gbox, style="Panel.TFrame")
         lrow.pack(fill="x", pady=(0, 12))
@@ -70,6 +80,23 @@ class SettingsPage:
             links.columnconfigure(i, weight=1, uniform="l")
             ttk.Button(links, text=f"{tr(text)} ↗", command=lambda u=url: self.open_header_link(u)).grid(
                 row=0, column=i, sticky="ew", padx=(0 if i == 0 else 6, 0))
+
+    def refresh_rollback_usage(self):
+        def done(res):
+            size, count = res
+            try:
+                self.rb_label.configure(text=tr("Rückgängig-Versionen: {0} für {1} Addons.", fmt_bytes(size), count))
+            except (AttributeError, tk.TclError):
+                pass
+        self.run_quiet(rollback_usage, done)
+
+    def clear_rollbacks(self):
+        if not self.flavor or not self.ask(tr("Alle aufbewahrten Vorversionen dieser Spielversion löschen? "
+                                              "„Rückgängig“ geht danach erst wieder nach dem nächsten Update.")):
+            return
+        n = prune_rollbacks(self.flavor, everything=True)
+        self.notify(tr("{0} Rückgängig-Versionen gelöscht.", n), "ok", timeout=6000)
+        self.refresh_rollback_usage()
 
     def _w_cf_key(self, parent, panel: bool = False):
         """Eingabe des eigenen CurseForge-API-Keys (nur lokal gespeichert) mit Verbindungstest."""

@@ -9,7 +9,7 @@ from ..constants import APP_VERSION
 from ..i18n import tr
 from ..config import log, save_config
 from ..wow import running_wow
-from ..files import backup_wtf, read_rollback, restore_rollback, save_rollback
+from ..files import backup_wtf, read_rollback, restore_rollback
 from ..github import choose_asset, github_install_asset, github_latest
 from ..curseforge import (
     CF_PREFIX,
@@ -274,20 +274,16 @@ class UpdatesPage:
             ok, manual, errors = [], [], []
             for r, info, asset in plan:
                 try:
-                    if info.get("allow_dl", True) or not r.startswith(CF_PREFIX):
-                        try:
-                            save_rollback(root, flavor, r, before[r])       # für „Rückgängig“
-                        except Exception as e:  # noqa – Rückgängig ist ein Extra, das Update geht vor
-                            log.warning("Vorversion von %s nicht gesichert: %s", r, e)
+                    keep = (r, before[r])         # alte Fassung für „Rückgängig“ (verschoben, nicht kopiert)
                     if r.startswith(CF_PREFIX):
-                        folders = cf_install_asset(asset, info, root, flavor, cf_key)
+                        folders = cf_install_asset(asset, info, root, flavor, cf_key, rollback=keep)
                         if not info.get("notes") and asset.get("file_id"):
                             try:          # Changelog für Leeroylink (Anzeige im Spiel)
                                 info["notes"] = cf_changelog(asset.get("mod_id") or info.get("mod_id"), asset["file_id"], cf_key)
                             except Exception:  # noqa – nur ein Extra
                                 pass
                     else:
-                        folders = github_install_asset(asset, root, flavor, token)
+                        folders = github_install_asset(asset, root, flavor, token, rollback=keep)
                     ok.append((r, info, asset, folders))
                 except ManualDownload as m:
                     manual.append((info, asset, m))

@@ -9,7 +9,7 @@ import tkinter as tk
 from ..i18n import tr
 from ..config import log, save_config
 from ..wow import running_wow
-from ..files import install_zip, save_rollback
+from ..files import install_zip
 from ..github import asset_key
 from ..curseforge import CF_PREFIX, download_matches, zip_name_matches
 from .theme import UPD_MARK
@@ -89,12 +89,7 @@ class DownloadsMixin:
         before = dict(self.sources()[sid]) if sid in self.sources() else None
 
         def job():
-            if before:
-                try:
-                    save_rollback(root, flavor, sid, before)
-                except Exception as e:  # noqa
-                    log.warning("Vorversion von %s nicht gesichert: %s", sid, e)
-            return install_zip(path, root, flavor)
+            return install_zip(path, root, flavor, rollback=(sid, before) if before else None)
 
         def done(folders):
             self.remember_cf_source(info, asset, folders)

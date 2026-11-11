@@ -242,6 +242,8 @@ class WidgetsMixin:
             self.refresh_diagnose()
         elif key == "characters":
             self.refresh_characters()
+        elif key == "settings":
+            self.refresh_rollback_usage()
         elif key == "wowhead":
             self.after(50, self.wh_entry.focus_set)
         elif key == "quests":

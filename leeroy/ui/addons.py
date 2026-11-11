@@ -7,7 +7,7 @@ from tkinter import ttk
 import tkinter as tk
 
 from ..i18n import tr
-from ..config import log, save_config
+from ..config import log, reconcile_sources, save_config
 from ..wow import Addon, clean_wow_text, compute_groups
 from ..files import addons_dir, open_in_explorer, plain_key, scan_addons, set_enabled
 from ..curseforge import (
@@ -209,13 +209,10 @@ class AddonsPage:
             self.addons = scan_addons(self.root_path, self.flavor, self.game[1] if self.game else None)
         else:
             self.addons = []
-        # Quellen aufräumen, deren Ordner nicht mehr existieren
-        present = {a.name for a in self.addons}
-        for sid in list(self.sources()):
-            s = self.sources()[sid]
-            s["folders"] = [f for f in s.get("folders", []) if f in present]
-            if not s["folders"]:
-                del self.sources()[sid]
+        # Quellen abgleichen: fehlende Ordner parken statt löschen, nur bei einem gesunden Scan
+        if self.root_path and self.flavor:
+            healthy = bool(self.addons) and addons_dir(self.root_path, self.flavor).is_dir()
+            reconcile_sources(self.cfg, self.flavor, {a.name for a in self.addons}, healthy)
         save_config(self.cfg)
         self.render()
         self.schedule_link_write()

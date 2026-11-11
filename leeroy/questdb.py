@@ -6,7 +6,6 @@ import bisect
 import gzip
 import hashlib
 import json
-import os
 import re
 import shutil
 import struct
@@ -19,7 +18,7 @@ from pathlib import Path
 
 from .constants import USER_AGENT
 from .i18n import cur_lang, tr
-from .config import config_dir, log
+from .config import config_dir, log, write_text_atomic
 from .files import addons_dir, disabled_dir
 from .github import http_get
 from .linkaddon import installed_link_dir
@@ -608,7 +607,7 @@ def fetch_reward_data(flavor: str, token: str = "") -> dict | None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if old and old.get("sha") == pick.get("sha") and "all_items" in old:
         old["checked"] = int(time.time())
-        path.write_text(json.dumps(old, ensure_ascii=False), encoding="utf-8")
+        write_text_atomic(path, json.dumps(old, ensure_ascii=False))
         return old
     url = pick.get("download_url") or ""
     if urllib.parse.urlparse(url).hostname not in ("raw.githubusercontent.com", "github.com"):
@@ -622,7 +621,7 @@ def fetch_reward_data(flavor: str, token: str = "") -> dict | None:
     finally:
         tmp.unlink(missing_ok=True)
     data.update(repo=repo, source=pick["name"], sha=pick.get("sha", ""), fetched=int(time.time()), checked=int(time.time()))
-    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    write_text_atomic(path, json.dumps(data, ensure_ascii=False))
     log.info("Questbelohnungen aus %s/%s: %d Quests", repo, pick["name"], len(data["q"]))
     return data
 
@@ -769,7 +768,7 @@ def write_quest_data(root: str, flavor: str, zone_names: dict | None = None, fac
                 return "off"
         except OSError:
             pass
-        target.write_text(QUEST_DATA_OFF, encoding="utf-8", newline="\n")
+        write_text_atomic(target, QUEST_DATA_OFF, newline="\n")
         return "off"
     toc = find_questie_toc(root, flavor)
     if not toc:
@@ -791,9 +790,7 @@ def write_quest_data(root: str, flavor: str, zone_names: dict | None = None, fac
     except QuestDBError:
         return "noqdb"
     text = sig + "\n" + quest_data_text(db, locale, zone_names, faction_names, cm, item_names)
-    tmp = target.with_name(QUEST_DATA_FILE + ".tmp")
-    tmp.write_text(text, encoding="utf-8", newline="\n")
-    os.replace(tmp, target)
+    write_text_atomic(target, text, newline="\n")
     return "written"
 
 

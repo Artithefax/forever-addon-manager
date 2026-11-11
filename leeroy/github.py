@@ -95,12 +95,13 @@ def choose_asset(info: dict, flavor: str, key: str = "") -> dict | None:
     return None
 
 
-def github_install_asset(asset: dict, root: str, flavor: str, token: str = "") -> list[str]:
+def github_install_asset(asset: dict, root: str, flavor: str, token: str = "",
+                         rollback: tuple[str, dict] | None = None) -> list[str]:
     blob = http_get(asset["url"], token, accept="application/octet-stream")
     with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
         tmp.write(blob)
         tmp_path = Path(tmp.name)
     try:
-        return install_zip(tmp_path, root, flavor)
+        return install_zip(tmp_path, root, flavor, rollback=rollback)
     finally:
         tmp_path.unlink(missing_ok=True)

@@ -59,6 +59,17 @@ def plural(n, one: str, many: str) -> str:
     return tr(one, fmt_int(n)) if _int(n) == 1 else tr(many, fmt_int(n))
 
 
+def fmt_bytes(n: int) -> str:
+    """1536 -> „1,5 KB“, 3.2e9 -> „3,2 GB“ (Dezimalkomma auf Deutsch)."""
+    v = float(n)
+    for unit in ("B", "KB", "MB", "GB"):
+        if v < 1024 or unit == "GB":
+            text = f"{v:.0f}" if unit == "B" else f"{v:.1f}"
+            return (text.replace(".", ",") if cur_lang() == "de" else text) + " " + unit
+        v /= 1024
+    return str(n)
+
+
 def fmt_pct(part, whole) -> str:
     whole = _num(whole)
     return f"{round(100 * _num(part) / whole)} %" if whole > 0 else "–"

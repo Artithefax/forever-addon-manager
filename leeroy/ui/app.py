@@ -8,8 +8,9 @@ from tkinter import ttk
 import tkinter as tk
 
 from ..constants import APP_NAME, APP_VERSION
-from ..i18n import LANGUAGES, detect_language, set_language
-from ..config import config_dir, load_config, log, save_config
+from ..i18n import LANGUAGES, detect_language, set_language, tr
+from ..config import SECRETS_LOST, config_dir, load_config, log, save_config
+from ..files import prune_rollbacks, recover_staging
 from ..wow import Addon, find_wow_root
 from .base import BaseTk, DND_FILES, HAS_DND
 from .layout import LayoutMixin
@@ -86,6 +87,7 @@ class App(LayoutMixin, NotifyMixin, WidgetsMixin, AddonsPage, DiscoverPage, Upda
         if self.cfg.get("check_on_start") and self.sources():
             self.after(700, lambda: self.check_updates(silent=True))
         self._cleanup_update_file()
+        self.after(2500, self._housekeeping)
         self.after(10000, self._watch_sessions)
         self.after(900, self._report_self_update)
         if self.cfg.get("self_update_mode") != "off":
@@ -96,6 +98,32 @@ class App(LayoutMixin, NotifyMixin, WidgetsMixin, AddonsPage, DiscoverPage, Upda
             self.bind(seq, fn)
         log.info("Gestartet: %s %s, Ordner=%s, Version=%s, Daten=%s", APP_NAME, APP_VERSION,
                  self.root_path, self.flavor, config_dir())
+
+    def _housekeeping(self):
+        """Einmal nach dem Start im Hintergrund: Reste abgebrochener Vorgänge zurückholen, alte
+        Rückgängig-Versionen aufräumen, Hinweis auf nicht lesbare Schlüssel."""
+        if SECRETS_LOST:
+            names = {"github_token": "GitHub-Token", "curseforge_key": "CurseForge-API-Key", "discord_webhook": "Discord-Webhook"}
+            self.notify(tr("Deine gespeicherten Zugangsdaten ({0}) stammen von einem anderen PC oder Windows-Konto und "
+                           "ließen sich hier nicht entschlüsseln. Bitte in den Einstellungen neu eingeben.",
+                           ", ".join(names.get(k, k) for k in SECRETS_LOST)), "warn",
+                        [(tr("Einstellungen"), lambda: self.show_page("settings"))], key="secrets")
+        root, flavor = self.root_path, self.flavor
+        if not root or not flavor:
+            return
+        keep = set(self.sources()) | set(self.cfg.get("parked_sources", {}).get(flavor, {}))
+
+        def work():
+            return recover_staging(root, flavor), prune_rollbacks(flavor, keep)
+
+        def done(res):
+            back, removed = res
+            if removed:
+                log.info("%d alte Rückgängig-Versionen gelöscht", removed)
+            if back:
+                self.notify(tr("Nach einem abgebrochenen Vorgang wiederhergestellt: {0}", ", ".join(back)), "warn")
+                self.refresh()
+        self.run_quiet(work, done)
 
     # ----- Fenster und Tastatur ---------------------------------------------- #
     def _restore_geometry(self):
