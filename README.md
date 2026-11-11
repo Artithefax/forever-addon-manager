@@ -30,6 +30,7 @@ One window, no pop-ups. A sidebar with the game version, the pages and a big **P
 | **Updates** | Check and update all or single addons, read the changes, see which blocked downloads Leeroyzan is waiting for, link manual addons, and keep Leeroyzan itself up to date. |
 | **Leeroylink** | Every play session recorded by the companion addon **Leeroylink** – a summary per session, totals, charts, forecast, records, death statistics, farming spots and dungeon history; optionally posted to Discord (see below). |
 | **Characters** | All your characters with level, gold, professions, bags and bank; *Who has what?* search and a shopping list for any stored recipe across all characters. |
+| **Quests** | Search the quest database of QuestieDB (read straight from its addon folder): quest chains, quest givers with coordinates, objectives, requirements, XP and reputation – plus the item rewards your characters have seen. |
 | **Wowhead** | Search Wowhead while you type, preview results (tooltip), open them in the browser and keep favorites. |
 | **Diagnostics** | Lua errors per addon and version (with one-click rollback), load problems and missing dependencies, memory ranking, wishlist from the game. |
 | **Share** | Create a download-list code for Discord/SMS or a `.lzpack` package – and paste a code you received to install it. |
@@ -74,6 +75,8 @@ Leeroyzan comes with its own companion addon, **Leeroylink** (folder `Leeroylink
 **Back into the game:** Leeroyzan writes `Data.lua` into the addon folder: pending updates, the changelog of addons it just updated (shown once after login), your addon sets as in-game profiles (`/lz profil laden Raid`), held addons and installed wishlist entries. `/lz neu` shows it in the game.
 
 **Diagnostics:** the addon counts Lua errors per addon *and* version. If an addon has errors since its last update and Leeroyzan kept the previous version, it offers the rollback right away. `/lz problem <addon>` in the game reports and disables an addon – Leeroyzan then offers the rollback too.
+
+**Quest companion:** Leeroylink shows a small window of its own at quest givers and when you pick a quest in the quest log: which quest chain it belongs to, what the next quests ask for, where they start and what they give, and the sum until the end of the chain. It works with any quest UI (also DialogueUI) and does not need Questie or QuestieDB to be loaded: Leeroyzan writes the quest data from the installed QuestieDB into `Leeroylink\Quests.lua`. Item rewards come from what your characters have seen at quest givers or in the quest log, so alts know them in advance. `/lz quest <name>` looks up any quest.
 
 **Characters and recipes:** opening a profession window stores its recipes with reagents (Leeroylink 0.3). Leeroyzan then tells you, for any recipe and quantity, what you have, which alt has the rest and what is missing.
 

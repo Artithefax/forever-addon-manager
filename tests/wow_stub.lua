@@ -226,6 +226,33 @@ function GetQuestLogTitle(i)
 	return q.title, q.level, nil, false, false, false, nil, q.id
 end
 function GetQuestID() return STUB.questID end
+-- quest rewards (quest giver and quest log): STUB.reward = { money, xp, items = {{name, n, q, id}}, choice = {...} }
+local function rw() return STUB.reward or {} end
+function GetRewardMoney() return rw().money or 0 end
+function GetRewardXP() return rw().xp or 0 end
+function GetNumQuestRewards() return #(rw().items or {}) end
+function GetNumQuestChoices() return #(rw().choice or {}) end
+function GetQuestItemInfo(kind, i)
+	local e = (kind == "choice" and rw().choice or rw().items or {})[i]
+	if e then return e.name, "icon", e.n or 1, e.q or 1, true end
+end
+function GetQuestItemLink(kind, i)
+	local e = (kind == "choice" and rw().choice or rw().items or {})[i]
+	if e then return STUB.link(e.id) end
+end
+function GetQuestLogRewardMoney() return rw().money or 0 end
+function GetNumQuestLogRewards() return #(rw().items or {}) end
+function GetNumQuestLogChoices() return #(rw().choice or {}) end
+function GetQuestLogRewardInfo(i) return GetQuestItemInfo("reward", i) end
+function GetQuestLogChoiceInfo(i) return GetQuestItemInfo("choice", i) end
+function GetQuestLogItemLink(kind, i) return GetQuestItemLink(kind, i) end
+STUB.logSelection = 0
+function SelectQuestLogEntry(i) STUB.logSelection = i end
+function GetQuestLogSelection() return STUB.logSelection end
+STUB.completed = {}
+function IsQuestFlaggedCompleted(id) return STUB.completed[id] or false end
+C_Map = { GetAreaInfo = function(id) return STUB.areaNames and STUB.areaNames[id] end }
+function GetFactionInfoByID(id) return STUB.factionNames and STUB.factionNames[id] end
 function GetTitleText() return STUB.questTitle end
 function SetAbandonQuest() end
 function GetAbandonQuestName() return STUB.abandon end

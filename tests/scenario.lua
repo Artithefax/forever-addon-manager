@@ -324,6 +324,51 @@ if PART == 1 then
 	check(s.move.jumps == 3, "jumps")
 	check(s.time.afk >= 118, "afk time: " .. s.time.afk)
 	check(#s.spellsLearned == 1 and #s.prof.learned == 1, "learned spell and recipe")
+	-- quest companion: own window, chain from Quests.lua, rewards remembered for all characters
+	local QG = LZ.modules.QuestGuide
+	check(QG and QG.enabled, "quest companion enabled")
+	STUB.questID, STUB.reward = 783, { xp = 40, items = { { name = "Rekrutenhemd", n = 1, q = 1, id = 6125 } } }
+	STUB.fire("QUEST_DETAIL")                       -- no quest data yet: remember, but no window
+	check(LZ.gdb.questRewards[783] and LZ.gdb.questRewards[783].items[1].name == "Rekrutenhemd", "reward remembered without quest data")
+	check(not (_G.LeeroylinkQuestGuide and _G.LeeroylinkQuestGuide.shown), "no window without quest data")
+	LeeroylinkQuests = { v = 1, src = "QuestieDB test", locale = "deDE", zones = { [12] = "Elwynn Forest" }, factions = { [72] = "Stormwind" },
+		q = {
+			[783] = { "Die Bedrohung von innen", 1, 1, 12, "A", 7, false, { "Deputy Willem", 12, 48.2, 42.9 }, { "Marshal McBride", 12, 48.9, 41.6 }, { "Sprecht mit Marshal McBride." }, { 72, 50 }, 40 },
+			[7] = { "Säuberung im Koboldlager", 2, 1, 12, "A", 15, { 783 }, { "Marshal McBride", 12, 48.9, 41.6 }, { "Marshal McBride", 12, 48.9, 41.6 }, { "Tötet 10 Koboldgezücht." }, { 72, 100 }, 170 },
+			[15] = { "Überprüfung der Echokammmine", 3, 1, 12, "A", false, { 7 }, { "Marshal McBride", 12, 48.9, 41.6 }, false, { "Tötet 10 Koboldarbeiter." }, { 72, 100 }, 250 },
+			[16] = { "Nur für die Horde", 3, 1, 12, "H", false, { 7 } },
+			[17] = { "Briefe nach Goldhain", 3, 1, 12, "A", false, { 7 }, { "Wache Thomas", 12, 74, 72 } },
+		} }
+	local list, pos = QG:Chain(7)
+	check(#list == 3 and list[1] == 783 and list[3] == 15 and pos == 2, "quest chain built: " .. table.concat(list, ","))
+	STUB.factionNames = { [72] = "Sturmwind" }
+	STUB.fire("QUEST_DETAIL")
+	local win = _G.LeeroylinkQuestGuide
+	check(win and win.shown, "window opens at the quest giver (own frame)")
+	local txt = QG:Text(783)
+	for _, want in ipairs({ "Teil 1 von 3", "Säuberung im Koboldlager", "Rekrutenhemd", "40 XP", "Sturmwind +50", "Bis zum Ende der Reihe (3 Quests)", "460 XP", "Bei: Marshal McBride" }) do
+		check(txt:find(want, 1, true), "companion text has: " .. want)
+	end
+	check(QG:Text(7):find("Briefe nach Goldhain", 1, true) and not QG:Text(7):find("Nur für die Horde", 1, true), "branches of my faction only")
+	STUB.fire("QUEST_FINISHED")
+	check(not win.shown, "auto-opened window closes with the quest giver")
+	-- quest log: any quest log selects through SelectQuestLogEntry
+	STUB.questLog[#STUB.questLog + 1] = { title = "Säuberung im Koboldlager", level = 2, id = 7 }
+	STUB.reward = { money = 75, items = {}, choice = { { name = "Stiefel", q = 2, id = 2000 }, { name = "Handschuhe", q = 2, id = 2001 } } }
+	SelectQuestLogEntry(#STUB.questLog)
+	check(win.shown and LZ.gdb.questRewards[7] and #LZ.gdb.questRewards[7].choice == 2, "quest log selection shows and remembers rewards")
+	check(QG:Text(783):find("Stiefel", 1, true) and QG:Text(783):find("75", 1, true), "remembered rewards of a follow-up quest are shown")
+	STUB.completed[783] = true
+	check(QG:Text(7):find("(erledigt)", 1, true), "completed quests are marked")
+	win:Hide()
+	LZ:HandleSlash("quest echokammmine")
+	check(win.shown, "/lz quest <name> opens the window")
+	STUB.areaNames = { [12] = "Wald von Elwynn" }
+	QG:CollectNames()
+	check(LZ.gdb.names.zones[12] == "Wald von Elwynn" and LZ.gdb.names.factions[72] == "Sturmwind", "zone and faction names for Leeroyzan")
+	table.remove(STUB.questLog)
+	STUB.reward = nil
+
 	STUB.fire("PLAYER_LOGOUT")
 	check(s.played > 200, "played time: " .. s.played)
 else
