@@ -517,8 +517,9 @@ class SelfUpdateTests(unittest.TestCase):
 
         class Resp(io.BytesIO):
             headers = {"Content-Length": str(300_000)}
-        orig = lz.urllib.request.urlopen
-        lz.urllib.request.urlopen = lambda req, timeout=0: Resp(b"x" * 300_000)
+        mod = lz.module_of("download_with_progress")
+        orig = mod.open_url
+        mod.open_url = lambda req, timeout=0: Resp(b"x" * 300_000)
         try:
             prog = {}
             self.assertEqual(len(lz.download_with_progress("https://x", progress=prog)), 300_000)
@@ -526,7 +527,7 @@ class SelfUpdateTests(unittest.TestCase):
             with self.assertRaises(lz.UpdateCancelled):
                 lz.download_with_progress("https://x", progress={"cancel": True})
         finally:
-            lz.urllib.request.urlopen = orig
+            mod.open_url = orig
 
     def test_replace_and_wait(self):
         import subprocess as sp

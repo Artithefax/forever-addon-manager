@@ -120,7 +120,12 @@ class QuestsPage:
         self.qdb_status_var.set(tr("Lade QuestieDB …"))
         root, flavor = key
 
-        def done(db, err):
+        def load():
+            db = load_questdb(root, flavor)
+            db.reward_items(0)               # Belohnungsindex gleich hier bauen, nicht beim ersten Klick
+            return db, load_reward_data(flavor)
+
+        def done(res, err):
             if (self.root_path, self.flavor) != key:
                 return
             if err:
@@ -132,13 +137,12 @@ class QuestsPage:
                     self.qdb_info_var.set(tr("QuestieDB konnte nicht gelesen werden: {0}", str(err)[:160]))
                 self.qdb_key = None
                 return
-            self.qdb = db
+            self.qdb, self.qdb_rewards = res
             self._qdb_status()
             if self.qdb_var.get().strip() or self.qdb_lmin.get().strip() or self.qdb_lmax.get().strip():
                 self.qdb_search()
             self._qdb_load_rewards()
-        self.qdb_rewards = load_reward_data(flavor)
-        self.run_quiet(lambda: load_questdb(root, flavor), done)
+        self.run_quiet(load, done)
 
     def _qdb_status(self, extra: str = ""):
         db = self.qdb

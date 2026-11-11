@@ -99,6 +99,7 @@ class LayoutMixin:
 
     def _build_layout(self):
         t = THEME
+        self._page_gen: dict[str, int] = {}     # neu aufgebaute Seiten müssen erst einmal gefüllt werden
         self.tree = None
         self.cards_inner = None
         self.detail = None

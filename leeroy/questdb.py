@@ -9,6 +9,7 @@ import json
 import re
 import shutil
 import struct
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -177,6 +178,9 @@ def game_locale(root: str, flavor: str) -> str:
     except OSError:
         pass
     return "deDE" if cur_lang() == "de" else "enUS"
+
+
+_INDEX_LOCK = threading.Lock()
 
 
 class QuestDB:
@@ -414,11 +418,13 @@ class QuestDB:
     def reward_items(self, qid: int) -> list[int]:
         """Gegenstände, die QuestieDB als Belohnung dieser Quest kennt (ohne Anzahl, ohne Wahl/fest)."""
         if not hasattr(self, "_reward_items"):
-            out: dict[int, list[int]] = {}
-            for iid in self.all_ids("Item"):
-                for q in _ids((self.row("Item", iid, 16) or {}).get(6)):
-                    out.setdefault(q, []).append(iid)
-            self._reward_items = out
+            with _INDEX_LOCK:                # Quests-Seite und Quests.lua brauchen ihn oft gleichzeitig: nur einmal bauen
+                if not hasattr(self, "_reward_items"):
+                    out: dict[int, list[int]] = {}
+                    for iid in self.all_ids("Item"):
+                        for q in _ids((self.row("Item", iid, 16) or {}).get(6)):
+                            out.setdefault(q, []).append(iid)
+                    self._reward_items = out
         return self._reward_items.get(qid, [])
 
     # ----- Questreihen -------------------------------------------------- #
@@ -795,6 +801,7 @@ def write_quest_data(root: str, flavor: str, zone_names: dict | None = None, fac
 
 
 _QDB_CACHE: dict[str, QuestDB] = {}
+_QDB_LOAD_LOCK = threading.Lock()
 
 
 def load_questdb(root: str, flavor: str) -> QuestDB:
@@ -803,7 +810,8 @@ def load_questdb(root: str, flavor: str) -> QuestDB:
         raise QuestDBError(tr("QuestieDB ist in dieser Spielversion nicht installiert."))
     st = toc.stat()
     key = f"{toc}:{st.st_size}:{int(st.st_mtime)}"
-    if key not in _QDB_CACHE:
-        _QDB_CACHE.clear()
-        _QDB_CACHE[key] = QuestDB(toc)
-    return _QDB_CACHE[key]
+    with _QDB_LOAD_LOCK:                 # zwei Threads auf einmal: einer liest, der andere wartet und nimmt das Ergebnis
+        if key not in _QDB_CACHE:
+            _QDB_CACHE.clear()
+            _QDB_CACHE[key] = QuestDB(toc)
+        return _QDB_CACHE[key]

@@ -16,7 +16,7 @@ from pathlib import Path
 from .constants import APP_NAME, APP_VERSION
 from .i18n import tr
 from .config import AUTO_BACKUPS_KEEP, BACKUP_DIR, config_dir, log, write_text_atomic
-from .wow import Addon, clean_wow_text
+from .wow import Addon, clean_wow_text, flush_toc_cache
 
 
 # --------------------------------------------------------------------------- #
@@ -40,6 +40,7 @@ def scan_addons(root: str, flavor: str, game_if: int | None = None) -> list[Addo
             if child.is_dir() and not child.name.startswith("."):
                 result.append(Addon(child, enabled, flavor, game_if))
     result.sort(key=lambda a: a.name.lower())
+    flush_toc_cache()
     return result
 
 

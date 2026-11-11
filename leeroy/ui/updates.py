@@ -1,6 +1,8 @@
 """Hauptfenster: UpdatesPage."""
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 
 from tkinter import ttk
 import tkinter as tk
@@ -10,7 +12,7 @@ from ..i18n import tr
 from ..config import log, save_config
 from ..wow import running_wow
 from ..files import backup_wtf, read_rollback, restore_rollback
-from ..github import choose_asset, github_install_asset, github_latest
+from ..github import GH_CACHE_MAX_AGE, choose_asset, github_install_asset, github_latest
 from ..curseforge import (
     CF_PREFIX,
     ManualDownload,
@@ -18,7 +20,9 @@ from ..curseforge import (
     cf_check,
     cf_install_asset,
     cf_match_installed,
+    cf_mods_batch,
     cf_queue_item,
+    cf_signature,
 )
 from .theme import UPD_MARK
 
@@ -178,6 +182,9 @@ class UpdatesPage:
 
     # ----- Updates --------------------------------------------------------- #
     def check_updates(self, silent: bool = False):
+        if getattr(self, "_scan_pending", None):          # erst die Addon-Liste fertig einlesen
+            self.after(300, lambda: self.check_updates(silent))
+            return
         if not self.ready(modifies=False, quiet=silent):
             return
         repos = list(self.sources().keys())
@@ -190,25 +197,47 @@ class UpdatesPage:
         srcs = {r: dict(self.sources()[r]) for r in repos}
         flavor, gv = self.flavor, (self.game[0] if self.game else "")
 
+        def check_one(r):
+            s = srcs[r]
+            if s.get("type") == "curseforge":
+                return cf_check(s, cf_key, flavor, gv)
+            return github_latest(r, token, max_age=GH_CACHE_MAX_AGE if silent else 0)
+
         def job():
-            res, errors = {}, []
+            res, errors, sigs = {}, [], {}
+            todo = []
+            cf = [r for r in repos if srcs[r].get("type") == "curseforge"]
+            if cf and not cf_key:
+                if not silent:
+                    errors += [tr("{0}: CurseForge-API-Key fehlt (Einstellungen).", srcs[r].get('name', r)) for r in cf]
+                cf = []
+            mods = {}
+            if cf:
+                try:            # eine Sammelabfrage: nur geänderte Projekte brauchen danach eine eigene Anfrage
+                    mods = cf_mods_batch([srcs[r].get("mod_id") for r in cf], cf_key)
+                except Exception as e:  # noqa – dann eben einzeln
+                    log.warning("CurseForge-Sammelabfrage: %s", e)
             for r in repos:
                 s = srcs[r]
-                try:
-                    if s.get("type") == "curseforge":
-                        if not cf_key:
-                            if not silent:
-                                errors.append(tr("{0}: CurseForge-API-Key fehlt (Einstellungen).", s.get('name', r)))
-                            continue
-                        res[r] = cf_check(s, cf_key, flavor, gv)
-                    else:
-                        res[r] = github_latest(r, token)
-                except Exception as e:  # noqa
-                    errors.append(f"{s.get('name', r)}: {e}")
-            return res, errors
+                if s.get("type") == "curseforge":
+                    if r not in cf:
+                        continue
+                    sigs[r] = cf_signature(mods.get(s.get("mod_id")), gv, s.get("tag", ""))
+                    if sigs[r] and s.get("cf_sig") == sigs[r]:
+                        continue                 # seit der letzten Prüfung ohne Update nichts Neues
+                todo.append(r)
+            with ThreadPoolExecutor(max_workers=6) as pool:
+                futures = {pool.submit(check_one, r): r for r in todo}
+                for fut in as_completed(futures):
+                    r = futures[fut]
+                    try:
+                        res[r] = fut.result()
+                    except Exception as e:  # noqa
+                        errors.append(f"{srcs[r].get('name', r)}: {e}")
+            return res, errors, sigs
 
         def done(out):
-            res, errors = out
+            res, errors, sigs = out
             for r, info in res.items():
                 self.updates[r] = info["tag"]
                 self.update_info[r] = info
@@ -220,6 +249,13 @@ class UpdatesPage:
                         versions = [a.version for a in self.addons if a.name in src.get("folders", [])]
                         if cf_match_installed(versions, [info["best"]]):
                             self._adopt_cf(r, info["best"])
+            for r in res:
+                src = self.sources().get(r)
+                if src is not None and r in sigs:
+                    if sigs[r] and self.updates.get(r) == src.get("tag"):     # wirklich aktuell (auch nicht festgehalten)
+                        src["cf_sig"] = sigs[r]
+                    else:
+                        src.pop("cf_sig", None)
             save_config(self.cfg)
             self.render()
             for r, info in res.items():
@@ -240,7 +276,7 @@ class UpdatesPage:
             if not silent:
                 self.error(str(err))
 
-        self.run_bg(tr("Prüfe Updates"), job, done, failed)
+        self.run_bg(tr("Prüfe Updates"), job, done, failed, kind="read")
 
     def update_all(self, only: list[str] | None = None):
         pending = [r for r in self.pending_updates() if only is None or r in only]

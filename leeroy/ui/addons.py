@@ -204,11 +204,31 @@ class AddonsPage:
             self.open_link(self.source_page(sid, src))
 
     # ----- Anzeige --------------------------------------------------------- #
-    def refresh(self):
+    def refresh(self, background: bool = False):
+        """Liest die Addons neu ein. background=True (Start, andere Spielversion): Der Scan läuft im Hintergrund,
+        das Fenster bleibt bedienbar – große .toc-Dateien werden beim allerersten Mal ganz gelesen."""
+        if background and self.root_path and self.flavor:
+            key = (self.root_path, self.flavor, self.game[1] if self.game else None)
+            self._scan_pending = key
+            self.set_status(tr("Lese Addons …"))
+
+            def done(addons, err):
+                if self._scan_pending != key:
+                    return                         # inzwischen andere Spielversion gewählt
+                self._scan_pending = None
+                if err:
+                    log.error("Addons einlesen: %s", err)
+                self._apply_scan(addons or [])
+            self.run_quiet(lambda: scan_addons(*key), done)
+            return
+        self._scan_pending = None
         if self.root_path and self.flavor:
-            self.addons = scan_addons(self.root_path, self.flavor, self.game[1] if self.game else None)
+            self._apply_scan(scan_addons(self.root_path, self.flavor, self.game[1] if self.game else None))
         else:
-            self.addons = []
+            self._apply_scan([])
+
+    def _apply_scan(self, addons: list):
+        self.addons = addons
         # Quellen abgleichen: fehlende Ordner parken statt löschen, nur bei einem gesunden Scan
         if self.root_path and self.flavor:
             healthy = bool(self.addons) and addons_dir(self.root_path, self.flavor).is_dir()
@@ -291,6 +311,7 @@ class AddonsPage:
     def render(self):
         if not hasattr(self, "ui"):
             return
+        self.data_changed()
         has_tree = self.tree is not None and self.tree.winfo_exists()
         sel_before = set(self.tree.selection()) if has_tree else set()
         if has_tree:

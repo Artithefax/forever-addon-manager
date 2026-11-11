@@ -13,11 +13,9 @@ from ..questdb import QuestDBError, _REWARD_TRIED, ensure_reward_data, load_ques
 from ..auction import (
     ITEM_CLASSES,
     auc_day_date,
-    auction_row,
+    auction_rows,
     auctionator_savedvariables,
-    item_details,
     load_auctionator,
-    owned_counts,
 )
 from .theme import THEME
 from .dialogs import Placeholder
@@ -36,6 +34,7 @@ class AuctionPage:
         self.ah_data = None
         self.ah_sig = None
         self.ah_rows: list[dict] = []
+        self.ah_rows_by_realm: dict[str, list[dict]] = {}
         self.ah_shown: list[dict] = []
         self.ah_sort = ("price", True)
         self.ah_current = None
@@ -125,20 +124,24 @@ class AuctionPage:
         root, flavor = self.root_path, self.flavor
         self.ah_status_var.set(tr("Lese Auctionator …"))
 
+        loc = "deDE" if cur_lang() == "de" else "enUS"
+        state = dict(self.link_state)
+
         def work():
             data = load_auctionator(root, flavor)
             try:
                 qdb = load_questdb(root, flavor)
             except (QuestDBError, OSError):
                 qdb = None
-            return data, qdb, load_reward_data(flavor)
+            cm = load_reward_data(flavor)
+            return data, qdb, cm, auction_rows(data, qdb, cm, state, loc)
 
         def done(res, err):
             if err:
                 log.warning("Auctionator: %s", err)
                 self.ah_status_var.set(tr("Auctionator konnte nicht gelesen werden: {0}", str(err)[:160]))
                 return
-            self.ah_data, self.ah_qdb, self.ah_cm = res
+            self.ah_data, self.ah_qdb, self.ah_cm, self.ah_rows_by_realm = res
             realms = sorted(self.ah_data["realms"])
             self.ah_realm_cb.configure(values=realms)
             if self.ah_realm_var.get() not in realms:
@@ -150,8 +153,17 @@ class AuctionPage:
             self._ah_build_rows()
             if rewards_due(flavor) and flavor not in _REWARD_TRIED:     # Qualität und Kategorie aller Gegenstände
                 token = self.cfg.get("github_token", "")
-                self.run_quiet(lambda: ensure_reward_data(flavor, token),
-                               lambda cm, e: (setattr(self, "ah_cm", cm or self.ah_cm), self._ah_build_rows()) if cm else None)
+                data, qdb = self.ah_data, self.ah_qdb
+
+                def more():
+                    cm = ensure_reward_data(flavor, token)
+                    return cm, (auction_rows(data, qdb, cm, state, loc) if cm else None)
+
+                def got(res, e):
+                    if res and res[0]:
+                        self.ah_cm, self.ah_rows_by_realm = res
+                        self._ah_build_rows()
+                self.run_quiet(more, got)
         self.run_quiet(work, done)
 
     def _ah_build_rows(self):
@@ -164,15 +176,7 @@ class AuctionPage:
                                       if not data["files"] else "Auctionator hat noch keine Preise gespeichert – scanne im Spiel das Auktionshaus."))
             self.ah_filter()
             return
-        entries = data["realms"].get(self.ah_realm_var.get(), {})
-        loc = "deDE" if cur_lang() == "de" else "enUS"
-        owned = owned_counts(self.link_state)
-        rows = []
-        for key, e in entries.items():
-            r = auction_row(key, e, data["vendor"])
-            r.update(item_details(r["id"], self.ah_qdb, self.ah_cm, self.link_state, loc))
-            r["owned"] = owned.get(r["id"], 0)
-            rows.append(r)
+        rows = self.ah_rows_by_realm.get(self.ah_realm_var.get(), [])
         self.ah_rows = rows
         last = max((r["last"] for r in rows), default=0)
         worth = sum(r["owned"] * r["price"] for r in rows)

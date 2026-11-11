@@ -66,7 +66,7 @@ class App(LayoutMixin, NotifyMixin, WidgetsMixin, AddonsPage, DiscoverPage, Upda
         self._dl_seen: dict[str, tuple] = {}     # Pfad -> (Größe, Änderungszeit) beim letzten Blick
         self._dl_checked: dict[str, tuple] = {}  # Pfad -> (Größe, Änderungszeit) schon geprüft, passte nicht
         self.modal_download = False
-        self.busy = False
+        self.running_jobs: dict[int, dict] = {}    # laufende Hintergrund-Vorgänge (run_bg)
 
         if not self.cfg["wow_root"]:
             self.cfg["wow_root"] = find_wow_root()

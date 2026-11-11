@@ -107,7 +107,7 @@ class SelfUpdateMixin:
                     msg = tr("Keine Verbindung zu GitHub ({0}).", err.reason)
                 self.error(tr("Update-Prüfung fehlgeschlagen:\n{0}", msg))
 
-        self.run_bg(tr("Suche Manager-Update"), lambda: check_self_update(token), done, failed)
+        self.run_bg(tr("Suche Manager-Update"), lambda: check_self_update(token), done, failed, kind="read")
 
     def offer_manager_update(self, info: dict, silent: bool):
         frozen, ready = is_frozen(), update_ready(info)

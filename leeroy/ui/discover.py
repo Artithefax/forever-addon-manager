@@ -174,7 +174,7 @@ class DiscoverPage:
         def done(info):
             self.cf_link_var.set("")
             self._pick_and_install_cf(info)
-        self.run_bg(tr("Suche auf CurseForge"), job, done)
+        self.run_bg(tr("Suche auf CurseForge"), job, done, kind="read")
 
     # ----- Entdecken: CurseForge-Suche ---------------------------------------- #
     @property

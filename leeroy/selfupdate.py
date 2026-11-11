@@ -15,10 +15,10 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
-from .constants import APP_VERSION, EXE_ASSET, SCRIPT_ASSET, UPDATE_REPO, USER_AGENT
+from .constants import APP_VERSION, EXE_ASSET, SCRIPT_ASSET, UPDATE_REPO
 from .i18n import tr
 from .config import app_dir, config_dir, log
-from .github import http_get, release_info
+from .github import github_request, http_get, open_url, release_info
 
 
 # --------------------------------------------------------------------------- #
@@ -111,11 +111,9 @@ class UpdateCancelled(Exception):
 def download_with_progress(url: str, token: str = "", accept: str = "application/octet-stream",
                            progress: dict | None = None) -> bytes:
     """Wie http_get, meldet aber Fortschritt (progress["done"], ["total"]) und lässt sich abbrechen (["cancel"])."""
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": accept})
-    if token:
-        req.add_header("Authorization", f"Bearer {token}")
+    req = github_request(url, token, accept)
     prog = progress if progress is not None else {}
-    with urllib.request.urlopen(req, timeout=30) as r:
+    with open_url(req, timeout=30) as r:
         prog["total"] = int(r.headers.get("Content-Length") or 0)
         prog["done"] = 0
         parts = []

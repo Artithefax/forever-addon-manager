@@ -1,11 +1,15 @@
 """WoW-Installation erkennen, .toc-Dateien lesen, Addons finden und gruppieren."""
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
 import sys
+import threading
 from pathlib import Path
+
+from .config import config_dir, log, write_text_atomic
 
 
 # --------------------------------------------------------------------------- #
@@ -103,21 +107,64 @@ def find_wow_exe(root: str, flavor: str) -> Path | None:
     return max(exes, key=lambda e: e.stat().st_size)   # die eigentliche Spieldatei ist die größte
 
 
+def process_names() -> set[str]:
+    """Namen aller laufenden Programme (klein geschrieben, nur Windows). Direkt über die Windows-Prozessliste –
+    schneller als tasklist und unabhängig von der Systemsprache; tasklist bleibt der Rückweg."""
+    try:
+        return {n.lower() for n in _toolhelp_names()}
+    except Exception:  # noqa – dann wie früher
+        pass
+    try:
+        out = subprocess.run(["tasklist", "/FO", "CSV", "/NH"], capture_output=True, text=True,
+                             creationflags=0x08000000, timeout=10).stdout   # ohne Konsolenfenster
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    return {l.split('","')[0].strip('"').lower() for l in out.splitlines() if l.strip()}
+
+
+def _toolhelp_names() -> list[str]:
+    import ctypes
+    from ctypes import wintypes
+
+    class Entry(ctypes.Structure):
+        _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD), ("th32ProcessID", wintypes.DWORD),
+                    ("th32DefaultHeapID", ctypes.c_size_t), ("th32ModuleID", wintypes.DWORD),
+                    ("cntThreads", wintypes.DWORD), ("th32ParentProcessID", wintypes.DWORD),
+                    ("pcPriClassBase", ctypes.c_long), ("dwFlags", wintypes.DWORD), ("szExeFile", ctypes.c_wchar * 260)]
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    k32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    k32.Process32FirstW.argtypes = k32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(Entry)]
+    k32.Process32FirstW.restype = k32.Process32NextW.restype = wintypes.BOOL
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    snap = k32.CreateToolhelp32Snapshot(0x2, 0)               # TH32CS_SNAPPROCESS
+    if not snap or snap == wintypes.HANDLE(-1).value:
+        raise OSError(ctypes.get_last_error(), "CreateToolhelp32Snapshot")
+    try:
+        entry = Entry()
+        entry.dwSize = ctypes.sizeof(Entry)
+        names = []
+        ok = k32.Process32FirstW(snap, ctypes.byref(entry))
+        while ok:
+            names.append(entry.szExeFile)
+            ok = k32.Process32NextW(snap, ctypes.byref(entry))
+        return names
+    finally:
+        k32.CloseHandle(snap)
+
+
 def running_wow(root: str, flavor: str) -> list[str]:
     """Liefert laufende WoW-Prozesse (nur Windows)."""
     if not sys.platform.startswith("win"):
         return []
     exes = {e.name.lower() for e in (Path(root) / flavor).glob("*.exe")
             if e.name.lower().startswith("wow")} if root and flavor else set()
-    try:
-        out = subprocess.run(["tasklist", "/FO", "CSV", "/NH"], capture_output=True, text=True,
-                             creationflags=0x08000000, timeout=10).stdout   # ohne Konsolenfenster
-    except (OSError, subprocess.SubprocessError):
-        return []
-    names = {l.split('","')[0].strip('"').lower() for l in out.splitlines() if l.strip()}
+    names = process_names()
     if exes:
         return sorted(names & exes)
     return sorted(n for n in names if n.startswith("wow") and n.endswith(".exe"))
+
 
 # --------------------------------------------------------------------------- #
 # TOC-Parsing
@@ -169,22 +216,76 @@ def pick_toc(folder: Path, flavor: str, game_if: int | None = None) -> Path | No
     return ordered[0]
 
 
-def parse_toc(path: Path) -> dict:
+TOC_X_KEYS = {"x-curse-project-id", "x-wago-id", "x-wowi-id", "x-website", "x-category", "x-license"}
+TOC_VALUE_MAX = 4096          # längere Werte (z. B. die Daten in QuestieDBs .toc) braucht der Manager nicht
+_TOC_LOCK = threading.Lock()
+_TOC_CACHE: dict[str, list] = {}          # Pfad -> [Größe, Änderungszeit (ns), Metadaten]
+_TOC_STATE = {"loaded": False, "dirty": False}
+
+
+def _toc_cache_file() -> Path:
+    return config_dir() / "cache" / "toc.json"
+
+
+def _read_toc(path: Path) -> dict:
     meta = {}
     try:
-        text = path.read_text(encoding="utf-8-sig", errors="replace")
+        raw = path.read_bytes()
     except OSError:
         return meta
-    for line in text.splitlines():
-        line = line.strip()
-        if not line.startswith("##"):
+    for line in raw.decode("utf-8-sig", errors="replace").splitlines():
+        if not line.startswith("##", len(line) - len(line.lstrip())) or len(line) > TOC_VALUE_MAX + 200:
             continue
-        body = line[2:].strip()
+        body = line.strip()[2:].strip()
         if ":" not in body:
             continue
         key, val = body.split(":", 1)
-        meta[key.strip().lower()] = val.strip()
+        key = key.strip().lower()
+        if key.startswith("x-") and key not in TOC_X_KEYS:
+            continue                  # eigene Daten mancher Addons (QuestieDB: über 100.000 Einträge)
+        meta[key] = val.strip()
     return meta
+
+
+def parse_toc(path: Path) -> dict:
+    """Metadaten einer .toc. Zwischengespeichert nach Größe und Änderungszeit – auch über Neustarts hinweg,
+    damit große Dateien (QuestieDB: 16 MB) nur nach einer Änderung neu gelesen werden."""
+    try:
+        st = path.stat()
+    except OSError:
+        return {}
+    key = str(path)
+    with _TOC_LOCK:
+        if not _TOC_STATE["loaded"]:
+            _TOC_STATE["loaded"] = True
+            try:
+                data = json.loads(_toc_cache_file().read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    _TOC_CACHE.update({k: v for k, v in data.items() if isinstance(v, list) and len(v) == 3})
+            except (OSError, ValueError):
+                pass
+        hit = _TOC_CACHE.get(key)
+    if hit and hit[0] == st.st_size and hit[1] == st.st_mtime_ns:
+        return dict(hit[2])
+    meta = _read_toc(path)
+    with _TOC_LOCK:
+        _TOC_CACHE[key] = [st.st_size, st.st_mtime_ns, meta]
+        _TOC_STATE["dirty"] = True
+    return dict(meta)
+
+
+def flush_toc_cache() -> None:
+    """Speichert den .toc-Zwischenspeicher, wenn sich etwas geändert hat (verschwundene Dateien fliegen raus)."""
+    with _TOC_LOCK:
+        if not _TOC_STATE["dirty"]:
+            return
+        _TOC_STATE["dirty"] = False
+        data = {k: v for k, v in _TOC_CACHE.items() if os.path.exists(k)}
+    try:
+        _toc_cache_file().parent.mkdir(parents=True, exist_ok=True)
+        write_text_atomic(_toc_cache_file(), json.dumps(data, ensure_ascii=False))
+    except OSError as e:
+        log.warning(".toc-Zwischenspeicher nicht gespeichert: %s", e)
 
 
 def toc_deps(meta: dict) -> list[str]:

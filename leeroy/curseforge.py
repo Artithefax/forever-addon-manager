@@ -15,7 +15,7 @@ from pathlib import Path
 from .constants import USER_AGENT
 from .i18n import cur_lang, tr
 from .files import install_zip
-from .github import asset_key, http_get
+from .github import open_url, asset_key, http_get
 
 
 # --------------------------------------------------------------------------- #
@@ -57,7 +57,7 @@ def cf_request(path: str, key: str, params: dict | None = None, body: dict | Non
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(url, data=data, headers=headers, method="POST" if body is not None else "GET")
     try:
-        with urllib.request.urlopen(req, timeout=30) as r:
+        with open_url(req, timeout=30) as r:
             return json.loads(r.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         msgs = {401: tr("CurseForge lehnt den API-Key ab. Bitte den Key in den Einstellungen prüfen."),
@@ -331,6 +331,28 @@ def cf_changelog(mod_id: int, file_id: int, key: str) -> str:
         return html_to_text(cf_request(f"/mods/{mod_id}/files/{file_id}/changelog", key).get("data") or "")
     except CFError:
         return ""
+
+
+def cf_mods_batch(mod_ids: list[int], key: str) -> dict[int, dict]:
+    """Alle Projekte in einer Anfrage (POST /v1/mods) – statt einer Anfrage pro Addon."""
+    out: dict[int, dict] = {}
+    ids = sorted({int(i) for i in mod_ids if str(i).isdigit()})
+    for start in range(0, len(ids), 100):
+        data = cf_request("/mods", key, body={"modIds": ids[start:start + 100], "filterPcOnly": True}).get("data") or []
+        out.update({m["id"]: m for m in data if isinstance(m, dict) and isinstance(m.get("id"), int)})
+    return out
+
+
+def cf_signature(mod: dict | None, game_ver: str, tag: str) -> str:
+    """Fingerabdruck des Projektstands: gleich wie bei der letzten Prüfung = keine neue Datei seitdem."""
+    if not mod:
+        return ""
+    files = [f.get("fileId") for f in mod.get("latestFilesIndexes") or [] if isinstance(f, dict)]
+    files += [f.get("id") for f in mod.get("latestFiles") or [] if isinstance(f, dict)]
+    files = [f for f in files if isinstance(f, int)]
+    if not files and not mod.get("dateReleased"):
+        return ""
+    return f"{max(files) if files else 0}|{mod.get('dateReleased', '')}|{game_ver}|{tag}"
 
 
 def cf_check(src: dict, key: str, flavor: str, game_ver: str) -> dict:
