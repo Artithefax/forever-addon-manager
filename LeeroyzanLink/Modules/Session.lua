@@ -35,10 +35,16 @@ local rt = {}       -- runtime state that is not saved
 local zoneEntry     -- defined with the zone helpers below
 local band = bit and bit.band
 
+-- Newer clients hand addons some values in combat only as "secret values" (chat lines,
+-- combat log, unit data). Reading them throws an error, so they are skipped here.
+local isSecret = _G.issecretvalue or function() return false end
+local function text(v) return type(v) == "string" and not isSecret(v) end
+
 ----------------------------------------------------------------------
 -- Helpers
 ----------------------------------------------------------------------
 local function now() return GetTime and GetTime() or 0 end
+local function within(key, sec) return rt[key] and (now() - rt[key]) <= sec end
 
 local function add(t, k, v)
 	if k == nil then return end
@@ -116,6 +122,25 @@ end
 -- Several handlers per event inside this module
 ----------------------------------------------------------------------
 local handlers = {}
+local failed = {}   -- event -> number of errors this login (the first one goes to the error log, silently)
+
+local function onError(event, err)
+	local n = (failed[event] or 0) + 1
+	failed[event] = n
+	if s then
+		s.recErrors = s.recErrors or {}
+		s.recErrors[event] = (s.recErrors[event] or 0) + 1
+	end
+	if n == 1 then
+		local log = LZ.modules.ErrorLog
+		if log and log.enabled and log.Record then
+			-- the path in front lets the error log attribute it to this addon
+			pcall(log.Record, log, "Interface\\AddOns\\LeeroyzanLink\\Modules\\Session.lua (" .. event .. "): " .. tostring(err),
+				_G.debugstack and debugstack(2) or nil)
+		end
+	end
+end
+
 local function on(event, fn)
 	local list = handlers[event]
 	if not list then
@@ -123,7 +148,10 @@ local function on(event, fn)
 		handlers[event] = list
 		mod:Event(event, function(self, ev, ...)
 			if not s then return end
-			for i = 1, #list do list[i](...) end
+			for i = 1, #list do
+				local ok, err = pcall(list[i], ...)
+				if not ok then onError(event, err) end
+			end
 		end)
 	end
 	list[#list + 1] = fn
@@ -149,7 +177,7 @@ local function newSession()
 		start = t, stop = t, saved = t, played = 0, resumes = 0,
 		time = { combat = 0, afk = 0, rest = 0, dead = 0, taxi = 0, instance = 0 },
 		level = { from = lvl, to = lvl, ups = {} },
-		xp = { total = 0, kills = 0, quests = 0, explore = 0, other = 0, killsN = 0 },
+		xp = { total = 0, kills = 0, quests = 0, explore = 0, other = 0, killsN = 0, combat = 0 },
 		money = { start = m, stop = m, income = 0, spent = 0, gain = {}, spend = {} },
 		quests = { accepted = {}, done = {}, abandoned = {} },
 		loot = { n = 0, value = 0, q = {}, items = {}, notable = {} },
@@ -185,6 +213,7 @@ end
 on("PLAYER_XP_UPDATE", function(unit)
 	if unit and unit ~= "player" then return end
 	local cur, max = readXP()
+	if isSecret(cur) or isSecret(max) then return end
 	local gained
 	if max == rt.xpMax and cur >= rt.xp then
 		gained = cur - rt.xp
@@ -194,6 +223,10 @@ on("PLAYER_XP_UPDATE", function(unit)
 	rt.xp, rt.xpMax = cur, max
 	if gained <= 0 then return end
 	s.xp.total = s.xp.total + gained
+	-- XP in combat (or right after) is kill XP – also when the chat line was protected
+	if (UnitAffectingCombat and UnitAffectingCombat("player")) or within("combatEnd", 4) then
+		s.xp.combat = (s.xp.combat or 0) + gained
+	end
 	local z = zoneEntry(zoneName())
 	z.xp = (z.xp or 0) + gained
 	if rt.run then rt.run.xp = (rt.run.xp or 0) + gained end
@@ -206,7 +239,7 @@ on("PLAYER_LEVEL_UP", function(level)
 end)
 
 on("CHAT_MSG_COMBAT_XP_GAIN", function(msg)
-	if type(msg) ~= "string" then return end
+	if not text(msg) then return end
 	if rt.pKillXP then
 		local _, amount = msg:match(rt.pKillXP)
 		if amount then
@@ -226,13 +259,14 @@ on("CHAT_MSG_COMBAT_XP_GAIN", function(msg)
 	end
 end)
 
-on("TIME_PLAYED_MSG", function(total) s.playedTotal = tonumber(total) or s.playedTotal end)
+on("TIME_PLAYED_MSG", function(total)
+	if not isSecret(total) then s.playedTotal = tonumber(total) or s.playedTotal end
+end)
+on("PLAYER_REGEN_ENABLED", function() rt.combatEnd = now() end)
 
 ----------------------------------------------------------------------
 -- Gold: every change is booked to the window that was open at that moment
 ----------------------------------------------------------------------
-local function within(key, sec) return rt[key] and (now() - rt[key]) <= sec end
-
 local function moneySource()
 	if rt.lootOpen or within("lootClosed", 1.5) or within("moneyMsg", 1) then return "loot" end
 	if within("questAt", 2) then return "quest" end
@@ -401,7 +435,7 @@ local function bookItem(list, id, link, count)
 end
 
 on("CHAT_MSG_LOOT", function(msg)
-	if type(msg) ~= "string" or not lootPatterns then return end
+	if not text(msg) or not lootPatterns then return end
 	local kind, link, count
 	for _, p in ipairs(lootPatterns) do
 		local a, b = msg:match(p[1])
@@ -454,7 +488,10 @@ on("LOOT_OPENED", function()
 		rt.lootKind = "fishing"
 	else
 		rt.lootKind = "mob"
-		if UnitExists and UnitExists("target") and UnitIsDead and UnitIsDead("target") then rt.lootSrc = UnitName("target") end
+		if UnitExists and UnitExists("target") and UnitIsDead and UnitIsDead("target") then
+			local n = UnitName("target")
+			if text(n) then rt.lootSrc = n end
+		end
 	end
 	rt.gatherAt = nil
 end)
@@ -507,8 +544,17 @@ local function snapshotSkills(initial)
 	end
 end
 
+on("SKILL_LINES_CHANGED", function()
+	if rt.skillQueued then return end
+	rt.skillQueued = true
+	LZ.After(1, function()
+		rt.skillQueued = nil
+		if s then pcall(snapshotSkills) end
+	end)
+end)
+
 on("CHAT_MSG_SKILL", function(msg)
-	if type(msg) ~= "string" or not rt.pSkill then return end
+	if not text(msg) or not rt.pSkill then return end
 	local name, rank = msg:match(rt.pSkill)
 	rank = tonumber(rank)
 	if not name or not rank then return end
@@ -522,7 +568,7 @@ on("CHAT_MSG_SKILL", function(msg)
 end)
 
 on("CHAT_MSG_SYSTEM", function(msg)
-	if type(msg) ~= "string" then return end
+	if not text(msg) then return end
 	if rt.pRecipe then
 		local what = msg:match(rt.pRecipe)
 		if what then push(s.prof.learned, { name = LZ.Strip(what), t = time() }, LIMIT.learned); return end
@@ -554,7 +600,7 @@ local function discovered(name, xp)
 end
 
 local function checkDiscovery(msg)
-	if type(msg) ~= "string" then return end
+	if not text(msg) then return end
 	if rt.pExploredXP then
 		local name, xp = msg:match(rt.pExploredXP)
 		if name then discovered(name, tonumber(xp)); return end
@@ -567,7 +613,10 @@ end
 
 on("CHAT_MSG_SYSTEM", checkDiscovery)
 -- newer clients: (messageType, message), older: (message)
-on("UI_INFO_MESSAGE", function(a, b) checkDiscovery(type(b) == "string" and b or a) end)
+on("UI_INFO_MESSAGE", function(a, b)
+	if isSecret(a) or isSecret(b) then return end
+	checkDiscovery(type(b) == "string" and b or a)
+end)
 
 zoneEntry = function(zone)
 	local zones = s.explore.zones
@@ -638,10 +687,12 @@ on("GROUP_ROSTER_UPDATE", function()
 end)
 
 on("ENCOUNTER_START", function(id, name)
+	if isSecret(name) then name = nil end
 	rt.encounter = { name = name, at = now() }
 end)
 
 on("ENCOUNTER_END", function(id, name, diff, size, success)
+	if isSecret(name) or isSecret(success) then rt.encounter = nil; return end
 	local started = rt.encounter and rt.encounter.at
 	rt.encounter = nil
 	if success == 1 or success == true then
@@ -671,17 +722,42 @@ end)
 ----------------------------------------------------------------------
 -- Reputation
 ----------------------------------------------------------------------
-on("CHAT_MSG_COMBAT_FACTION_CHANGE", function(msg)
-	if type(msg) ~= "string" then return end
-	local faction, amount
-	if rt.pRepUp then faction, amount = msg:match(rt.pRepUp) end
-	local sign = 1
-	if not faction and rt.pRepDown then
-		faction, amount = msg:match(rt.pRepDown)
-		sign = -1
+-- name -> current value; changes between two reads are booked (works in combat, no chat parsing)
+local function readRep()
+	local out = {}
+	local R = _G.C_Reputation
+	if R and R.GetNumFactions and R.GetFactionDataByIndex then
+		for i = 1, R.GetNumFactions() or 0 do
+			local d = R.GetFactionDataByIndex(i)
+			if d and d.name and not d.isHeader and not isSecret(d.currentStanding) then out[d.name] = d.currentStanding end
+		end
+	elseif _G.GetNumFactions and _G.GetFactionInfo then
+		for i = 1, GetNumFactions() or 0 do
+			local name, _, _, _, _, value, _, _, isHeader, _, hasRep = GetFactionInfo(i)
+			if name and (not isHeader or hasRep) and value and not isSecret(value) then out[name] = value end
+		end
 	end
-	amount = tonumber(amount)
-	if faction and amount then add(s.rep, faction, sign * amount) end
+	return out
+end
+
+local function updateRep()
+	local cur = readRep()
+	local old = rt.rep
+	rt.rep = cur
+	if not old then return end
+	for name, v in pairs(cur) do
+		local before = old[name]
+		if before and v ~= before then add(s.rep, name, v - before) end
+	end
+end
+
+on("UPDATE_FACTION", function()
+	if rt.repQueued then return end
+	rt.repQueued = true
+	LZ.After(1, function()
+		rt.repQueued = nil
+		if s then pcall(updateRep) end
+	end)
 end)
 
 ----------------------------------------------------------------------
@@ -692,10 +768,12 @@ local classByGUID, classCount = {}, 0
 local function cacheUnit(unit)
 	if not (UnitExists and UnitExists(unit)) or (UnitIsPlayer and UnitIsPlayer(unit)) then return end
 	local guid = UnitGUID(unit)
-	if not guid or classByGUID[guid] then return end
+	if not guid or isSecret(guid) or classByGUID[guid] then return end
 	local c = UnitClassification and UnitClassification(unit) or "normal"
+	if isSecret(c) then return end
 	if c == "worldboss" then c = "boss" end
-	if c ~= "boss" and UnitLevel and UnitLevel(unit) == -1 and _G.IsInInstance and IsInInstance() then c = "boss" end
+	local level = UnitLevel and UnitLevel(unit)
+	if c ~= "boss" and not isSecret(level) and level == -1 and _G.IsInInstance and IsInInstance() then c = "boss" end
 	if classCount > 3000 then wipe(classByGUID); classCount = 0 end
 	classByGUID[guid] = c
 	classCount = classCount + 1
@@ -709,7 +787,7 @@ on("INSTANCE_ENCOUNTER_ENGAGE_UNIT", function()
 		local u = "boss" .. i
 		if UnitExists and UnitExists(u) then
 			local guid = UnitGUID(u)
-			if guid then classByGUID[guid] = "boss" end
+			if guid and not isSecret(guid) then classByGUID[guid] = "boss" end
 		end
 	end
 end)
@@ -805,6 +883,11 @@ local SWING_RESULT = { MISS = "miss", DODGE = "dodge", PARRY = "parry", BLOCK = 
 local function processCombatLog()
 	local _, sub, _, srcGUID, srcName, srcFlags, _, dstGUID, dstName, dstFlags, _,
 		a12, a13, a14, a15, a16, a17, a18, a19, a20, a21 = CombatLogGetCurrentEventInfo()
+	if isSecret(sub) or isSecret(srcGUID) or isSecret(dstGUID) or isSecret(srcFlags) or isSecret(dstFlags) then
+		rt.secretCL = (rt.secretCL or 0) + 1
+		if rt.secretCL == 25 then s.combat.err = "protected by the game client" end
+		return
+	end
 	local cb = s.combat
 	local me = rt.guid
 	local fromMe = srcGUID == me
@@ -939,13 +1022,19 @@ end
 ----------------------------------------------------------------------
 local unitFrame
 
+-- Fires for every spell you cast, also in combat – protected spell IDs/names are skipped.
+local function onSpellcast(spellID)
+	if isSecret(spellID) then return end
+	local name = C.GetSpellName(spellID)
+	if not text(name) then return end
+	local kind = gatherNames and gatherNames[name]
+	if kind then rt.gatherKind, rt.gatherAt = kind, now() end
+end
+
 local function onUnitEvent(_, event, unit, castGUID, spellID)
-	if not s then return end
-	if event == "UNIT_SPELLCAST_SUCCEEDED" then
-		local name = C.GetSpellName(spellID)
-		local kind = name and gatherNames and gatherNames[name]
-		if kind then rt.gatherKind, rt.gatherAt = kind, now() end
-	end
+	if not s or event ~= "UNIT_SPELLCAST_SUCCEEDED" then return end
+	local ok, err = pcall(onSpellcast, spellID)
+	if not ok then onError(event, err) end
 end
 
 local function startUnitEvents()
@@ -1000,17 +1089,22 @@ local function tick()
 	end
 end
 
+local function safeTick()
+	local ok, err = pcall(tick)
+	if not ok then onError("tick", err) end
+end
+
 local function startTicker()
 	if ticker then return end
 	rt.last = now()
 	if _G.C_Timer and C_Timer.NewTicker then
-		ticker = C_Timer.NewTicker(TICK, tick)
+		ticker = C_Timer.NewTicker(TICK, safeTick)
 	else
 		local f = CreateFrame("Frame")
 		local acc = 0
 		f:SetScript("OnUpdate", function(_, e)
 			acc = acc + (e or 0)
-			if acc >= TICK then acc = 0; tick() end
+			if acc >= TICK then acc = 0; safeTick() end
 		end)
 		ticker = { Cancel = function() f:SetScript("OnUpdate", nil) end }
 	end
@@ -1022,9 +1116,8 @@ end
 
 local function onJump()
 	if not s or not mod.enabled then return end
-	if IsSwimming and IsSwimming() then return end
-	if IsFlying and IsFlying() then return end
-	s.move.jumps = s.move.jumps + 1
+	if (IsSwimming and IsSwimming()) or (IsFlying and IsFlying()) then return end
+	s.move.jumps = (s.move.jumps or 0) + 1
 end
 
 ----------------------------------------------------------------------
@@ -1078,7 +1171,10 @@ function mod:OnEnable()
 	rt.playedBefore = s.played or 0
 	rt.money = money()
 	rt.xp, rt.xpMax = readXP()
+	if isSecret(rt.xp) or isSecret(rt.xpMax) then rt.xp, rt.xpMax = 0, 0 end
 	rt.qtitle = rt.qtitle or {}
+	rt.rep = nil
+	pcall(updateRep)
 	snapshotSkills(true)
 	startCombatLog()
 	startUnitEvents()
@@ -1094,11 +1190,12 @@ function mod:Update()
 	s.stop, s.saved = t, t
 	s.played = rt.playedBefore + (t - (rt.loginAt or t))
 	s.level.to = playerLevel()
-	s.xpNow, s.xpMax = readXP()
+	local xn, xm = readXP()
+	if not isSecret(xn) and not isSecret(xm) then s.xpNow, s.xpMax = xn, xm end
 	s.money.stop = money()
 	s.addon = LZ.version
 	local x = s.xp
-	x.other = math.max(0, x.total - x.kills - x.quests - x.explore)
+	x.other = math.max(0, x.total - math.max(x.kills, x.combat or 0) - x.quests - x.explore)
 end
 
 function mod:Save()
@@ -1133,7 +1230,10 @@ function mod:Save()
 	for _, z in pairs(s.explore.zones) do z.sec = round(z.sec) end
 end
 
-function mod:OnLogout() self:Save() end
+function mod:OnLogout()
+	local ok, err = pcall(self.Save, self)
+	if not ok then onError("PLAYER_LOGOUT", err) end
+end
 
 function mod:OnDisable()
 	self:Save()

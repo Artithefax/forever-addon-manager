@@ -46,7 +46,7 @@ local function matchAny(patterns, msg)
 end
 
 mod:Event("CHAT_MSG_LOOT", function(self, _, msg)
-	if type(msg) ~= "string" then return end
+	if type(msg) ~= "string" or (_G.issecretvalue and issecretvalue(msg)) then return end -- protected in combat on newer clients
 	local mine = matchAny(selfPatterns, msg)
 	local looter
 	if not mine then

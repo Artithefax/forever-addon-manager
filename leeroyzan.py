@@ -61,7 +61,7 @@ except Exception:                      # noqa – Paket fehlt oder Tk-Erweiterun
     HAS_DND = False
 
 APP_NAME = "Leeroyzan"
-APP_VERSION = "1.4.1"
+APP_VERSION = "1.4.2"
 USER_AGENT = f"Leeroyzan/{APP_VERSION}"
 
 # Selbst-Update über GitHub-Releases dieses Repos
@@ -1912,7 +1912,7 @@ def normalize_session(raw, flavor: str = "", account: str = "") -> dict | None:
         "time": {k: _int(tm.get(k)) for k in ("combat", "afk", "rest", "dead", "taxi", "instance")},
         "level": {"from": _int(lv.get("from")), "to": _int(lv.get("to")),
                   "ups": [{"l": _int(_map(u).get("l")), "t": _int(_map(u).get("t"))} for u in _list(lv.get("ups"))]},
-        "xp": {k: _int(xp.get(k)) for k in ("total", "kills", "quests", "explore", "other", "killsN")},
+        "xp": {k: _int(xp.get(k)) for k in ("total", "kills", "quests", "explore", "other", "killsN", "combat")},
         "money": {"start": _int(mo.get("start")), "stop": _int(mo.get("stop")), "income": _int(mo.get("income")),
                   "spent": _int(mo.get("spent")), "gain": _counts(mo.get("gain")), "spend": _counts(mo.get("spend"))},
         "quests": {
@@ -1987,6 +1987,11 @@ def normalize_session(raw, flavor: str = "", account: str = "") -> dict | None:
         "xpNow": _int(r.get("xpNow")), "xpMax": _int(r.get("xpMax")),
         "legacy": False,
     }
+    # Kill-XP: Neuere Clients schützen die Chatzeile im Kampf – dann zählt die XP, die im Kampf kam (Link 0.3.1)
+    x = s["xp"]
+    if x["combat"] > x["kills"]:
+        x["kills"] = x["combat"]
+        x["other"] = max(0, x["total"] - x["kills"] - x["quests"] - x["explore"])
     # Spielzeit fehlt (z. B. Absturz vor dem ersten Speichern): Zeitraum nehmen
     if s["played"] <= 0:
         s["played"] = max(0, s["stop"] - s["start"])
