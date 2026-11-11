@@ -4,12 +4,42 @@ from __future__ import annotations
 import json
 import re
 import tempfile
+import threading
+import time
+import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
 from .constants import USER_AGENT
 from .i18n import tr
+from .config import config_dir, log, write_text_atomic
 from .files import install_zip
+
+# Nur an diese Server geht ein GitHub-Token (nie an Download-Server, auf die GitHub weiterleitet).
+GITHUB_HOSTS = {"api.github.com", "github.com", "raw.githubusercontent.com", "codeload.github.com"}
+SECRET_HEADERS = ("Authorization", "X-api-key")
+
+
+class SafeRedirect(urllib.request.HTTPRedirectHandler):
+    """Folgt Weiterleitungen, schickt Token und API-Key aber nie an einen anderen Server mit.
+    (urllib übernimmt sonst alle Kopfzeilen – Release-Downloads leiten z. B. zu objects.githubusercontent.com.)"""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None and urllib.parse.urlparse(newurl).hostname != urllib.parse.urlparse(req.full_url).hostname:
+            for key in SECRET_HEADERS:
+                new.headers.pop(key, None)
+                new.unredirected_hdrs.pop(key, None)
+        return new
+
+
+_OPENER = urllib.request.build_opener(SafeRedirect)
+
+
+def open_url(req, timeout: float = 30):
+    """urlopen mit sicheren Weiterleitungen (siehe SafeRedirect)."""
+    return _OPENER.open(req, timeout=timeout)
 
 
 # --------------------------------------------------------------------------- #
@@ -26,12 +56,76 @@ def parse_repo(text: str) -> str:
     raise ValueError(tr("Bitte 'owner/repo' oder eine GitHub-URL angeben."))
 
 
-def http_get(url: str, token: str = "", accept: str = "application/vnd.github+json") -> bytes:
+def github_request(url: str, token: str = "", accept: str = "application/vnd.github+json") -> urllib.request.Request:
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": accept})
-    if token:
+    if token and urllib.parse.urlparse(url).hostname in GITHUB_HOSTS:
         req.add_header("Authorization", f"Bearer {token}")
-    with urllib.request.urlopen(req, timeout=30) as r:
+    return req
+
+
+def http_get(url: str, token: str = "", accept: str = "application/vnd.github+json") -> bytes:
+    with open_url(github_request(url, token, accept)) as r:
         return r.read()
+
+
+# ----- Zwischenspeicher für GitHub-Antworten (ETag) ------------------------------------------------ #
+GH_CACHE_MAX_AGE = 300            # so lange gilt eine Antwort ohne neue Anfrage
+_GH_LOCK = threading.Lock()
+_GH_CACHE: dict = {}
+
+
+def _gh_cache_file() -> Path:
+    return config_dir() / "cache" / "github.json"
+
+
+def _gh_cache() -> dict:
+    if not _GH_CACHE:
+        try:
+            _GH_CACHE.update(json.loads(_gh_cache_file().read_text(encoding="utf-8")))
+        except (OSError, ValueError):
+            pass
+        _GH_CACHE.setdefault("entries", {})
+    return _GH_CACHE["entries"]
+
+
+def _gh_cache_save() -> None:
+    entries = _GH_CACHE.get("entries", {})
+    if len(entries) > 300:                          # älteste verwerfen
+        for k in sorted(entries, key=lambda k: entries[k].get("t", 0))[:len(entries) - 300]:
+            entries.pop(k, None)
+    try:
+        _gh_cache_file().parent.mkdir(parents=True, exist_ok=True)
+        write_text_atomic(_gh_cache_file(), json.dumps({"entries": entries}, ensure_ascii=False))
+    except OSError as e:
+        log.warning("GitHub-Zwischenspeicher nicht gespeichert: %s", e)
+
+
+def github_json(url: str, token: str = "", max_age: float = GH_CACHE_MAX_AGE):
+    """GitHub-API mit Zwischenspeicher: Frische Antworten (< max_age) ohne Anfrage, sonst mit ETag. Antwortet
+    GitHub mit 304 (unverändert), zählt das mit Token nicht ins Abfragelimit."""
+    with _GH_LOCK:
+        hit = dict(_gh_cache().get(url) or {})
+    now = time.time()
+    if hit and now - hit.get("t", 0) < max_age:
+        return hit["data"]
+    req = github_request(url, token)
+    if hit.get("etag"):
+        req.add_header("If-None-Match", hit["etag"])
+    try:
+        with open_url(req) as r:
+            data = json.loads(r.read())
+            etag = r.headers.get("ETag", "")
+    except urllib.error.HTTPError as e:
+        if e.code == 304 and hit:
+            with _GH_LOCK:
+                _gh_cache()[url] = {**hit, "t": now}
+                _gh_cache_save()
+            return hit["data"]
+        raise
+    with _GH_LOCK:
+        _gh_cache()[url] = {"t": now, "etag": etag, "data": data}
+        _gh_cache_save()
+    return data
 
 
 def asset_key(name: str) -> str:
@@ -58,8 +152,8 @@ def rank_assets(assets: list[dict], flavor: str = "") -> list[dict]:
     return sorted(assets, key=rank)
 
 
-def github_latest(repo: str, token: str = "") -> dict:
-    data = json.loads(http_get(f"https://api.github.com/repos/{repo}/releases/latest", token))
+def github_latest(repo: str, token: str = "", max_age: float = GH_CACHE_MAX_AGE) -> dict:
+    data = github_json(f"https://api.github.com/repos/{repo}/releases/latest", token, max_age)
     return release_info(repo, data)
 
 

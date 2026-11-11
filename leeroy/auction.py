@@ -222,3 +222,18 @@ def owned_counts(state: dict) -> dict[int, int]:
                 if str(k).isdigit():
                     out[int(k)] = out.get(int(k), 0) + n
     return out
+
+
+def auction_rows(data: dict, qdb: "QuestDB | None", cm: dict | None, state: dict, locale: str) -> dict[str, list[dict]]:
+    """Alle Zeilen je Realm mit Gegenstandsdetails – läuft im Hintergrund, nicht im Fenster-Thread."""
+    owned = owned_counts(state)
+    out: dict[str, list[dict]] = {}
+    for realm, entries in data.get("realms", {}).items():
+        rows = []
+        for key, e in entries.items():
+            r = auction_row(key, e, data["vendor"])
+            r.update(item_details(r["id"], qdb, cm, state, locale))
+            r["owned"] = owned.get(r["id"], 0)
+            rows.append(r)
+        out[realm] = rows
+    return out

@@ -56,8 +56,12 @@ class WidgetsMixin:
 
     def _w_statusbar(self, parent):
         t = THEME
-        ttk.Label(parent, textvariable=self.status_var, style="Status.TLabel",
-                  anchor="w").pack(fill="x", side="bottom")
+        bar = ttk.Frame(parent)
+        bar.pack(fill="x", side="bottom")
+        if getattr(self, "activity_var", None) is None:
+            self.activity_var = tk.StringVar(value="")
+        ttk.Label(bar, textvariable=self.activity_var, style="Status.TLabel", anchor="e").pack(side="right")
+        ttk.Label(bar, textvariable=self.status_var, style="Status.TLabel", anchor="w").pack(side="left", fill="x", expand=True)
         tk.Frame(parent, height=1, bg=t["line"]).pack(fill="x", side="bottom")
 
     def _menu(self, parent, items) -> tk.Menu:
@@ -217,6 +221,18 @@ class WidgetsMixin:
             ttk.Label(inner, text=spaced(title), style="CardKicker.TLabel").pack(anchor="w", pady=(0, 10))
         return inner
 
+    def data_changed(self):
+        """Addons oder Spieldaten haben sich geändert: Seiten, die nur davon abhängen, beim nächsten Zeigen neu füllen."""
+        self._data_gen = getattr(self, "_data_gen", 0) + 1
+
+    def _page_stale(self, key: str) -> bool:
+        """True (einmal), wenn die Seite seit ihrem letzten Füllen veraltet ist."""
+        gen = getattr(self, "_data_gen", 0)
+        if self._page_gen.get(key) == gen:
+            return False
+        self._page_gen[key] = gen
+        return True
+
     def show_page(self, key):
         if key not in self.pages:
             key = "addons"
@@ -238,9 +254,9 @@ class WidgetsMixin:
             self.refresh_recv_files()
         elif key == "updates":
             self.refresh_updates_page()
-        elif key == "diagnose":
+        elif key == "diagnose" and self._page_stale(key):
             self.refresh_diagnose()
-        elif key == "characters":
+        elif key == "characters" and self._page_stale(key):
             self.refresh_characters()
         elif key == "settings":
             self.refresh_rollback_usage()

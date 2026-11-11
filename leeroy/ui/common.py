@@ -5,6 +5,7 @@ import queue
 import subprocess
 import sys
 import threading
+import time
 import webbrowser
 from pathlib import Path
 
@@ -79,7 +80,8 @@ class CommonMixin:
             self.info(tr("WoW läuft bereits ({0}).", ', '.join(running)))
             return
         if self.busy:
-            self.info(tr("Bitte warten, bis der laufende Vorgang fertig ist."))
+            self.info(tr("Bitte warten, bis „{0}“ fertig ist – sonst ändert Leeroyzan Addons, während WoW sie lädt.",
+                         self.busy_label))
             return
         try:
             flags = 0x00000008 | 0x00000200 if sys.platform.startswith("win") else 0  # losgelöst
@@ -147,24 +149,40 @@ class CommonMixin:
                 return False
         return True
 
-    def run_bg(self, label: str, func, on_done=None, on_error=None):
-        """Führt func im Hintergrund aus; on_done(result) läuft im GUI-Thread."""
-        self.busy = True
-        self.busy_label = label
+    @property
+    def busy(self) -> bool:
+        """Läuft ein Vorgang, der Addons oder WTF ändert? Reine Abfragen (Update-Prüfung, Suche) zählen nicht."""
+        return any(j["kind"] == "write" for j in self.running_jobs.values())
+
+    @property
+    def busy_label(self) -> str:
+        writes = [j["label"] for j in self.running_jobs.values() if j["kind"] == "write"]
+        return writes[0] if writes else tr("ein Vorgang")
+
+    def run_bg(self, label: str, func, on_done=None, on_error=None, kind: str = "write"):
+        """Führt func im Hintergrund aus; on_done(result) läuft im GUI-Thread.
+
+        kind="write": ändert Addons oder WTF – andere schreibende Aktionen warten, bis er fertig ist.
+        kind="read": nur Abfragen (Updates prüfen, suchen) – sperrt nichts, auch nicht den Spielstart."""
+        if kind == "read" and any(j["label"] == label for j in self.running_jobs.values()):
+            return                                   # dieselbe Abfrage läuft schon
+        job = self._next_job = getattr(self, "_next_job", 0) + 1
+        self.running_jobs[job] = {"label": label, "kind": kind, "started": time.time()}
         self.set_status(label + " …")
-        self.config(cursor="watch")
+        self._show_activity()
 
         def worker():
             try:
                 res = func()
-                self.jobs.put((on_done, on_error, res, None))
+                self.jobs.put((job, on_done, on_error, res, None))
             except Exception as e:  # noqa
-                self.jobs.put((on_done, on_error, None, e))
+                self.jobs.put((job, on_done, on_error, None, e))
 
-        threading.Thread(target=worker, daemon=True).start()
+        threading.Thread(target=worker, daemon=True, name=f"job-{job}").start()
 
     def run_quiet(self, func, on_done):
-        """Wie run_bg, aber unsichtbar: kein Status, kein Sanduhr-Cursor, blockiert nichts."""
+        """Wie run_bg, aber unsichtbar: kein Status, kein Sanduhr-Cursor, blockiert nichts.
+        on_done(result, error) läuft im GUI-Thread."""
         def worker():
             try:
                 self.quiet_jobs.put((on_done, func(), None))
@@ -173,31 +191,54 @@ class CommonMixin:
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _show_activity(self):
+        """Sanduhr und Liste laufender Vorgänge unten rechts."""
+        jobs = list(self.running_jobs.values())
+        try:
+            self.config(cursor="watch" if any(j["kind"] == "write" for j in jobs) else "")
+            if getattr(self, "activity_var", None) is not None:
+                self.activity_var.set(("⟳ " + " · ".join(j["label"] for j in jobs)) if jobs else "")
+        except tk.TclError:
+            pass
+
+    def _run_callback(self, cb, *args):
+        """Ein Fehler in einer Rückmeldung darf die Verarbeitung weiterer Vorgänge nie anhalten."""
+        try:
+            cb(*args)
+        except Exception as e:  # noqa
+            log.exception("Fehler nach einem Hintergrund-Vorgang: %s", e)
+            try:
+                self.set_status(tr("Fehler: {0}", e))
+            except tk.TclError:
+                pass
+
     def _poll_jobs(self):
         try:
             while True:
-                cb, res, err = self.quiet_jobs.get_nowait()
-                cb(res, err)
-        except queue.Empty:
-            pass
-        try:
+                try:
+                    cb, res, err = self.quiet_jobs.get_nowait()
+                except queue.Empty:
+                    break
+                self._run_callback(cb, res, err)
             while True:
-                cb, err_cb, res, err = self.jobs.get_nowait()
-                self.busy = False
-                self.config(cursor="")
+                try:
+                    job, cb, err_cb, res, err = self.jobs.get_nowait()
+                except queue.Empty:
+                    break
+                self.running_jobs.pop(job, None)
+                self._show_activity()
                 if err:
                     if not isinstance(err, NoReleaseYet):
                         log.error("%s", err)
                     if err_cb:
-                        err_cb(err)
+                        self._run_callback(err_cb, err)
                     else:
                         self.set_status(tr("Fehler: {0}", err))
-                        self.error(str(err))
+                        self._run_callback(self.error, str(err))
                 elif cb:
-                    cb(res)
-        except queue.Empty:
-            pass
-        self.after(100, self._poll_jobs)
+                    self._run_callback(cb, res)
+        finally:
+            self.after(100, self._poll_jobs)
 
     def selected_addons(self) -> list[Addon]:
         """Ausgewählte Addons; eine ausgewählte Gruppe zählt mit allen ihren Ordnern."""
@@ -300,5 +341,5 @@ class CommonMixin:
         self.game = read_game_version(self.root_path, self.flavor) if self.flavor else None
         self.update_game_info()
         self.reload_sets()
-        self.refresh()
+        self.refresh(background=True)
         self._sessions_flavor_changed()

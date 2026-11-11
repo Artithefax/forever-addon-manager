@@ -87,7 +87,7 @@ class InstallMixin:
         def done(info):
             self.gh_var.set("")
             self._pick_and_install(info)
-        self.run_bg(tr("Lese Release von {0}", repo), lambda: github_latest(repo, token), done)
+        self.run_bg(tr("Lese Release von {0}", repo), lambda: github_latest(repo, token), done, kind="read")
 
     def need_cf_key(self) -> str:
         if not self.cf_key():

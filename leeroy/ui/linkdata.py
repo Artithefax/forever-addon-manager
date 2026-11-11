@@ -90,6 +90,7 @@ class LinkDataMixin:
 
     def _link_state_changed(self):
         """Neue Daten aus dem Spiel: Seiten auffrischen, Hinweise zeigen, Data.lua anpassen."""
+        self.data_changed()
         if self.current_page == "diagnose":
             self.refresh_diagnose()
         elif self.current_page == "characters":
