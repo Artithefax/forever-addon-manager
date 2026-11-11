@@ -83,9 +83,9 @@ set "DND_OPT="
 if not defined DND_OPT echo %M_NODND%
 set "ICON_OPT="
 if exist leeroyzan.ico set "ICON_OPT=--icon leeroyzan.ico"
-REM Das Begleit-Addon LeeroyzanLink steckt mit in der .exe (Leeroyzan installiert es auf Wunsch)
+REM Das Begleit-Addon Leeroylink steckt mit in der .exe (Leeroyzan installiert es auf Wunsch)
 set "LINK_OPT="
-if exist LeeroyzanLink\LeeroyzanLink.toc set "LINK_OPT=--add-data LeeroyzanLink;LeeroyzanLink"
+if exist Leeroylink\Leeroylink.toc set "LINK_OPT=--add-data Leeroylink;Leeroylink"
 echo [3/5] %M_BUILD%
 .build_venv\Scripts\python.exe -m PyInstaller --noconfirm --clean --onefile --windowed ^
     --name Leeroyzan %ICON_OPT% %DND_OPT% %LINK_OPT% leeroyzan.py

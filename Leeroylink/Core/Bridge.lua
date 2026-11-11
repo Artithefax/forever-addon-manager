@@ -1,8 +1,8 @@
 -- Bridge.lua: the two file channels between the game and Leeroyzan.
 --
---   Leeroyzan -> game : Data.lua (global LeeroyzanLinkImport), written by Leeroyzan
+--   Leeroyzan -> game : Data.lua (global LeeroylinkImport), written by Leeroyzan
 --                       into this addon's folder. Read once at login.
---   game -> Leeroyzan : the SavedVariables file (LeeroyzanLinkDB). WoW writes it
+--   game -> Leeroyzan : the SavedVariables file (LeeroylinkDB). WoW writes it
 --                       on /reload and on logout; Leeroyzan reads it afterwards.
 --
 -- The addon never writes Data.lua and Leeroyzan must not write the
@@ -86,7 +86,7 @@ end
 
 function Bridge:Load()
 	LZ.import, LZ.importProblem = nil, nil
-	local raw = _G.LeeroyzanLinkImport
+	local raw = _G.LeeroylinkImport
 	if raw == nil then return end
 	if type(raw) ~= "table" then LZ.importProblem = "format"; return end
 	if raw.schema ~= LZ.schema then

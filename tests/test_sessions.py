@@ -30,7 +30,7 @@ def make_wow(sv_text: str, account: str = "123#1") -> Path:
     wow = TMP / "World of Warcraft"
     sv = wow / "_forever_" / "WTF" / "Account" / account / "SavedVariables"
     sv.mkdir(parents=True, exist_ok=True)
-    (sv / "LeeroyzanLink.lua").write_text(sv_text, encoding="utf-8")
+    (sv / "Leeroylink.lua").write_text(sv_text, encoding="utf-8")
     (wow / "_forever_" / "Interface" / "AddOns").mkdir(parents=True, exist_ok=True)
     return wow
 
@@ -38,7 +38,7 @@ def make_wow(sv_text: str, account: str = "123#1") -> Path:
 class LuaParserTests(unittest.TestCase):
     def test_wow_format(self):
         text = '''
-LeeroyzanLinkDB = {
+LeeroylinkDB = {
 ["a"] = "x\\"y\\\\z\\nnew",
 ["n"] = -12,
 ["f"] = 1.5e3,
@@ -60,7 +60,7 @@ LeeroyzanLinkDB = {
 Other = nil
 '''
         out = lz.parse_lua_savedvariables(text)
-        db = out["LeeroyzanLinkDB"]
+        db = out["LeeroylinkDB"]
         self.assertEqual(db["a"], 'x"y\\z\nnew')
         self.assertEqual(db["n"], -12)
         self.assertEqual(db["f"], 1500.0)
@@ -77,11 +77,11 @@ Other = nil
 
 
 class RealDataTests(unittest.TestCase):
-    """The saved variables written by Leeroyzan Link 0.1 in the real game."""
+    """The saved variables written by Leeroylink 0.1 in the real game."""
 
     def test_legacy_session(self):
         text = '''
-LeeroyzanLinkDB = {
+LeeroylinkDB = {
 ["global"] = {
 ["sessions"] = {
 {
@@ -97,7 +97,7 @@ LeeroyzanLinkDB = {
 },
 }
 '''
-        db = lz.parse_lua_savedvariables(text)["LeeroyzanLinkDB"]
+        db = lz.parse_lua_savedvariables(text)["LeeroylinkDB"]
         ss = lz.sessions_in_db(db, "_forever_", "acc")
         self.assertEqual(len(ss), 1)
         s = ss[0]
@@ -105,7 +105,7 @@ LeeroyzanLinkDB = {
         self.assertEqual(s["played"], 127)
         self.assertEqual(s["xp"]["total"], 1550)
         text = lz.report_plain_text(lz.session_report(s))
-        self.assertIn("Leeroyzan Link 0.1", text)
+        self.assertIn("Leeroylink 0.1", text)
 
 
 @unittest.skipIf(run_addon_test is None, "lupa not installed")
@@ -113,9 +113,9 @@ class ImportTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         sv = TMP / "sv.lua"
-        f1, text, now = run_addon_test.run(ROOT / "LeeroyzanLink", 1, None)
+        f1, text, now = run_addon_test.run(ROOT / "Leeroylink", 1, None)
         sv.write_text(text, encoding="utf-8")
-        f2, text, _ = run_addon_test.run(ROOT / "LeeroyzanLink", 2, sv, start_now=now + 15)
+        f2, text, _ = run_addon_test.run(ROOT / "Leeroylink", 2, sv, start_now=now + 15)
         assert f1 + f2 == 0, "addon scenario failed"
         cls.sv_text = text
         cls.wow = make_wow(text)
@@ -168,7 +168,7 @@ class ImportTests(unittest.TestCase):
         """Every German UI text of the session feature has an English translation."""
         import re
         src = (ROOT / "leeroyzan.py").read_text(encoding="utf-8")
-        start = src.index("# Leeroyzan Link: Spielsitzungen")
+        start = src.index("# Leeroylink: Spielsitzungen")
         end = src.index("# Theme (Braun/Gold")
         block = src[start:end]
         ui_start = src.index("# --- Sitzungen ---")
@@ -204,7 +204,7 @@ class LinkDataTests(unittest.TestCase):
 
     def test_lua_text_parses_back(self):
         text = lz.link_data_text(self.PAYLOAD)
-        back = lz.parse_lua_savedvariables(text)["LeeroyzanLinkImport"]
+        back = lz.parse_lua_savedvariables(text)["LeeroylinkImport"]
         self.assertEqual(back["updates"][0]["available"], "9.3.0")
         self.assertEqual(back["whatsnew"][0]["lines"], ["Neue Quests für Forever", '"Fix" für \\Pfade'])
         self.assertEqual(back["profiles"][0]["enable"], ["Details", "Bagnon"])
@@ -216,19 +216,58 @@ class LinkDataTests(unittest.TestCase):
         data.write_text(lz.link_data_text(self.PAYLOAD), encoding="utf-8")
         lua = lua51.LuaRuntime(unpack_returned_tuples=True)
         g = lua.globals()
-        g.ADDON_DIR, g.TESTS_DIR, g.DATA_FILE = str(ROOT / "LeeroyzanLink"), str(ROOT / "tests"), str(data)
+        g.ADDON_DIR, g.TESTS_DIR, g.DATA_FILE = str(ROOT / "Leeroylink"), str(ROOT / "tests"), str(data)
         self.assertEqual(lua.execute(f'return dofile("{ROOT / "tests" / "import_check.lua"}")'), 0)
 
     def test_write_only_when_changed(self):
-        wow = make_wow("LeeroyzanLinkDB = {}\n", "w#1")
-        addon = wow / "_forever_" / "Interface" / "AddOns" / "LeeroyzanLink"
+        wow = make_wow("LeeroylinkDB = {}\n", "w#1")
+        addon = wow / "_forever_" / "Interface" / "AddOns" / "Leeroylink"
         addon.mkdir(parents=True, exist_ok=True)
-        (addon / "LeeroyzanLink.toc").write_text("## Version: 0.3.0\n", encoding="utf-8")
+        (addon / "Leeroylink.toc").write_text("## Version: 0.3.0\n", encoding="utf-8")
         self.assertEqual(lz.write_link_data(str(wow), "_forever_", self.PAYLOAD), "written")
         later = dict(self.PAYLOAD, generated=1794399999)
         self.assertEqual(lz.write_link_data(str(wow), "_forever_", later), "unchanged")
         changed = dict(self.PAYLOAD, managed=["Questie"])
         self.assertEqual(lz.write_link_data(str(wow), "_forever_", changed), "written")
+
+
+class RenameTests(unittest.TestCase):
+    """Leeroyzan Link (bis 0.3.2, Ordner LeeroyzanLink) → Leeroylink: Daten bleiben erhalten."""
+
+    def test_migration(self):
+        wow = TMP / "rename" / "World of Warcraft"
+        acc = wow / "_forever_" / "WTF" / "Account"
+        for name, text in (("1#1", '\nLeeroyzanLinkDB = {\n["global"] = {\n["sessionLog"] = {\n},\n["chars"] = {\n["Rosenbert"] = {\n["level"] = 23,\n},\n},\n},\n}\n'),
+                           ("2#1", 'LeeroyzanLinkDB = {\n["global"] = {\n},\n}\n')):
+            (acc / name / "SavedVariables").mkdir(parents=True)
+            (acc / name / "SavedVariables" / "LeeroyzanLink.lua").write_bytes(text.encode("utf-8"))
+        # account 2 already uses the new addon: its new file must stay as it is
+        (acc / "2#1" / "SavedVariables" / "Leeroylink.lua").write_text("LeeroylinkDB = {}\n", encoding="utf-8")
+        old = wow / "_forever_" / "Interface" / "AddOns" / "LeeroyzanLink"
+        old.mkdir(parents=True)
+        (old / "LeeroyzanLink.toc").write_text("## Version: 0.3.2\n", encoding="utf-8")
+        root = str(wow)
+        # before switching, Leeroyzan still reads the old file
+        files = lz.link_savedvariables(root, "_forever_")
+        self.assertEqual([f.name for f in files], ["LeeroyzanLink.lua", "Leeroylink.lua"])
+        self.assertEqual(lz.read_link_db(files[0])["global"]["chars"]["Rosenbert"]["level"], 23)
+        self.assertEqual(lz.old_link_dir(root, "_forever_"), old)
+
+        res = lz.migrate_link_addon(root, "_forever_")
+        self.assertEqual((res["copied"], res["skipped"]), (["1#1"], ["2#1"]))
+        new = acc / "1#1" / "SavedVariables" / "Leeroylink.lua"
+        db = lz.parse_lua_savedvariables(new.read_text(encoding="utf-8"))
+        self.assertEqual(db["LeeroylinkDB"]["global"]["chars"]["Rosenbert"]["level"], 23)
+        self.assertTrue((acc / "1#1" / "SavedVariables" / "LeeroyzanLink.lua").is_file())   # old file untouched
+        self.assertEqual((acc / "2#1" / "SavedVariables" / "Leeroylink.lua").read_text(encoding="utf-8"), "LeeroylinkDB = {}\n")
+        self.assertFalse(old.exists())
+        inst = lz.installed_link_dir(root, "_forever_")
+        self.assertEqual(inst.name, "Leeroylink")
+        self.assertEqual(res["version"], lz.link_version(lz.bundled_link_dir()))
+        self.assertIsNone(lz.old_link_dir(root, "_forever_"))
+        self.assertEqual([f.name for f in lz.link_savedvariables(root, "_forever_")], ["Leeroylink.lua", "Leeroylink.lua"])
+        again = lz.migrate_link_savedvariables(root, "_forever_")      # second run changes nothing
+        self.assertEqual(again["copied"], [])
 
 
 @unittest.skipIf(run_addon_test is None, "lupa not installed")
@@ -238,11 +277,11 @@ class GameDataTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         sv = TMP / "sv_state.lua"
-        f1, text, now = run_addon_test.run(ROOT / "LeeroyzanLink", 1, None)
+        f1, text, now = run_addon_test.run(ROOT / "Leeroylink", 1, None)
         sv.write_text(text, encoding="utf-8")
-        f2, text, _ = run_addon_test.run(ROOT / "LeeroyzanLink", 2, sv, start_now=now + 15)
+        f2, text, _ = run_addon_test.run(ROOT / "Leeroylink", 2, sv, start_now=now + 15)
         assert f1 + f2 == 0
-        db = lz.parse_lua_savedvariables(text)["LeeroyzanLinkDB"]
+        db = lz.parse_lua_savedvariables(text)["LeeroylinkDB"]
         cls.state = lz.link_state_from_dbs([("acc#1", db)])
         cls.sessions = lz.sessions_in_db(db, "_forever_", "acc#1")
 

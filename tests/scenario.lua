@@ -17,8 +17,8 @@ local function check(cond, msg)
 end
 
 STUB.loadAddon(ADDON_DIR)
-local LZ = _G.LeeroyzanLink
-STUB.fire("ADDON_LOADED", "LeeroyzanLink")
+local LZ = _G.Leeroylink
+STUB.fire("ADDON_LOADED", "Leeroylink")
 STUB.fire("PLAYER_LOGIN")
 STUB.fire("PLAYER_ENTERING_WORLD", PART == 1, PART ~= 1)
 STUB.advance(2)
@@ -237,7 +237,7 @@ if PART == 1 then
 	check(K.n == n0 + 2, "kills without combat log: " .. (K.n - n0))
 	check(K.elite == elite0 + 1 and K.mobs["Kobold-Tunnelgräber"].n == 1 and K.mobs["Graue Ratte"].n == 1, "kills without combat log classified")
 	local own = 0
-	for _, e in pairs(LZ.gdb.errors) do if e.addon == "LeeroyzanLink" then own = own + 1 end end
+	for _, e in pairs(LZ.gdb.errors) do if e.addon == "Leeroylink" then own = own + 1 end end
 	check(own == 0, "no errors from protected values")
 
 	-- a handler that fails is logged once, silently, and the others keep working
@@ -248,12 +248,12 @@ if PART == 1 then
 	GetSubZoneText = realSub
 	local logged = 0
 	for sig, e in pairs(LZ.gdb.errors) do
-		if e.addon == "LeeroyzanLink" and e.msg:find("ZONE_CHANGED", 1, true) then
+		if e.addon == "Leeroylink" and e.msg:find("ZONE_CHANGED", 1, true) then
 			logged = logged + e.count
 			LZ.gdb.errors[sig] = nil          -- planted: do not count as a real error below
 		end
 	end
-	LZ.gdb.errorStats.LeeroyzanLink = nil
+	LZ.gdb.errorStats.Leeroylink = nil
 	check(logged == 1 and s.recErrors.ZONE_CHANGED == 2, "failing handler logged once: " .. logged)
 	for i = #STUB.chat, 1, -1 do if STUB.chat[i]:find("ERROR", 1, true) and STUB.chat[i]:find("boom", 1, true) then check(false, "popup for a session error") end end
 
@@ -381,7 +381,7 @@ check(okR and type(report) == "string" and report:find("Sitzung", 1, true) ~= ni
 local okS, summary = pcall(mod.Summary, mod)
 check(okS and type(summary) == "string", "summary line: " .. tostring(summary))
 for _, e in pairs(LZ.gdb.errors or {}) do
-	if e.addon == "LeeroyzanLink" then check(false, "error logged by the addon: " .. tostring(e.msg)) end
+	if e.addon == "Leeroylink" then check(false, "error logged by the addon: " .. tostring(e.msg)) end
 end
 
 print(string.format("RESULT[part %d] %d checks, %d failures", PART, checks, failures))

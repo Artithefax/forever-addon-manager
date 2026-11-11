@@ -16,7 +16,7 @@ Funktionen:
   - Download-Listen (.lzlist oder Textcode für Discord/SMS) teilen: nur Verweise, keine Dateien
   - CurseForge direkt im Manager durchsuchen (nur WoW-Addons) und installieren
   - WTF-Ordner sichern und wiederherstellen, automatisches Backup vor Updates
-  - Spielsitzungen aus dem Begleit-Addon Leeroyzan Link übernehmen, dauerhaft speichern und zusammenfassen
+  - Spielsitzungen aus dem Begleit-Addon Leeroylink übernehmen, dauerhaft speichern und zusammenfassen
   - Warnung, wenn WoW läuft; Drag & Drop (mit tkinterdnd2); Logdatei
 
 Läuft mit der Python-Standardbibliothek; tkinterdnd2 ist optional (Drag & Drop).
@@ -61,7 +61,7 @@ except Exception:                      # noqa – Paket fehlt oder Tk-Erweiterun
     HAS_DND = False
 
 APP_NAME = "Leeroyzan"
-APP_VERSION = "1.4.3"
+APP_VERSION = "1.5.0"
 USER_AGENT = f"Leeroyzan/{APP_VERSION}"
 
 # Selbst-Update über GitHub-Releases dieses Repos
@@ -1665,15 +1665,19 @@ def cleanup_self_update() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Leeroyzan Link: Spielsitzungen aus dem Begleit-Addon übernehmen und zusammenfassen
+# Leeroylink: Spielsitzungen aus dem Begleit-Addon übernehmen und zusammenfassen
 #
-# Das Addon schreibt jede Sitzung in seine SavedVariables (LeeroyzanLinkDB.global.sessionLog,
+# Das Addon schreibt jede Sitzung in seine SavedVariables (LeeroylinkDB.global.sessionLog,
 # die neuesten 30). WoW speichert die Datei beim Ausloggen und bei /reload. Leeroyzan liest sie
 # nur (schreibt nie hinein) und legt jede Sitzung dauerhaft als JSON in Leeroyzan-Data/sessions ab.
 # --------------------------------------------------------------------------- #
 
-LINK_ADDON = "LeeroyzanLink"
-LINK_DB = "LeeroyzanLinkDB"
+LINK_ADDON = "Leeroylink"
+LINK_DB = "LeeroylinkDB"
+LINK_IMPORT = "LeeroylinkImport"
+# Bis Version 0.3.2 hieß das Addon "Leeroyzan Link" (Ordner und Daten unter diesem Namen)
+OLD_LINK_ADDON = "LeeroyzanLink"
+OLD_LINK_DB = "LeeroyzanLinkDB"
 SESSION_FORMAT = 2
 YARD_M = 0.9144
 
@@ -2003,7 +2007,7 @@ def normalize_session(raw, flavor: str = "", account: str = "") -> dict | None:
 
 
 def legacy_session(raw, flavor: str = "", account: str = "") -> dict | None:
-    """Sitzungen aus Leeroyzan Link 0.1 (nur Dauer, Gold, XP, Kills)."""
+    """Sitzungen aus Leeroylink 0.1 (nur Dauer, Gold, XP, Kills)."""
     r = _map(raw)
     s = normalize_session({"char": r.get("char"), "start": r.get("start"),
                            "stop": _int(r.get("start")) + _int(r.get("duration")),
@@ -2031,7 +2035,14 @@ def link_savedvariables(root: str, flavor: str) -> list[Path]:
     base = Path(root) / flavor / "WTF" / "Account"
     if not root or not flavor or not base.is_dir():
         return []
-    return sorted(p for p in base.glob(f"*/SavedVariables/{LINK_ADDON}.lua") if p.is_file())
+    out = []
+    for acc in sorted(p for p in base.iterdir() if p.is_dir()):
+        for name in (LINK_ADDON, OLD_LINK_ADDON):      # noch nicht umgestellt: die alte Datei lesen
+            f = acc / "SavedVariables" / f"{name}.lua"
+            if f.is_file():
+                out.append(f)
+                break
+    return out
 
 
 def link_signature(root: str, flavor: str) -> tuple:
@@ -2061,7 +2072,10 @@ def session_path(flavor: str, s: dict) -> Path:
 
 def read_link_db(path: Path) -> dict:
     text = path.read_text(encoding="utf-8", errors="replace")
-    db = parse_lua_savedvariables(text).get(LINK_DB)
+    values = parse_lua_savedvariables(text)
+    db = values.get(LINK_DB)
+    if not isinstance(db, dict):
+        db = values.get(OLD_LINK_DB)
     return db if isinstance(db, dict) else {}
 
 
@@ -2208,13 +2222,67 @@ def installed_link_dir(root: str, flavor: str) -> Path | None:
     return None
 
 
-def install_link_addon(root: str, flavor: str) -> str:
+def old_link_dir(root: str, flavor: str) -> Path | None:
+    """Das Addon unter seinem alten Namen „Leeroyzan Link“ (bis 0.3.2)."""
+    if not root or not flavor:
+        return None
+    for base in (addons_dir(root, flavor), disabled_dir(root, flavor)):
+        d = base / OLD_LINK_ADDON
+        if (d / f"{OLD_LINK_ADDON}.toc").is_file():
+            return d
+    return None
+
+
+def migrate_link_savedvariables(root: str, flavor: str) -> dict:
+    """Übernimmt die Daten von „Leeroyzan Link“ einmalig für Leeroylink: kopiert je WoW-Account
+    SavedVariables/LeeroyzanLink.lua nach Leeroylink.lua (mit neuem Variablennamen). Die alte Datei
+    bleibt unverändert liegen; eine schon vorhandene neue Datei wird nie überschrieben."""
+    res = {"copied": [], "skipped": []}
+    base = Path(root) / flavor / "WTF" / "Account"
+    if not base.is_dir():
+        return res
+    for old in sorted(base.glob(f"*/SavedVariables/{OLD_LINK_ADDON}.lua")):
+        account = old.parent.parent.name
+        new = old.with_name(f"{LINK_ADDON}.lua")
+        if new.exists():
+            res["skipped"].append(account)
+            continue
+        data = old.read_bytes()
+        out, n = re.subn(rb"^" + OLD_LINK_DB.encode() + rb"\s*=", LINK_DB.encode() + b" =", data, count=1, flags=re.M)
+        if not n:
+            res["skipped"].append(account)
+            continue
+        text = out.decode("utf-8", errors="replace")
+        if not isinstance(parse_lua_savedvariables(text).get(LINK_DB), dict):     # wirft bei kaputter Datei
+            raise RuntimeError(tr("Die Daten in {0} konnten nicht gelesen werden.", str(old)))
+        tmp = new.with_name(f".{LINK_ADDON}.lua.tmp")
+        tmp.write_bytes(out)
+        os.replace(tmp, new)
+        res["copied"].append(account)
+    return res
+
+
+def migrate_link_addon(root: str, flavor: str) -> dict:
+    """„Leeroyzan Link“ → Leeroylink: Daten übernehmen, neues Addon installieren, altes Addon entfernen.
+    Nur bei geschlossenem WoW – sonst schreibt WoW beim Beenden noch einmal die alte Datei."""
+    if running_wow(root, flavor):
+        raise RuntimeError(tr("WoW läuft noch. Beende zuerst das Spiel – sonst gehen die Daten der laufenden Sitzung verloren."))
+    old = old_link_dir(root, flavor)
+    res = migrate_link_savedvariables(root, flavor)
+    base = old.parent if old else None
+    res["version"] = install_link_addon(root, flavor, base)
+    if old and old.exists():
+        shutil.rmtree(old)
+    return res
+
+
+def install_link_addon(root: str, flavor: str, base: Path | None = None) -> str:
     """Kopiert das mitgelieferte Addon in den AddOns-Ordner. Data.lua (schreibt Leeroyzan) bleibt erhalten."""
     src = bundled_link_dir()
     if not src:
         raise RuntimeError(tr("Diese Leeroyzan-Version enthält das Addon nicht."))
     current = installed_link_dir(root, flavor)
-    dest = current or (addons_dir(root, flavor) / LINK_ADDON)
+    dest = current or ((base or addons_dir(root, flavor)) / LINK_ADDON)
     dest.parent.mkdir(parents=True, exist_ok=True)
     keep = None
     if (dest / "Data.lua").is_file():
@@ -2434,7 +2502,7 @@ def session_report(s: dict) -> list[tuple[str, str]]:
     level = (tr("Stufe {0}", lv["to"]) if lv["from"] in (0, lv["to"]) else tr("Stufe {0} → {1}", lv["from"], lv["to"]))
     pairs([who, cls, level, s["realm"]])
     if s["legacy"]:
-        line(tr("Aufgezeichnet mit Leeroyzan Link 0.1 – nur Dauer, Erfahrung, Gold und Kills."), "dim")
+        line(tr("Aufgezeichnet mit Leeroylink 0.1 – nur Dauer, Erfahrung, Gold und Kills."), "dim")
     if s["resumes"]:
         line(tr("Fortgesetzt nach {0}× /reload oder kurzem Ausloggen.", s["resumes"]), "dim")
 
@@ -2832,7 +2900,7 @@ def report_plain_text(parts: list[tuple[str, str]]) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# Leeroyzan Link in beide Richtungen
+# Leeroylink in beide Richtungen
 #   Spiel -> Leeroyzan: SavedVariables (Fehler, Ladestatus, Speicher, Charaktere, Rezepte, Wunschliste)
 #   Leeroyzan -> Spiel: Data.lua im Addon-Ordner (Updates, Changelogs, Sets als Profile, Wunschliste)
 # WoW liest Data.lua beim Einloggen und bei /reload. Leeroyzan schreibt nur diese eine Datei.
@@ -2897,7 +2965,7 @@ def lua_literal(v, ind: str = "") -> str:
 def link_data_text(payload: dict) -> str:
     return ("-- Data.lua: geschrieben von Leeroyzan (Updates, Changelogs, Profile, Wunschliste).\n"
             "-- Nicht von Hand ändern – Leeroyzan überschreibt die Datei. WoW liest sie beim Einloggen und bei /reload.\n"
-            f"LeeroyzanLinkImport = {lua_literal(payload)}\n")
+            f"{LINK_IMPORT} = {lua_literal(payload)}\n")
 
 
 def write_link_data(root: str, flavor: str, payload: dict) -> str:
@@ -3344,7 +3412,7 @@ def analysis_report(sessions: list[dict], label: str) -> list[tuple[str, str]]:
     head(tr("Farmgebiete"))
     zr = zone_ranking(sessions)
     if not zr:
-        line(tr("Noch zu wenig Daten – eine Zone zählt ab 10 Minuten Spielzeit (aufgezeichnet ab Leeroyzan Link 0.3)."), "dim")
+        line(tr("Noch zu wenig Daten – eine Zone zählt ab 10 Minuten Spielzeit (aufgezeichnet ab Leeroylink 0.3)."), "dim")
     else:
         by_xp = sorted((z for z in zr if z["xp"]), key=lambda z: z["xp_h"], reverse=True)[:6]
         by_gold = sorted((z for z in zr if z["money"]), key=lambda z: z["money_h"], reverse=True)[:6]
@@ -3435,7 +3503,7 @@ def discord_payload(s: dict) -> dict:
         "description": _summary_sentence(s)[:3500],
         "color": 0xE6BB70,
         "fields": [{"name": n, "value": v or "–", "inline": True} for n, v in fields][:25],
-        "footer": {"text": f"Leeroyzan {APP_VERSION} · Leeroyzan Link"},
+        "footer": {"text": f"Leeroyzan {APP_VERSION} · Leeroylink"},
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(s["stop"])),
     }]}
 
@@ -3503,7 +3571,7 @@ def wowhead_search(query: str, edition: str) -> list[dict]:
         if not t or not name or r.get("id") is None:
             continue
         q = r.get("quality")
-        out.append({"kind": t[0], "kind_name": t[1], "id": r["id"], "name": html.unescape(str(name)),
+        out.append({"kind": t[0], "kind_name": t[1], "id": r["id"], "name": html.unescape(str(name)), "edition": edition,
                     "quality": q if isinstance(q, int) and 0 <= q < len(QUALITY_COLORS) else None,
                     "url": wowhead_url(edition, t[0], r["id"])})
     return out
@@ -3994,7 +4062,7 @@ class App(BaseTk):
 
     # ----- Aufbau ---------------------------------------------------------- #
     PAGES = [("addons", "Meine Addons"), ("discover", "Entdecken"), ("updates", "Updates"),
-             ("sessions", "Sitzungen"), ("characters", "Charaktere"), ("wowhead", "Wowhead"), ("diagnose", "Diagnose"),
+             ("sessions", "Leeroylink"), ("characters", "Charaktere"), ("wowhead", "Wowhead"), ("diagnose", "Diagnose"),
              ("share", "Teilen"), ("sets", "Sets & Backups"), ("settings", "Einstellungen")]
     TREE_SHOWN = ("status", "name", "version", "source", "update")
 
@@ -5015,7 +5083,7 @@ class App(BaseTk):
 
     def _page_sessions(self):
         t = THEME
-        page, head = self._page("sessions", tr("Leeroyzan Link"), tr("Spielsitzungen"))
+        page, head = self._page("sessions", tr("Leeroylink"), tr("Spielsitzungen"))
         right = ttk.Frame(head)
         right.pack(side="right", anchor="s")
         ttk.Button(right, text=tr("Jetzt einlesen"), command=lambda: self.import_sessions(manual=True)).pack(side="right")
@@ -5152,7 +5220,7 @@ class App(BaseTk):
         if not self.sessions_all:
             parts = [(tr("Noch keine Sitzungen") + "\n", "title"),
                      ("\n" + tr("So funktioniert es") + "\n", "head"),
-                     (tr("Leeroyzan Link zeichnet im Spiel jede Sitzung auf: Spielzeit, Erfahrung, Gold, Quests, Beute, "
+                     (tr("Leeroylink zeichnet im Spiel jede Sitzung auf: Spielzeit, Erfahrung, Gold, Quests, Beute, "
                          "Kampf (Schaden, Heilung, Hiebe, Zauber, Buffs, Tode), Strecke und Schritte, Berufe, entdeckte "
                          "Gebiete, Dungeons und Schlachtzüge sowie besiegte Gegner, Elite und Bosse.") + "\n\n", ""),
                      (tr("Sobald du dich ausloggst, schreibt WoW die Daten. Leeroyzan übernimmt sie dann automatisch, "
@@ -5246,7 +5314,7 @@ class App(BaseTk):
             for s in changed:
                 self._sess_pending[s["id"]] = s
             if res["errors"]:
-                log.warning("Leeroyzan Link: %s", "; ".join(res["errors"]))
+                log.warning("Leeroylink: %s", "; ".join(res["errors"]))
             if changed:
                 log.info("Sitzungen übernommen: %d neu, %d aktualisiert", len(res["new"]), len(res["updated"]))
                 if self.current_page == "sessions":
@@ -5255,9 +5323,9 @@ class App(BaseTk):
                 self._announce_sessions()
             elif manual:
                 if res["errors"] and not changed:
-                    self.warn(tr("Die Daten von Leeroyzan Link konnten nicht gelesen werden:\n{0}", "\n".join(res["errors"])))
+                    self.warn(tr("Die Daten von Leeroylink konnten nicht gelesen werden:\n{0}", "\n".join(res["errors"])))
                 elif res["files"] == 0:
-                    self.info(tr("Noch keine Daten von Leeroyzan Link gefunden. WoW schreibt sie beim Ausloggen und bei /reload."))
+                    self.info(tr("Noch keine Daten von Leeroylink gefunden. WoW schreibt sie beim Ausloggen und bei /reload."))
                 elif not changed:
                     self.info(tr("Keine neuen Sitzungen."))
                 else:
@@ -5303,7 +5371,7 @@ class App(BaseTk):
 
     # Addon installieren ------------------------------------------------------------ #
     def update_link_state(self) -> bool:
-        """Zeigt, ob Leeroyzan Link installiert und aktuell ist. True = installiert, aber veraltet."""
+        """Zeigt, ob Leeroylink installiert und aktuell ist. True = installiert, aber veraltet."""
         if getattr(self, "link_btn", None) is None or not self.link_btn.winfo_exists():
             return False
         bundled = link_version(bundled_link_dir())
@@ -5315,17 +5383,25 @@ class App(BaseTk):
             inst = installed_link_dir(self.root_path, self.flavor)
             have = link_version(inst)
             newer = bool(bundled) and (not have or parse_version(bundled) > parse_version(have))
-            if not inst:
-                text = tr("Leeroyzan Link ist in dieser Spielversion nicht installiert. Das Addon zeichnet deine "
+            old = old_link_dir(self.root_path, self.flavor)
+            if old and bundled:
+                outdated = True
+                text = tr("Leeroyzan Link heißt jetzt Leeroylink. Beim Umstellen übernimmt Leeroyzan deine Daten aus "
+                          "dem Spiel (Charaktere, Taschen und Bank, Rezepte, Fehlerlog, Sitzungen) und ersetzt das alte "
+                          "Addon. WoW muss dafür geschlossen sein.")
+                btn = tr("Auf Leeroylink {0} umstellen", bundled)
+                inst = old
+            elif not inst:
+                text = tr("Leeroylink ist in dieser Spielversion nicht installiert. Das Addon zeichnet deine "
                           "Sitzungen im Spiel auf – ohne es bleibt diese Seite leer.")
-                btn = tr("Leeroyzan Link {0} installieren", bundled) if bundled else ""
+                btn = tr("Leeroylink {0} installieren", bundled) if bundled else ""
             elif newer:
                 outdated = True
-                text = tr("Leeroyzan Link {0} ist installiert. Version {1} liegt Leeroyzan bei und zeichnet die ganze "
+                text = tr("Leeroylink {0} ist installiert. Version {1} liegt Leeroyzan bei und zeichnet die ganze "
                           "Sitzung auf (Quests, Beute, Kampf, Strecke, Berufe, Instanzen …).", have or "?", bundled)
                 btn = tr("Auf {0} aktualisieren", bundled)
             else:
-                text = tr("Leeroyzan Link {0} ist installiert. Nach dem Ausloggen übernimmt Leeroyzan jede Sitzung "
+                text = tr("Leeroylink {0} ist installiert. Nach dem Ausloggen übernimmt Leeroyzan jede Sitzung "
                           "automatisch und fasst sie hier zusammen.", have or "?")
                 times = []
                 for f in link_savedvariables(self.root_path, self.flavor):
@@ -5348,42 +5424,66 @@ class App(BaseTk):
         return outdated
 
     def install_link(self):
-        if not self.ready(modifies=True):
+        migrate = bool(self.root_path and self.flavor and old_link_dir(self.root_path, self.flavor))
+        if not self.ready(modifies=not migrate):
             return
         root, flavor = self.root_path, self.flavor
+        if migrate:
+            if running_wow(root, flavor):
+                self.warn(tr("WoW läuft noch. Beende zuerst das Spiel – sonst gehen die Daten der laufenden Sitzung verloren."))
+                return
+
+            def migrated(res):
+                log.info("Leeroyzan Link → Leeroylink %s (%s): Daten übernommen %s, übersprungen %s",
+                         res["version"], flavor, res["copied"], res["skipped"])
+                self.dismiss("link")
+                self.refresh()
+                self.update_link_state()
+                self.import_sessions()
+                self.notify(tr("Leeroyzan Link ist jetzt Leeroylink {0}. Deine Daten sind übernommen – beim nächsten "
+                               "Start von WoW lädt das neue Addon.", res["version"]), "ok", timeout=30000)
+
+            self.run_bg(tr("Stelle auf Leeroylink um"), lambda: migrate_link_addon(root, flavor), migrated)
+            return
 
         def done(version):
-            log.info("Leeroyzan Link %s installiert (%s)", version, flavor)
+            log.info("Leeroylink %s installiert (%s)", version, flavor)
             self.dismiss("link")
             self.refresh()
             self.update_link_state()
-            self.notify(tr("Leeroyzan Link {0} ist installiert. Starte WoW neu (oder logge dich neu ein), damit das "
+            self.notify(tr("Leeroylink {0} ist installiert. Starte WoW neu (oder logge dich neu ein), damit das "
                            "Addon geladen wird.", version), "ok", timeout=30000)
 
-        self.run_bg(tr("Installiere Leeroyzan Link"), lambda: install_link_addon(root, flavor), done)
+        self.run_bg(tr("Installiere Leeroylink"), lambda: install_link_addon(root, flavor), done)
 
     def _sessions_flavor_changed(self):
         self._sess_sig = None
         self._sess_pending.clear()
         self.link_state = empty_link_state()
         outdated = self.update_link_state()
-        if outdated and not self._link_hint_shown:
+        if outdated and not self._link_hint_shown and old_link_dir(self.root_path, self.flavor):
+            self._link_hint_shown = True
+            self.notify(tr("Leeroyzan Link heißt jetzt Leeroylink. Ein Klick stellt um und übernimmt deine Daten "
+                           "(WoW muss dafür geschlossen sein)."),
+                        "update", [(tr("Umstellen"), self.install_link),
+                                   (tr("Leeroylink"), lambda: self.show_page("sessions"))], key="link")
+        elif outdated and not self._link_hint_shown:
             self._link_hint_shown = True
             inst = installed_link_dir(self.root_path, self.flavor)
-            self.notify(tr("Leeroyzan Link {0} ist verfügbar (installiert: {1}). Die neue Version zeichnet ganze "
+            self.notify(tr("Leeroylink {0} ist verfügbar (installiert: {1}). Die neue Version zeichnet ganze "
                            "Spielsitzungen für Leeroyzan auf.", link_version(bundled_link_dir()), link_version(inst) or "?"),
                         "update", [(tr("Aktualisieren"), self.install_link),
-                                   (tr("Sitzungen"), lambda: self.show_page("sessions"))], key="link")
+                                   (tr("Leeroylink"), lambda: self.show_page("sessions"))], key="link")
         if self.current_page == "sessions":
             self.refresh_sessions_page()
         self.import_sessions()
 
-    # --- Leeroyzan Link: Daten fürs Spiel (Data.lua) ------------------------------------ #
+    # --- Leeroylink: Daten fürs Spiel (Data.lua) ------------------------------------ #
     def link_news(self) -> list:
         return self.cfg.setdefault("link_news", {}).setdefault(self.flavor, [])
 
     def record_link_news(self, results):
-        """Nach Updates den Changelog merken – Leeroyzan Link zeigt ihn beim nächsten Login (neueste 20)."""
+        """Nach Updates den Changelog merken – Leeroylink zeigt ihn beim nächsten Login (neueste 20)."""
         news = self.link_news()
         for repo, info, asset, folders in results:
             nid = f"{repo}@{info.get('tag', '')}"[:80]
@@ -5428,10 +5528,10 @@ class App(BaseTk):
         try:
             res = write_link_data(self.root_path, self.flavor, self.build_link_payload())
         except OSError as e:
-            log.warning("Data.lua für Leeroyzan Link: %s", e)
+            log.warning("Data.lua für Leeroylink: %s", e)
             return
         if res == "written":
-            log.info("Data.lua für Leeroyzan Link geschrieben (%s)", self.flavor)
+            log.info("Data.lua für Leeroylink geschrieben (%s)", self.flavor)
 
     def _link_state_changed(self):
         """Neue Daten aus dem Spiel: Seiten auffrischen, Hinweise zeigen, Data.lua anpassen."""
@@ -5484,7 +5584,7 @@ class App(BaseTk):
     DIAG_VIEWS = [("errors", "Fehler"), ("load", "Ladeprobleme"), ("memory", "Speicher"), ("wish", "Wunschliste")]
 
     def _page_diagnose(self):
-        page, head = self._page("diagnose", tr("Leeroyzan Link"), tr("Diagnose aus dem Spiel"))
+        page, head = self._page("diagnose", tr("Leeroylink"), tr("Diagnose aus dem Spiel"))
         right = ttk.Frame(head)
         right.pack(side="right", anchor="s")
         ttk.Button(right, text=tr("Jetzt einlesen"), command=lambda: self.import_sessions(manual=True)).pack(side="right")
@@ -5621,14 +5721,14 @@ class App(BaseTk):
         view = self.diag_view
         if not st["accounts"]:
             add(tr("Noch keine Daten aus dem Spiel") + "\n", "title")
-            add(tr("Leeroyzan Link schreibt Fehler, Ladestatus, Speicherverbrauch, Charaktere und deine Wunschliste "
-                   "beim Ausloggen und bei /reload. Installiere das Addon auf der Seite „Sitzungen“ und logge dich "
+            add(tr("Leeroylink schreibt Fehler, Ladestatus, Speicherverbrauch, Charaktere und deine Wunschliste "
+                   "beim Ausloggen und bei /reload. Installiere das Addon auf der Seite „Leeroylink“ und logge dich "
                    "einmal ein und wieder aus.") + "\n", "")
         elif view == "errors":
             if row is None:
                 add(tr("Lua-Fehler aus dem Spiel") + "\n", "title")
                 n_cur = sum(1 for r in self._diag_rows if r["current"])
-                add(tr("Leeroyzan Link ordnet jeden Lua-Fehler dem verursachenden Addon zu und zählt ihn pro Version. "
+                add(tr("Leeroylink ordnet jeden Lua-Fehler dem verursachenden Addon zu und zählt ihn pro Version. "
                        "Gelb markiert: Fehler in der Version, die jetzt installiert ist.") + "\n\n", "dim")
                 if not self._diag_rows:
                     add(tr("Keine Fehler – alles sauber.") + "\n", "ok")
@@ -5744,7 +5844,7 @@ class App(BaseTk):
 
     # --- Charaktere -------------------------------------------------------------------------- #
     def _page_characters(self):
-        page, head = self._page("characters", tr("Leeroyzan Link"), tr("Charaktere"))
+        page, head = self._page("characters", tr("Leeroylink"), tr("Charaktere"))
         right = ttk.Frame(head)
         right.pack(side="right", anchor="s")
         ttk.Label(right, textvariable=self.chars_total_var, style="Body.TLabel").pack(side="right")
@@ -5845,7 +5945,7 @@ class App(BaseTk):
                 c = None
         if c is None:
             add(tr("Noch keine Charaktere") + "\n", "title")
-            add(tr("Leeroyzan Link speichert Klasse, Stufe, Gold, Berufe sowie Taschen- und Bankinhalt jedes Charakters, "
+            add(tr("Leeroylink speichert Klasse, Stufe, Gold, Berufe sowie Taschen- und Bankinhalt jedes Charakters, "
                    "mit dem du dich einloggst (Bank: sobald du sie einmal öffnest).") + "\n", "")
         else:
             cls = tr(CLASS_NAMES.get(c["class"], c["class"].title())) if c["class"] else ""
@@ -5919,7 +6019,7 @@ class App(BaseTk):
         except (ValueError, tk.TclError):
             qty = 1
         if not c or not recipe or recipe not in c["recipes"].get(prof, {}).get("list", {}):
-            add(tr("Öffne im Spiel einmal dein Berufsfenster – dann merkt sich Leeroyzan Link die Rezepte, und hier "
+            add(tr("Öffne im Spiel einmal dein Berufsfenster – dann merkt sich Leeroylink die Rezepte, und hier "
                    "entsteht die Einkaufsliste über alle Charaktere.") + "\n", "dim")
         else:
             res = shopping_list(self.link_state, c["key"], prof, recipe, qty)
@@ -6167,6 +6267,15 @@ class App(BaseTk):
         left = ttk.Frame(body, width=470)
         left.pack(side="left", fill="y")
         left.pack_propagate(False)
+        self.wh_mode = "results"
+        self.wh_rows: list[dict] = []
+        modes = ttk.Frame(left)
+        modes.pack(fill="x", pady=(0, 6))
+        self.wh_mode_btns = {}
+        for key in ("results", "favs"):
+            b = ttk.Button(modes, command=lambda k=key: self.wh_set_mode(k))
+            b.pack(side="left", padx=(0 if key == "results" else 6, 0))
+            self.wh_mode_btns[key] = b
         frame, self.wh_tree = self._list(left, (("name", tr("Name")), ("kind", tr("Art")), ("id", "ID")),
                                          (300, 100, 60), stretch=("name",))
         frame.pack(fill="both", expand=True)
@@ -6175,6 +6284,7 @@ class App(BaseTk):
         self.wh_tree.bind("<<TreeviewSelect>>", lambda e: self._wh_show())
         self.wh_tree.bind("<Double-1>", lambda e: self.wh_open())
         self.wh_tree.bind("<Return>", lambda e: self.wh_open())
+        self.wh_tree.bind("<Delete>", lambda e: self.wh_mode == "favs" and self.wh_toggle_fav())
         box = self._card_box(body, pady=(0, 0), side="left", fill="both", expand=True, padx=(14, 0), title=tr("Vorschau"))
         tf, self.wh_text = self._text(box, height=8)
         tf.pack(fill="both", expand=True)
@@ -6186,6 +6296,9 @@ class App(BaseTk):
         self.wh_open_btn.pack(side="left")
         self.wh_copy_btn = ttk.Button(btns, text=tr("Link kopieren"), command=self.wh_copy, state="disabled")
         self.wh_copy_btn.pack(side="left", padx=(6, 0))
+        self.wh_fav_btn = ttk.Button(btns, text=tr("☆ Favorit"), command=self.wh_toggle_fav, state="disabled")
+        self.wh_fav_btn.pack(side="right")
+        self._wh_mode_buttons()
         self._set_text(self.wh_text, parts=[(tr("Wähle links einen Treffer, um die Kurzinfo zu sehen. "
                                                  "Doppelklick öffnet die Seite auf Wowhead."), "dim")])
         self.wh_text.configure(state="disabled")
@@ -6218,14 +6331,18 @@ class App(BaseTk):
             return
         self.wh_seq += 1
         seq, edition = self.wh_seq, self._wh_edition_key()
+        if self.wh_mode != "results":
+            self.wh_mode = "results"
+            self._wh_mode_buttons()
         self.wh_info_var.set(tr("Suche „{0}“ …", q))
         self.run_quiet(lambda: wowhead_search(q, edition), lambda res, err: self._wh_results(seq, q, res, err))
 
     def _wh_results(self, seq, q, res, err):
         if seq != self.wh_seq:
             return                              # eine neuere Suche läuft schon
-        self.wh_tree.delete(*self.wh_tree.get_children())
         self.wh_results = res or []
+        self.wh_mode = "results"
+        self._wh_fill(self.wh_results)
         if err:
             log.warning("Wowhead-Suche: %s", err)
             self.wh_info_var.set(tr("Wowhead ist gerade nicht erreichbar ({0}). „Auf Wowhead suchen ↗“ öffnet die Suche im Browser.",
@@ -6234,11 +6351,6 @@ class App(BaseTk):
         if not self.wh_results:
             self.wh_info_var.set(tr("Nichts gefunden für „{0}“.", q))
             return
-        for i, r in enumerate(self.wh_results):
-            tags = [f"q{r['quality']}"] if r["quality"] is not None else []
-            if i % 2:
-                tags.append("odd")
-            self.wh_tree.insert("", "end", iid=str(i), values=(r["name"], tr(r["kind_name"]), r["id"]), tags=tags)
         self.wh_info_var.set(plural(len(self.wh_results), "{0} Treffer", "{0} Treffer") + "  ·  " +
                              tr("Doppelklick öffnet die Seite auf Wowhead."))
         self.wh_tree.selection_set("0")
@@ -6248,7 +6360,7 @@ class App(BaseTk):
         if not sel:
             return None
         try:
-            return self.wh_results[int(sel[0])]
+            return self.wh_rows[int(sel[0])]
         except (ValueError, IndexError):
             return None
 
@@ -6257,9 +6369,10 @@ class App(BaseTk):
         state = "normal" if r else "disabled"
         self.wh_open_btn.configure(state=state)
         self.wh_copy_btn.configure(state=state)
+        self.wh_fav_btn.configure(state=state, text=tr("★ Favorit entfernen") if r and self._wh_is_fav(r) else tr("☆ Favorit"))
         if not r:
             return
-        key = (self._wh_edition_key(), r["kind"], r["id"])
+        key = (r.get("edition", self._wh_edition_key()), r["kind"], r["id"])
         self._wh_render(r, self.wh_tips.get(key), loading=key not in self.wh_tips)
         if key in self.wh_tips or r["kind"] not in WOWHEAD_TOOLTIP_TYPES:
             return
@@ -6301,6 +6414,84 @@ class App(BaseTk):
             self.clipboard_clear()
             self.clipboard_append(r["url"])
             self.set_status(tr("Link kopiert: {0}", r["url"]))
+
+    # Favoriten (in der Leeroyzan-Konfiguration, je Eintrag mit seiner Wowhead-Ausgabe)
+    def _wh_favs(self) -> list:
+        favs = self.cfg.get("wowhead_favs")
+        if not isinstance(favs, list):
+            favs = self.cfg["wowhead_favs"] = []
+        return favs
+
+    @staticmethod
+    def _wh_key(r) -> tuple:
+        return (r.get("edition", ""), r.get("kind"), r.get("id"))
+
+    def _wh_is_fav(self, r) -> bool:
+        k = self._wh_key(r)
+        return any(self._wh_key(f) == k for f in self._wh_favs())
+
+    def _wh_fill(self, rows):
+        self.wh_rows = list(rows)
+        self.wh_tree.delete(*self.wh_tree.get_children())
+        favs = {self._wh_key(f) for f in self._wh_favs()}
+        editions = dict(WOWHEAD_EDITIONS)
+        for i, r in enumerate(self.wh_rows):
+            tags = [f"q{r['quality']}"] if r.get("quality") is not None else []
+            if i % 2:
+                tags.append("odd")
+            name = r["name"]
+            if self.wh_mode == "results" and self._wh_key(r) in favs:
+                name = "★ " + name
+            kind = tr(r["kind_name"])
+            if self.wh_mode == "favs" and r.get("edition", "") != self._wh_edition_key():
+                kind += " · " + tr(editions.get(r.get("edition", ""), "?")).split(" (")[0].replace(" Classic", "")
+            self.wh_tree.insert("", "end", iid=str(i), values=(name, kind, r["id"]), tags=tags)
+        self._wh_mode_buttons()
+        self._wh_show()
+
+    def _wh_mode_buttons(self):
+        n = len(self._wh_favs())
+        self.wh_mode_btns["results"].configure(text=tr("Treffer ({0})", len(self.wh_results)),
+                                               style="ToggleOn.TButton" if self.wh_mode == "results" else "ToggleOff.TButton")
+        self.wh_mode_btns["favs"].configure(text=tr("★ Favoriten ({0})", n),
+                                            style="ToggleOn.TButton" if self.wh_mode == "favs" else "ToggleOff.TButton")
+
+    def wh_set_mode(self, mode: str):
+        self.wh_mode = mode
+        if mode == "favs":
+            self._wh_fill(self._wh_favs())
+            self.wh_info_var.set(tr("Doppelklick öffnet die Seite auf Wowhead, Entf entfernt den Favoriten.") if self.wh_rows else
+                                 tr("Noch keine Favoriten. Wähle einen Treffer und klicke auf „☆ Favorit“."))
+        else:
+            self._wh_fill(self.wh_results)
+            self.wh_info_var.set(plural(len(self.wh_results), "{0} Treffer", "{0} Treffer") + "  ·  " +
+                                 tr("Doppelklick öffnet die Seite auf Wowhead.") if self.wh_results else
+                                 tr("Tippe einen Namen ein – Gegenstand, NPC, Quest, Zauber, Zone …"))
+        if self.wh_rows:
+            self.wh_tree.selection_set("0")
+
+    def wh_toggle_fav(self):
+        r = self._wh_selected()
+        if not r:
+            return
+        favs = self._wh_favs()
+        k = self._wh_key(r)
+        sel = self.wh_tree.selection()
+        if self._wh_is_fav(r):
+            favs[:] = [f for f in favs if self._wh_key(f) != k]
+            self.set_status(tr("Aus den Favoriten entfernt: {0}", r["name"]))
+        else:
+            favs.insert(0, {x: r.get(x) for x in ("kind", "kind_name", "id", "name", "quality", "edition", "url")})
+            self.set_status(tr("Zu den Favoriten hinzugefügt: {0}", r["name"]))
+        save_config(self.cfg)
+        if self.wh_mode == "favs":
+            self.wh_set_mode("favs")
+            if sel and self.wh_rows:
+                self.wh_tree.selection_set(str(min(int(sel[0]), len(self.wh_rows) - 1)))
+        else:
+            self._wh_fill(self.wh_rows)
+            if sel:
+                self.wh_tree.selection_set(sel[0])
 
     def wh_open_search(self):
         q = self._wh_query()
@@ -8315,7 +8506,7 @@ class App(BaseTk):
                     if r.startswith(CF_PREFIX):
                         folders = cf_install_asset(asset, info, root, flavor, cf_key)
                         if not info.get("notes") and asset.get("file_id"):
-                            try:          # Changelog für Leeroyzan Link (Anzeige im Spiel)
+                            try:          # Changelog für Leeroylink (Anzeige im Spiel)
                                 info["notes"] = cf_changelog(asset.get("mod_id") or info.get("mod_id"), asset["file_id"], cf_key)
                             except Exception:  # noqa – nur ein Extra
                                 pass
@@ -9873,7 +10064,7 @@ TRANSLATIONS["en"] = {
         " – will be installed automatically as soon as it is ready.",
     "Lade Manager {0}":
         "Downloading manager {0}",
-    # Leeroyzan Link: Spielsitzungen
+    # Leeroylink: Spielsitzungen
     "Diese Leeroyzan-Version enthält das Addon nicht.":
         "This Leeroyzan version does not include the addon.",
     "{0} h {1:02d} min":
@@ -9936,8 +10127,8 @@ TRANSLATIONS["en"] = {
         "Level {0}",
     "Stufe {0} → {1}":
         "Level {0} → {1}",
-    "Aufgezeichnet mit Leeroyzan Link 0.1 – nur Dauer, Erfahrung, Gold und Kills.":
-        "Recorded with Leeroyzan Link 0.1 – duration, experience, gold and kills only.",
+    "Aufgezeichnet mit Leeroylink 0.1 – nur Dauer, Erfahrung, Gold und Kills.":
+        "Recorded with Leeroylink 0.1 – duration, experience, gold and kills only.",
     "Fortgesetzt nach {0}× /reload oder kurzem Ausloggen.":
         "Continued after {0}× /reload or a short logout.",
     "Zusammenfassung":
@@ -10188,8 +10379,8 @@ TRANSLATIONS["en"] = {
         "Characters",
     "{0} Kills":
         "{0} kills",
-    "Leeroyzan Link":
-        "Leeroyzan Link",
+    "Leeroylink":
+        "Leeroylink",
     "Spielsitzungen":
         "Play sessions",
     "Jetzt einlesen":
@@ -10212,8 +10403,8 @@ TRANSLATIONS["en"] = {
         "No sessions yet",
     "So funktioniert es":
         "How it works",
-    "Leeroyzan Link zeichnet im Spiel jede Sitzung auf: Spielzeit, Erfahrung, Gold, Quests, Beute, Kampf (Schaden, Heilung, Hiebe, Zauber, Buffs, Tode), Strecke und Schritte, Berufe, entdeckte Gebiete, Dungeons und Schlachtzüge sowie besiegte Gegner, Elite und Bosse.":
-        "Leeroyzan Link records every session in the game: play time, experience, gold, quests, loot, combat (damage, healing, swings, spells, buffs, deaths), distance and steps, professions, discovered areas, dungeons and raids, and defeated enemies, elites and bosses.",
+    "Leeroylink zeichnet im Spiel jede Sitzung auf: Spielzeit, Erfahrung, Gold, Quests, Beute, Kampf (Schaden, Heilung, Hiebe, Zauber, Buffs, Tode), Strecke und Schritte, Berufe, entdeckte Gebiete, Dungeons und Schlachtzüge sowie besiegte Gegner, Elite und Bosse.":
+        "Leeroylink records every session in the game: play time, experience, gold, quests, loot, combat (damage, healing, swings, spells, buffs, deaths), distance and steps, professions, discovered areas, dungeons and raids, and defeated enemies, elites and bosses.",
     "Sobald du dich ausloggst, schreibt WoW die Daten. Leeroyzan übernimmt sie dann automatisch, speichert sie dauerhaft und fasst jede Sitzung hier zusammen.":
         "As soon as you log out, WoW writes the data. Leeroyzan then imports it automatically, keeps it and summarizes every session here.",
     "Ein /reload oder kurzes Ausloggen (unter 15 Minuten) mit demselben Charakter zählt zur selben Sitzung. Im Spiel zeigt /lz sitzung die laufende Sitzung.":
@@ -10230,10 +10421,10 @@ TRANSLATIONS["en"] = {
         "Session deleted.",
     "Sitzungen konnten nicht eingelesen werden:\n{0}":
         "Sessions could not be read:\n{0}",
-    "Die Daten von Leeroyzan Link konnten nicht gelesen werden:\n{0}":
-        "The Leeroyzan Link data could not be read:\n{0}",
-    "Noch keine Daten von Leeroyzan Link gefunden. WoW schreibt sie beim Ausloggen und bei /reload.":
-        "No Leeroyzan Link data found yet. WoW writes it when you log out and on /reload.",
+    "Die Daten von Leeroylink konnten nicht gelesen werden:\n{0}":
+        "The Leeroylink data could not be read:\n{0}",
+    "Noch keine Daten von Leeroylink gefunden. WoW schreibt sie beim Ausloggen und bei /reload.":
+        "No Leeroylink data found yet. WoW writes it when you log out and on /reload.",
     "Keine neuen Sitzungen.":
         "No new sessions.",
     "{0} übernommen. WoW läuft noch – die laufende Sitzung wird nach dem Ausloggen ergänzt.":
@@ -10246,26 +10437,26 @@ TRANSLATIONS["en"] = {
         "View summary",
     "Wähle zuerst den WoW-Ordner – dann zeigt Leeroyzan hier deine Spielsitzungen.":
         "Choose the WoW folder first – then Leeroyzan shows your play sessions here.",
-    "Leeroyzan Link ist in dieser Spielversion nicht installiert. Das Addon zeichnet deine Sitzungen im Spiel auf – ohne es bleibt diese Seite leer.":
-        "Leeroyzan Link is not installed for this game version. The addon records your sessions in the game – without it this page stays empty.",
-    "Leeroyzan Link {0} installieren":
-        "Install Leeroyzan Link {0}",
-    "Leeroyzan Link {0} ist installiert. Version {1} liegt Leeroyzan bei und zeichnet die ganze Sitzung auf (Quests, Beute, Kampf, Strecke, Berufe, Instanzen …).":
-        "Leeroyzan Link {0} is installed. Version {1} comes with Leeroyzan and records the whole session (quests, loot, combat, distance, professions, instances …).",
+    "Leeroylink ist in dieser Spielversion nicht installiert. Das Addon zeichnet deine Sitzungen im Spiel auf – ohne es bleibt diese Seite leer.":
+        "Leeroylink is not installed for this game version. The addon records your sessions in the game – without it this page stays empty.",
+    "Leeroylink {0} installieren":
+        "Install Leeroylink {0}",
+    "Leeroylink {0} ist installiert. Version {1} liegt Leeroyzan bei und zeichnet die ganze Sitzung auf (Quests, Beute, Kampf, Strecke, Berufe, Instanzen …).":
+        "Leeroylink {0} is installed. Version {1} comes with Leeroyzan and records the whole session (quests, loot, combat, distance, professions, instances …).",
     "Auf {0} aktualisieren":
         "Update to {0}",
-    "Leeroyzan Link {0} ist installiert. Nach dem Ausloggen übernimmt Leeroyzan jede Sitzung automatisch und fasst sie hier zusammen.":
-        "Leeroyzan Link {0} is installed. After you log out, Leeroyzan imports every session automatically and summarizes it here.",
+    "Leeroylink {0} ist installiert. Nach dem Ausloggen übernimmt Leeroyzan jede Sitzung automatisch und fasst sie hier zusammen.":
+        "Leeroylink {0} is installed. After you log out, Leeroyzan imports every session automatically and summarizes it here.",
     "Daten zuletzt geschrieben: {0}.":
         "Data last written: {0}.",
     "Das Addon ist zurzeit deaktiviert – aktiviere es unter „Meine Addons“.":
         "The addon is currently disabled – enable it under \"My addons\".",
-    "Leeroyzan Link {0} ist installiert. Starte WoW neu (oder logge dich neu ein), damit das Addon geladen wird.":
-        "Leeroyzan Link {0} is installed. Restart WoW (or log in again) so the addon gets loaded.",
-    "Installiere Leeroyzan Link":
-        "Installing Leeroyzan Link",
-    "Leeroyzan Link {0} ist verfügbar (installiert: {1}). Die neue Version zeichnet ganze Spielsitzungen für Leeroyzan auf.":
-        "Leeroyzan Link {0} is available (installed: {1}). The new version records whole play sessions for Leeroyzan.",
+    "Leeroylink {0} ist installiert. Starte WoW neu (oder logge dich neu ein), damit das Addon geladen wird.":
+        "Leeroylink {0} is installed. Restart WoW (or log in again) so the addon gets loaded.",
+    "Installiere Leeroylink":
+        "Installing Leeroylink",
+    "Leeroylink {0} ist verfügbar (installiert: {1}). Die neue Version zeichnet ganze Spielsitzungen für Leeroyzan auf.":
+        "Leeroylink {0} is available (installed: {1}). The new version records whole play sessions for Leeroyzan.",
     "Aktualisieren":
         "Update",
     "Sitzungen":
@@ -10406,7 +10597,7 @@ TRANSLATIONS["en"] = {
         "Demon Hunter",
     "Rufer":
         "Evoker",
-    # Leeroyzan Link: Diagnose, Charaktere, Auswertung, Discord
+    # Leeroylink: Diagnose, Charaktere, Auswertung, Discord
     "  · {0} Rezepte gespeichert":
         "  · {0} recipes stored",
     "  ← installiert":
@@ -10547,12 +10738,12 @@ TRANSLATIONS["en"] = {
         "Class",
     "Ladeprobleme":
         "Load problems",
-    "Leeroyzan Link ordnet jeden Lua-Fehler dem verursachenden Addon zu und zählt ihn pro Version. Gelb markiert: Fehler in der Version, die jetzt installiert ist.":
-        "Leeroyzan Link attributes every Lua error to the addon that caused it and counts it per version. Marked yellow: errors in the version that is installed now.",
-    "Leeroyzan Link schreibt Fehler, Ladestatus, Speicherverbrauch, Charaktere und deine Wunschliste beim Ausloggen und bei /reload. Installiere das Addon auf der Seite „Sitzungen“ und logge dich einmal ein und wieder aus.":
-        "Leeroyzan Link writes errors, load status, memory use, characters and your wishlist when you log out and on /reload. Install the addon on the \"Sessions\" page, then log in and out once.",
-    "Leeroyzan Link speichert Klasse, Stufe, Gold, Berufe sowie Taschen- und Bankinhalt jedes Charakters, mit dem du dich einloggst (Bank: sobald du sie einmal öffnest).":
-        "Leeroyzan Link stores class, level, gold, professions and the bag and bank contents of every character you log in with (bank: once you open it).",
+    "Leeroylink ordnet jeden Lua-Fehler dem verursachenden Addon zu und zählt ihn pro Version. Gelb markiert: Fehler in der Version, die jetzt installiert ist.":
+        "Leeroylink attributes every Lua error to the addon that caused it and counts it per version. Marked yellow: errors in the version that is installed now.",
+    "Leeroylink schreibt Fehler, Ladestatus, Speicherverbrauch, Charaktere und deine Wunschliste beim Ausloggen und bei /reload. Installiere das Addon auf der Seite „Leeroylink“ und logge dich einmal ein und wieder aus.":
+        "Leeroylink writes errors, load status, memory use, characters and your wishlist when you log out and on /reload. Install the addon on the \"Leeroylink\" page, then log in and out once.",
+    "Leeroylink speichert Klasse, Stufe, Gold, Berufe sowie Taschen- und Bankinhalt jedes Charakters, mit dem du dich einloggst (Bank: sobald du sie einmal öffnest).":
+        "Leeroylink stores class, level, gold, professions and the bag and bank contents of every character you log in with (bank: once you open it).",
     "Letzte Sitzung senden (Test)":
         "Send the latest session (test)",
     "Lua-Fehler aus dem Spiel":
@@ -10589,8 +10780,8 @@ TRANSLATIONS["en"] = {
         "No session to send yet.",
     "Noch nicht installiert.":
         "Not installed yet.",
-    "Noch zu wenig Daten – eine Zone zählt ab 10 Minuten Spielzeit (aufgezeichnet ab Leeroyzan Link 0.3).":
-        "Not enough data yet – a zone counts from 10 minutes of play time (recorded since Leeroyzan Link 0.3).",
+    "Noch zu wenig Daten – eine Zone zählt ab 10 Minuten Spielzeit (aufgezeichnet ab Leeroylink 0.3).":
+        "Not enough data yet – a zone counts from 10 minutes of play time (recorded since Leeroylink 0.3).",
     "Prognose":
         "Forecast",
     "Rechenzeit zuletzt: {0} ms pro Bild":
@@ -10709,8 +10900,8 @@ TRANSLATIONS["en"] = {
         "{0}/h",
     "{0}: {1} Lua-Fehler seit dem Update auf {2}. Vorherige Version wiederherstellen?":
         "{0}: {1} Lua errors since the update to {2}. Restore the previous version?",
-    "Öffne im Spiel einmal dein Berufsfenster – dann merkt sich Leeroyzan Link die Rezepte, und hier entsteht die Einkaufsliste über alle Charaktere.":
-        "Open your profession window once in the game – Leeroyzan Link then remembers the recipes, and the shopping list across all characters appears here.",
+    "Öffne im Spiel einmal dein Berufsfenster – dann merkt sich Leeroylink die Rezepte, und hier entsteht die Einkaufsliste über alle Charaktere.":
+        "Open your profession window once in the game – Leeroylink then remembers the recipes, and the shopping list across all characters appears here.",
     "Ø {0}":
         "avg. {0}",
     "„Aktion wurde durch ein Addon blockiert“ – diese Addons haben geschützte Funktionen aufgerufen:":
@@ -10750,6 +10941,32 @@ TRANSLATIONS["en"].update({
     "Retail (aktuelles WoW)": "Retail (current WoW)",
     "Objekt": "Object", "Gegenstand": "Item", "Zauber": "Spell", "Fraktion": "Faction", "Erfolg": "Achievement",
     "Ereignis": "Event", "Volk": "Race", "Fertigkeit": "Skill", "Währung": "Currency",
+})
+
+
+TRANSLATIONS["en"].update({
+    "Die Daten in {0} konnten nicht gelesen werden.": "The data in {0} could not be read.",
+    "WoW läuft noch. Beende zuerst das Spiel – sonst gehen die Daten der laufenden Sitzung verloren.":
+        "WoW is still running. Close the game first – otherwise the data of the running session gets lost.",
+    "Leeroyzan Link heißt jetzt Leeroylink. Beim Umstellen übernimmt Leeroyzan deine Daten aus dem Spiel (Charaktere, Taschen und Bank, Rezepte, Fehlerlog, Sitzungen) und ersetzt das alte Addon. WoW muss dafür geschlossen sein.":
+        "Leeroyzan Link is now called Leeroylink. When switching, Leeroyzan keeps your data from the game (characters, bags and bank, recipes, error log, sessions) and replaces the old addon. WoW has to be closed for this.",
+    "Auf Leeroylink {0} umstellen": "Switch to Leeroylink {0}",
+    "Leeroyzan Link ist jetzt Leeroylink {0}. Deine Daten sind übernommen – beim nächsten Start von WoW lädt das neue Addon.":
+        "Leeroyzan Link is now Leeroylink {0}. Your data has been kept – the new addon loads the next time you start WoW.",
+    "Stelle auf Leeroylink um": "Switching to Leeroylink",
+    "Leeroyzan Link heißt jetzt Leeroylink. Ein Klick stellt um und übernimmt deine Daten (WoW muss dafür geschlossen sein).":
+        "Leeroyzan Link is now called Leeroylink. One click switches over and keeps your data (WoW has to be closed).",
+    "Umstellen": "Switch",
+    "☆ Favorit": "☆ Favorite",
+    "★ Favorit entfernen": "★ Remove favorite",
+    "Treffer ({0})": "Results ({0})",
+    "★ Favoriten ({0})": "★ Favorites ({0})",
+    "Doppelklick öffnet die Seite auf Wowhead, Entf entfernt den Favoriten.":
+        "Double-click opens the page on Wowhead, Del removes the favorite.",
+    "Noch keine Favoriten. Wähle einen Treffer und klicke auf „☆ Favorit“.":
+        "No favorites yet. Pick a result and click \"☆ Favorite\".",
+    "Aus den Favoriten entfernt: {0}": "Removed from favorites: {0}",
+    "Zu den Favoriten hinzugefügt: {0}": "Added to favorites: {0}",
 })
 
 

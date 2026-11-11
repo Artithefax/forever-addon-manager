@@ -5,17 +5,17 @@ local failures = 0
 local function check(cond, msg) if not cond then failures = failures + 1; print("FAIL: " .. msg) end end
 
 local NS = {}
-for line in io.lines(ADDON_DIR .. "/LeeroyzanLink.toc") do
+for line in io.lines(ADDON_DIR .. "/Leeroylink.toc") do
 	line = line:gsub("\r", "")
 	if line:match("%S") and not line:match("^#") then
 		local path = (line == "Data.lua") and DATA_FILE or (ADDON_DIR .. "/" .. line:gsub("\\", "/"))
-		assert(loadfile(path))("LeeroyzanLink", NS)
+		assert(loadfile(path))("Leeroylink", NS)
 	end
 end
-local LZ = _G.LeeroyzanLink
-LeeroyzanLinkDB = { global = { wishlist = { ["details! damage meter"] = { name = "Details! Damage Meter", added = 1 },
+local LZ = _G.Leeroylink
+LeeroylinkDB = { global = { wishlist = { ["details! damage meter"] = { name = "Details! Damage Meter", added = 1 },
 	["weakauras"] = { name = "WeakAuras", added = 2 } } } }
-STUB.fire("ADDON_LOADED", "LeeroyzanLink")
+STUB.fire("ADDON_LOADED", "Leeroylink")
 STUB.fire("PLAYER_LOGIN")
 STUB.fire("PLAYER_ENTERING_WORLD", true, false)
 STUB.advance(2)
@@ -30,8 +30,8 @@ if imp then
 end
 local names = LZ.modules.Profiles:Names()
 check(#names == 1 and names[1].source == "leeroyzan", "profile from Leeroyzan listed")
-check(LeeroyzanLinkDB.global.wishlist["details! damage meter"] == nil, "installed wishlist entry resolved")
-check(LeeroyzanLinkDB.global.wishlist["weakauras"] ~= nil, "open wishlist entry kept")
+check(LeeroylinkDB.global.wishlist["details! damage meter"] == nil, "installed wishlist entry resolved")
+check(LeeroylinkDB.global.wishlist["weakauras"] ~= nil, "open wishlist entry kept")
 local ok, rep = pcall(LZ.modules.Updates.Report, LZ.modules.Updates)
 check(ok and rep:find("Questie", 1, true) and rep:find("Neue Quests", 1, true), "updates page shows it: " .. tostring(rep))
 for _, line in ipairs(STUB.chat) do if line:find("ERROR") then print(line); failures = failures + 1 end end
