@@ -5,7 +5,7 @@
 --
 -- A /reload or logging back in with the same character within a few minutes
 -- continues the same session. Sessions are stored in
--- LeeroyzanLinkDB.global.sessionLog (newest MAX_SESSIONS); WoW writes that file on
+-- LeeroylinkDB.global.sessionLog (newest MAX_SESSIONS); WoW writes that file on
 -- logout and Leeroyzan then imports, keeps and summarizes them.
 local ADDON, LZ = ...
 local T, P, C = LZ.T, LZ.P, LZ.C
@@ -135,7 +135,7 @@ local function onError(event, err)
 		local log = LZ.modules.ErrorLog
 		if log and log.enabled and log.Record then
 			-- the path in front lets the error log attribute it to this addon
-			pcall(log.Record, log, "Interface\\AddOns\\LeeroyzanLink\\Modules\\Session.lua (" .. event .. "): " .. tostring(err),
+			pcall(log.Record, log, "Interface\\AddOns\\Leeroylink\\Modules\\Session.lua (" .. event .. "): " .. tostring(err),
 				_G.debugstack and debugstack(2) or nil)
 		end
 	end

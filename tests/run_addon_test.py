@@ -53,7 +53,7 @@ def run(addon: Path, part: int, sv_in: Path | None, start_now=None) -> tuple[int
     g.SV_IN = str(sv_in) if sv_in else None
     g.START_NOW = start_now
     failures = lua.execute(f'return dofile("{HERE / "scenario.lua"}")')
-    return failures, serialize(lua, "LeeroyzanLinkDB"), g.STUB.now
+    return failures, serialize(lua, "LeeroylinkDB"), g.STUB.now
 
 
 def main():

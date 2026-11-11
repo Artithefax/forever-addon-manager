@@ -1,4 +1,4 @@
-# Baut Leeroyzan.exe, Leeroyzan-Portable.zip und LeeroyzanLink.zip, sobald auf GitHub ein Release veröffentlicht wird,
+# Baut Leeroyzan.exe, Leeroyzan-Portable.zip und Leeroylink.zip, sobald auf GitHub ein Release veröffentlicht wird,
 # und hängt beides (plus SHA-256-Prüfsumme der .exe) an das Release an.
 # Python steckt in der .exe – wer Leeroyzan nutzt, braucht kein Python.
 # Der Auto-Updater im Manager lädt Leeroyzan.exe und Leeroyzan.exe.sha256.
@@ -55,7 +55,7 @@ jobs:
           pyinstaller --noconfirm --clean --onefile --windowed `
             --name Leeroyzan @icon `
             --collect-all tkinterdnd2 `
-            --add-data "LeeroyzanLink;LeeroyzanLink" `
+            --add-data "Leeroylink;Leeroylink" `
             leeroyzan.py
 
       - name: Prüfsumme erzeugen
@@ -74,8 +74,8 @@ jobs:
       - name: Addon-ZIP anhängen
         shell: pwsh
         run: |
-          Compress-Archive -Path LeeroyzanLink -DestinationPath dist\LeeroyzanLink.zip -Force
-          gh release upload $env:TAG dist\LeeroyzanLink.zip --clobber
+          Compress-Archive -Path Leeroylink -DestinationPath dist\Leeroylink.zip -Force
+          gh release upload $env:TAG dist\Leeroylink.zip --clobber
 
       # Portable Version: dieselbe .exe plus Ordner „Leeroyzan-Data“ – dann bleiben alle Daten daneben.
       - name: Portable-ZIP bauen und anhängen

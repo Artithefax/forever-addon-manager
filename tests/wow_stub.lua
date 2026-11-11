@@ -1,5 +1,5 @@
 -- wow_stub.lua: a small imitation of the WoW client API, enough to load
--- LeeroyzanLink and drive it with events. Not a full emulator: every value
+-- Leeroylink and drive it with events. Not a full emulator: every value
 -- comes from the STUB table so tests can change the game state.
 STUB = {
 	now = 1794265109, clock = 1000.0,
@@ -265,7 +265,7 @@ end
 function GetSpellInfo(id) return STUB.spells[id] end
 
 -- addon API (old global style)
-local ADDONS = { { name = "LeeroyzanLink", title = "Leeroyzan Link", version = "0.2.0" } }
+local ADDONS = { { name = "Leeroylink", title = "Leeroylink", version = "0.2.0" } }
 function GetNumAddOns() return #ADDONS end
 function GetAddOnInfo(i)
 	local a = type(i) == "number" and ADDONS[i] or ADDONS[1]
@@ -316,11 +316,11 @@ end
 -- Loads the addon files in .toc order.
 function STUB.loadAddon(dir)
 	local NS = {}
-	for line in io.lines(dir .. "/LeeroyzanLink.toc") do
+	for line in io.lines(dir .. "/Leeroylink.toc") do
 		line = line:gsub("\r", "")
 		if line:match("%S") and not line:match("^#") then
 			local chunk = assert(loadfile(dir .. "/" .. line:gsub("\\", "/")))
-			chunk("LeeroyzanLink", NS)
+			chunk("Leeroylink", NS)
 		end
 	end
 	return NS

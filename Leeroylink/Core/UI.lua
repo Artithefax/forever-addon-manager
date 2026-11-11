@@ -111,7 +111,7 @@ function UI:Build()
 	if self.frame then return end
 	buildPages()
 
-	local f = CreateFrame("Frame", "LeeroyzanLinkFrame", UIParent, TEMPLATE)
+	local f = CreateFrame("Frame", "LeeroylinkFrame", UIParent, TEMPLATE)
 	f:SetSize(660, 520)
 	f:SetPoint("CENTER")
 	f:SetFrameStrata("DIALOG")
@@ -125,12 +125,12 @@ function UI:Build()
 		f:SetBackdropColor(0, 0, 0, 0.92)
 	end
 	f:Hide()
-	if _G.UISpecialFrames then table.insert(UISpecialFrames, "LeeroyzanLinkFrame") end
+	if _G.UISpecialFrames then table.insert(UISpecialFrames, "LeeroylinkFrame") end
 	self.frame = f
 
 	local title = f:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
 	title:SetPoint("TOPLEFT", 16, -14)
-	title:SetText("Leeroyzan Link  v" .. LZ.version)
+	title:SetText("Leeroylink  v" .. LZ.version)
 	self.title = title
 
 	local close = CreateFrame("Button", nil, f, "UIPanelCloseButton")
@@ -146,7 +146,7 @@ function UI:Build()
 	end
 
 	-- scrollable page
-	local scroll = CreateFrame("ScrollFrame", "LeeroyzanLinkScroll", f, "UIPanelScrollFrameTemplate")
+	local scroll = CreateFrame("ScrollFrame", "LeeroylinkScroll", f, "UIPanelScrollFrameTemplate")
 	scroll:SetPoint("TOPLEFT", NAV_W + 28, -44)
 	scroll:SetPoint("BOTTOMRIGHT", -34, 48)
 	local content = CreateFrame("Frame", nil, scroll)
@@ -187,7 +187,7 @@ end
 
 local function overviewText()
 	local lines = {}
-	lines[#lines + 1] = LZ.Color("ffd100", "Leeroyzan Link v" .. LZ.version)
+	lines[#lines + 1] = LZ.Color("ffd100", "Leeroylink v" .. LZ.version)
 	local imp = LZ.import
 	if imp then
 		lines[#lines + 1] = string.format(T("Leeroyzan-Daten: Stand %s, %d Updates", "Leeroyzan data: as of %s, %d updates"), LZ.Ago(imp.generated), #imp.updates)
@@ -285,7 +285,7 @@ end
 
 function UI:BuildMinimap()
 	if button or not _G.Minimap then return end
-	button = CreateFrame("Button", "LeeroyzanLinkMinimapButton", Minimap)
+	button = CreateFrame("Button", "LeeroylinkMinimapButton", Minimap)
 	button:SetSize(31, 31)
 	button:SetFrameStrata("MEDIUM")
 	button:SetFrameLevel(8)
@@ -325,7 +325,7 @@ function UI:BuildMinimap()
 
 	button:SetScript("OnEnter", function(self)
 		GameTooltip:SetOwner(self, "ANCHOR_LEFT")
-		GameTooltip:AddLine("Leeroyzan Link", 1, 0.5, 0)
+		GameTooltip:AddLine("Leeroylink", 1, 0.5, 0)
 		for _, mod in ipairs(LZ.moduleList) do
 			if mod.enabled and mod.TooltipLines then
 				local ok, lines = pcall(mod.TooltipLines, mod)

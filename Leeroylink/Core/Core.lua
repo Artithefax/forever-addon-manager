@@ -2,9 +2,9 @@
 local ADDON, LZ = ...
 local C = LZ.C
 
-_G.LeeroyzanLink = LZ
+_G.Leeroylink = LZ
 LZ.addon = ADDON
-LZ.version = C.GetMetadata(ADDON, "Version") or "0.3.2"
+LZ.version = C.GetMetadata(ADDON, "Version") or "0.4.0"
 LZ.schema = 1
 LZ.lang = (type(GetLocale) == "function" and GetLocale() == "deDE") and "de" or "en"
 LZ.modules, LZ.moduleList, LZ.commands, LZ.helpLines = {}, {}, {}, {}
@@ -122,7 +122,7 @@ end
 function LZ:Print(...)
 	local parts = {}
 	for i = 1, select("#", ...) do parts[#parts + 1] = tostring((select(i, ...))) end
-	local msg = "|cffff8000Leeroyzan|r: " .. table.concat(parts, " ")
+	local msg = "|cffff8000Leeroylink|r: " .. table.concat(parts, " ")
 	local cf = _G.DEFAULT_CHAT_FRAME
 	if cf and cf.AddMessage then cf:AddMessage(msg) elseif print then print(msg) end
 end
@@ -173,8 +173,8 @@ end
 -- Saved variables
 ----------------------------------------------------------------------
 function LZ:InitDB()
-	if type(_G.LeeroyzanLinkDB) ~= "table" then _G.LeeroyzanLinkDB = {} end
-	local db = _G.LeeroyzanLinkDB
+	if type(_G.LeeroylinkDB) ~= "table" then _G.LeeroylinkDB = {} end
+	local db = _G.LeeroylinkDB
 	db.schema = LZ.schema
 	db.settings = db.settings or {}
 	db.settings.modules = db.settings.modules or {}
@@ -332,6 +332,11 @@ core:SetScript("OnEvent", function(_, event, arg1)
 		if arg1 == ADDON then LZ:InitDB() end
 	elseif event == "PLAYER_LOGIN" then
 		LZ:Safe(LZ.OnLogin, LZ)
+		-- the addon was called "Leeroyzan Link" (folder LeeroyzanLink) up to 0.3.2
+		if C.IsLoaded("LeeroyzanLink") then
+			LZ:Print(LZ.T("Die alte Version „Leeroyzan Link“ ist noch installiert. Leeroyzan stellt sie mit einem Klick auf Leeroylink um und übernimmt deine Daten.",
+				"The old version \"Leeroyzan Link\" is still installed. Leeroyzan switches it to Leeroylink with one click and keeps your data."))
+		end
 	elseif event == "PLAYER_LOGOUT" then
 		LZ:Safe(LZ.OnLogout, LZ)
 	end
@@ -398,7 +403,7 @@ LZ.coreCommands["minimap"] = function(rest)
 end
 
 function LZ:ShowHelp()
-	LZ:Print("Leeroyzan Link v" .. LZ.version)
+	LZ:Print("Leeroylink v" .. LZ.version)
 	LZ:Print("  /lz  -  " .. T("Fenster öffnen/schließen", "open/close window"))
 	LZ:Print("  /lz module  |  /lz modul <Name> an|aus  -  " .. T("Module verwalten", "manage modules"))
 	LZ:Print("  /lz sprache de|en  |  /lz minimap an|aus  |  /lz reload")
@@ -430,4 +435,5 @@ end
 
 _G.SLASH_LEEROYZAN1 = "/lz"
 _G.SLASH_LEEROYZAN2 = "/leeroyzan"
+_G.SLASH_LEEROYZAN3 = "/leeroylink"
 SlashCmdList["LEEROYZAN"] = function(msg) LZ:HandleSlash(msg) end
