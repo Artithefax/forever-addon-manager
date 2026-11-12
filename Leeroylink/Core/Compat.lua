@@ -25,6 +25,7 @@ local rawLoaded = firstFn(CA and CA.IsAddOnLoaded, _G.IsAddOnLoaded)
 local rawLoD = firstFn(CA and CA.IsAddOnLoadOnDemand, _G.IsAddOnLoadOnDemand)
 local rawInfo = firstFn(CA and CA.GetAddOnInfo, _G.GetAddOnInfo)
 local rawDeps = firstFn(CA and CA.GetAddOnDependencies, _G.GetAddOnDependencies)
+local rawLoad = firstFn(CA and CA.LoadAddOn, _G.LoadAddOn)
 
 function C.GetMetadata(name, field)
 	if not rawMeta then return nil end
@@ -42,6 +43,14 @@ function C.IsLoaded(name)
 	if not rawLoaded then return false end
 	local ok, loaded = pcall(rawLoaded, name)
 	return (ok and loaded) and true or false
+end
+
+-- Loads a load-on-demand addon. Returns loaded (true/false) and the reason from the game (e.g. "DISABLED").
+function C.LoadAddOn(name)
+	if not rawLoad then return false, "NO_API" end
+	local ok, loaded, reason = pcall(rawLoad, name)
+	if not ok then return false, tostring(loaded) end
+	return loaded and true or false, reason
 end
 
 function C.IsLoadOnDemand(name)

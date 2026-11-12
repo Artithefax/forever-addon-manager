@@ -160,7 +160,15 @@ end
 ----------------------------------------------------------------------
 -- Session table
 ----------------------------------------------------------------------
-local watchUnitsAfterFight, killFromXP -- set in the kill section
+-- shared with SessionKills.lua and SessionCombat.lua (loaded right after this file)
+local I = { rt = rt, band = band }
+LZ.SessionInternal = I
+local sessionListeners = {}
+function I.onSession(fn) sessionListeners[#sessionListeners + 1] = fn end
+local function setSession(new)
+	s = new
+	for i = 1, #sessionListeners do sessionListeners[i](new) end
+end
 
 local function playerLevel() return (UnitLevel and UnitLevel("player")) or 0 end
 local function money() return (GetMoney and GetMoney()) or 0 end
@@ -243,15 +251,15 @@ end)
 on("CHAT_MSG_COMBAT_XP_GAIN", function(msg)
 	if not text(msg) then
 		-- protected line: in a fight that is (almost always) the XP of a kill
-		if msg ~= nil and killFromXP and ((UnitAffectingCombat and UnitAffectingCombat("player") == true) or within("combatEnd", 4)) then
-			killFromXP(nil)
+		if msg ~= nil and I.killFromXP and ((UnitAffectingCombat and UnitAffectingCombat("player") == true) or within("combatEnd", 4)) then
+			I.killFromXP(nil)
 		end
 		return
 	end
 	if rt.pKillXP then
 		local mobName, amount = msg:match(rt.pKillXP)
 		if amount then
-			if killFromXP then killFromXP(mobName) end
+			if I.killFromXP then I.killFromXP(mobName) end
 			s.xp.kills = s.xp.kills + (tonumber(amount) or 0)
 			s.xp.killsN = s.xp.killsN + 1
 			return
@@ -274,7 +282,7 @@ end)
 on("PLAYER_REGEN_ENABLED", function()
 	rt.combatEnd = now()
 	-- values protected during the fight are readable again: catch the dead we could not check
-	LZ.After(0.5, function() if s and watchUnitsAfterFight then pcall(watchUnitsAfterFight) end end)
+	LZ.After(0.5, function() if s and I.watchAll then pcall(I.watchAll) end end)
 end)
 
 ----------------------------------------------------------------------
@@ -501,7 +509,7 @@ on("LOOT_OPENED", function()
 		rt.lootKind = "fishing"
 	else
 		rt.lootKind = "mob"
-		if watchUnitsAfterFight then watchUnitsAfterFight() end
+		if I.watchAll then I.watchAll() end
 		if UnitExists and UnitExists("target") and UnitIsDead and UnitIsDead("target") then
 			local n = UnitName("target")
 			if text(n) then rt.lootSrc = n end
@@ -775,400 +783,9 @@ on("UPDATE_FACTION", function()
 end)
 
 ----------------------------------------------------------------------
--- Mob classification (normal / elite / rare / boss) by GUID
+-- Kills (SessionKills.lua) and the combat log (SessionCombat.lua) use the
+-- helpers above through LZ.SessionInternal (filled at the end of this file).
 ----------------------------------------------------------------------
-local classByGUID, classCount = {}, 0
-local classByName, nameCount = {}, 0
-
-local function cacheUnit(unit)
-	if not (UnitExists and UnitExists(unit)) or (UnitIsPlayer and UnitIsPlayer(unit)) then return end
-	local guid = UnitGUID(unit)
-	if not guid or isSecret(guid) or classByGUID[guid] then return end
-	local c = UnitClassification and UnitClassification(unit) or "normal"
-	if isSecret(c) then return end
-	if c == "worldboss" then c = "boss" end
-	local level = UnitLevel and UnitLevel(unit)
-	if c ~= "boss" and not isSecret(level) and level == -1 and _G.IsInInstance and IsInInstance() then c = "boss" end
-	if classCount > 3000 then wipe(classByGUID); classCount = 0 end
-	classByGUID[guid] = c
-	classCount = classCount + 1
-	local name = UnitName and UnitName(unit)
-	if text(name) then
-		if nameCount > 1000 then wipe(classByName); nameCount = 0 end
-		if not classByName[name] then nameCount = nameCount + 1 end
-		classByName[name] = c
-	end
-end
-
-----------------------------------------------------------------------
--- Kills. Three sources describe the same kill, each can be missing:
---   "unit": the combat log (UNIT_DIED) or a dead unit we fought (target,
---           nameplates, boss frames) – WoW Forever has no combat log for addons
---   "xp":   the chat line "X dies, you gain N experience" (also protected in
---           combat on newer clients – then without a name)
--- A kill seen by both is counted once; the unit side brings the classification.
-----------------------------------------------------------------------
-local counted, countedN = {}, 0   -- GUIDs already counted
-local fought, foughtN = {}, 0     -- GUIDs of living enemies that were in combat with us
-local recent = {}                 -- kills of the last two minutes, for pairing
-
-local KILL_CLASSES = { normal = true, elite = true, rare = true, rareelite = true, boss = true }
-
-local function classOf(guid, name)
-	local c = (guid and classByGUID[guid]) or (name and classByName[name])
-	if rt.encounter and name and rt.encounter.name == name then c = "boss" end
-	return KILL_CLASSES[c] and c or "normal"
-end
-
-local function mobEntry(name, c)
-	if not name then return end
-	local e = s.kills.mobs[name]
-	if not e then
-		e = { name = name, n = 0, c = c }
-		s.kills.mobs[name] = e
-	end
-	return e
-end
-
-local function bookKill(name, c)
-	local K = s.kills
-	K.n = K.n + 1
-	K[c] = K[c] + 1
-	local e = mobEntry(name, c)
-	if e then e.n = e.n + 1; e.c = c end
-	local z = zoneEntry(zoneName())
-	z.kills = (z.kills or 0) + 1
-	if rt.run then rt.run.kills = rt.run.kills + 1 end
-end
-
--- a kill counted from the XP line gets its name/class from the unit later
-local function improve(k, name, c)
-	local K = s.kills
-	if not k.name and name then
-		k.name = name
-		local e = mobEntry(name, c)
-		e.n = e.n + 1
-	end
-	if c ~= k.c then
-		K[k.c] = K[k.c] - 1
-		K[c] = K[c] + 1
-		k.c = c
-		local e = k.name and K.mobs[k.name]
-		if e then e.c = c end
-	end
-end
-
-local function onKill(src, name, guid)
-	if guid then
-		if counted[guid] then return end
-		if countedN > 2000 then wipe(counted); countedN = 0 end
-		counted[guid] = true
-		countedN = countedN + 1
-		if fought[guid] then fought[guid] = nil; foughtN = foughtN - 1 end
-	end
-	local t = now()
-	for i = #recent, 1, -1 do
-		if t - recent[i].at > 120 then table.remove(recent, i) end
-	end
-	-- the XP line comes right with the death; the dead unit may only be seen after the fight.
-	-- First look for the same name, then for a kill without a name (protected line).
-	for pass = 1, 2 do
-		for i, k in ipairs(recent) do
-			local sameMob
-			if pass == 1 then sameMob = name ~= nil and k.name == name
-			else sameMob = k.name == nil or name == nil end
-			local fits = (src == "unit" and k.src == "xp") or (src == "xp" and k.src == "unit" and t - k.at <= 5)
-			if sameMob and fits then
-				table.remove(recent, i)
-				if src == "unit" then improve(k, name, classOf(guid, name)) end
-				return
-			end
-		end
-	end
-	local c = classOf(guid, name)
-	bookKill(name, c)
-	recent[#recent + 1] = { src = src, name = name, c = c, at = t }
-end
-
-local function known(v) if isSecret(v) then return nil end return v end
-
--- Looks at one unit: remembers enemies in combat with us and counts them once they are dead.
-local function watchUnit(unit)
-	if not (UnitExists and known(UnitExists(unit))) then return end
-	if known(UnitIsPlayer and UnitIsPlayer(unit)) then return end
-	local guid = known(UnitGUID and UnitGUID(unit))
-	if not guid or counted[guid] then return end
-	local dead = UnitIsDead and UnitIsDead(unit)
-	if isSecret(dead) then return end
-	if dead then
-		if not fought[guid] then return end -- an old corpse or someone else's fight
-		local denied = _G.UnitIsTapDenied and UnitIsTapDenied(unit)
-		if isSecret(denied) then return end  -- try again after the fight
-		if denied then
-			fought[guid] = nil; foughtN = foughtN - 1
-			return
-		end
-		local name = UnitName and UnitName(unit)
-		onKill("unit", text(name) and name or fought[guid].name, guid)
-		return
-	end
-	if fought[guid] then return end
-	if not known(UnitAffectingCombat and UnitAffectingCombat("player")) then return end
-	if not known(UnitAffectingCombat and UnitAffectingCombat(unit)) then return end
-	if _G.UnitCanAttack and not known(UnitCanAttack("player", unit)) then return end
-	if foughtN > 300 then wipe(fought); foughtN = 0 end
-	local name = UnitName and UnitName(unit)
-	fought[guid] = { name = text(name) and name or nil }
-	foughtN = foughtN + 1
-	cacheUnit(unit)
-end
-
-local WATCHED = { "target", "focus", "mouseover", "pettarget", "boss1", "boss2", "boss3", "boss4", "boss5" }
-local function watchAll()
-	for _, u in ipairs(WATCHED) do watchUnit(u) end
-	for i = 1, 40 do
-		local u = "nameplate" .. i
-		if UnitExists and known(UnitExists(u)) then watchUnit(u) end
-	end
-end
-
-local function isWatched(unit)
-	return type(unit) == "string" and (unit == "target" or unit == "focus" or unit == "pettarget"
-		or unit:find("^nameplate%d") or unit:find("^boss%d")) and true or false
-end
-
-on("UNIT_HEALTH", function(unit) if isWatched(unit) then watchUnit(unit) end end)
-on("UNIT_FLAGS", function(unit) if isWatched(unit) then watchUnit(unit) end end)
-on("NAME_PLATE_UNIT_REMOVED", function(unit) if isWatched(unit) then watchUnit(unit) end end)
-watchUnitsAfterFight = watchAll
-killFromXP = function(name) onKill("xp", name) end
-
-on("PLAYER_REGEN_DISABLED", function() LZ.After(0.2, function() if s then pcall(watchAll) end end) end)
-
-on("PLAYER_TARGET_CHANGED", function() cacheUnit("target") end)
-on("UPDATE_MOUSEOVER_UNIT", function() cacheUnit("mouseover") end)
-on("NAME_PLATE_UNIT_ADDED", function(unit) if unit then cacheUnit(unit) end end)
-on("INSTANCE_ENCOUNTER_ENGAGE_UNIT", function()
-	for i = 1, 5 do
-		local u = "boss" .. i
-		if UnitExists and UnitExists(u) then
-			local guid = UnitGUID(u)
-			if guid and not isSecret(guid) then classByGUID[guid] = "boss" end
-		end
-	end
-end)
-
-----------------------------------------------------------------------
--- Combat log
-----------------------------------------------------------------------
-local MINE = _G.COMBATLOG_OBJECT_AFFILIATION_MINE or 0x1
-local GROUP = (_G.COMBATLOG_OBJECT_AFFILIATION_MINE or 0x1) + (_G.COMBATLOG_OBJECT_AFFILIATION_PARTY or 0x2) + (_G.COMBATLOG_OBJECT_AFFILIATION_RAID or 0x4)
-local FRIENDLY = _G.COMBATLOG_OBJECT_REACTION_FRIENDLY or 0x10
-local TYPE_PLAYER = _G.COMBATLOG_OBJECT_TYPE_PLAYER or 0x400
-local TYPE_NPC = _G.COMBATLOG_OBJECT_TYPE_NPC or 0x800
-local PETS = (_G.COMBATLOG_OBJECT_TYPE_PET or 0x1000) + (_G.COMBATLOG_OBJECT_TYPE_GUARDIAN or 0x2000)
-
-local tagged, taggedCount = {}, 0
-local MELEE = { "Nahkampf", "Melee" }
-
-local function has(flags, mask) return flags and band and band(flags, mask) ~= 0 end
-
-local function tag(guid, flags)
-	if tagged[guid] or not guid then return end
-	if has(flags, FRIENDLY) then return end
-	if taggedCount > 3000 then wipe(tagged); taggedCount = 0 end
-	tagged[guid] = true
-	taggedCount = taggedCount + 1
-end
-
-local function dealt(cb, spell, amount, crit, pet)
-	if pet then cb.dmgPet = cb.dmgPet + amount end
-	cb.dmg = cb.dmg + amount
-	cb.hits = cb.hits + 1
-	if crit then cb.crits = cb.crits + 1 end
-	local e = cb.spells[spell]
-	if not e then
-		e = { 0, 0, 0 } -- amount, hits, crits
-		cb.spells[spell] = e
-	end
-	e[1], e[2] = e[1] + amount, e[2] + 1
-	if crit then e[3] = e[3] + 1 end
-	if amount > cb.maxHit then
-		cb.maxHit, cb.maxHitSpell, cb.maxHitCrit = amount, spell, crit and true or nil
-	end
-end
-
-local function healed(cb, spell, amount, over, crit)
-	local eff = math.max(0, amount - (over or 0))
-	cb.heal = cb.heal + eff
-	cb.over = cb.over + (over or 0)
-	local e = cb.heals[spell]
-	if not e then
-		e = { 0, 0, 0 } -- effective, casts, overheal
-		cb.heals[spell] = e
-	end
-	e[1], e[2], e[3] = e[1] + eff, e[2] + 1, e[3] + (over or 0)
-	if eff > cb.maxHeal then cb.maxHeal, cb.maxHealSpell = eff, spell end
-end
-
-local function taken(cb, by, spell, amount)
-	cb.taken = cb.taken + amount
-	if by then add(cb.takenBy, by, amount) end
-	if amount > cb.maxTaken then cb.maxTaken, cb.maxTakenBy, cb.maxTakenSpell = amount, by, spell end
-	rt.lastHit = { by = by, spell = spell, at = now() }
-end
-
-local function countKill(guid, name, flags)
-	if tagged[guid] then
-		tagged[guid] = nil
-		taggedCount = taggedCount - 1
-	end
-	if has(flags, TYPE_PLAYER) then
-		s.kills.players = s.kills.players + 1
-		return
-	end
-	if not has(flags, TYPE_NPC) then return end
-	onKill("unit", name, guid)
-end
-
-local SWING_RESULT = { MISS = "miss", DODGE = "dodge", PARRY = "parry", BLOCK = "block", ABSORB = "miss", RESIST = "miss", EVADE = "miss", IMMUNE = "miss", DEFLECT = "miss", REFLECT = "miss" }
-
-local function processCombatLog()
-	local _, sub, _, srcGUID, srcName, srcFlags, _, dstGUID, dstName, dstFlags, _,
-		a12, a13, a14, a15, a16, a17, a18, a19, a20, a21 = CombatLogGetCurrentEventInfo()
-	if isSecret(sub) or isSecret(srcGUID) or isSecret(dstGUID) or isSecret(srcFlags) or isSecret(dstFlags) then
-		rt.secretCL = (rt.secretCL or 0) + 1
-		if rt.secretCL == 25 then s.combat.err = "protected by the game client" end
-		return
-	end
-	local cb = s.combat
-	local me = rt.guid
-	local fromMe = srcGUID == me
-	local fromPet = not fromMe and has(srcFlags, MINE) and has(srcFlags, PETS)
-	local toMe = dstGUID == me
-
-	if sub == "UNIT_DIED" then
-		if tagged[dstGUID] then countKill(dstGUID, dstName, dstFlags) end
-		return
-	elseif sub == "PARTY_KILL" then
-		if fromMe or fromPet then s.kills.blows = s.kills.blows + 1 end
-		return
-	end
-
-	if sub == "SWING_DAMAGE" then
-		local amount, crit, glancing = a12 or 0, a18, a19
-		if fromMe or fromPet then
-			if fromMe then
-				local sw = cb.swings
-				sw.n, sw.hit = sw.n + 1, sw.hit + 1
-				if crit then sw.crit = sw.crit + 1 end
-				if glancing then sw.glance = sw.glance + 1 end
-			end
-			dealt(cb, P(MELEE), amount, crit, fromPet)
-			tag(dstGUID, dstFlags)
-		elseif has(srcFlags, GROUP) then
-			tag(dstGUID, dstFlags)
-		end
-		if toMe then
-			local st = cb.swingsTaken
-			st.n, st.hit = st.n + 1, st.hit + 1
-			if crit then st.crit = st.crit + 1 end
-			taken(cb, srcName, P(MELEE), amount)
-		end
-		return
-	elseif sub == "SWING_MISSED" then
-		local r = SWING_RESULT[a12 or ""] or "miss"
-		if fromMe then
-			local sw = cb.swings
-			sw.n = sw.n + 1
-			sw[r] = (sw[r] or 0) + 1
-			tag(dstGUID, dstFlags)
-		end
-		if toMe then
-			local st = cb.swingsTaken
-			st.n = st.n + 1
-			st[r] = (st[r] or 0) + 1
-		end
-		return
-	elseif sub == "SPELL_DAMAGE" or sub == "SPELL_PERIODIC_DAMAGE" or sub == "RANGE_DAMAGE" or sub == "DAMAGE_SHIELD" or sub == "DAMAGE_SPLIT" then
-		local spell, amount, crit = a13 or "?", a15 or 0, a21
-		if fromMe or fromPet then
-			dealt(cb, spell, amount, crit, fromPet)
-			tag(dstGUID, dstFlags)
-		elseif has(srcFlags, GROUP) then
-			tag(dstGUID, dstFlags)
-		end
-		if toMe then taken(cb, srcName, spell, amount) end
-		return
-	elseif sub == "ENVIRONMENTAL_DAMAGE" then
-		if toMe then
-			local kind, amount = a12 or "?", a13 or 0
-			add(cb.env, kind, amount)
-			taken(cb, nil, kind, amount)
-		end
-		return
-	elseif sub == "SPELL_HEAL" or sub == "SPELL_PERIODIC_HEAL" then
-		local spell, amount, over, crit = a13 or "?", a15 or 0, a16 or 0, a18
-		if fromMe then healed(cb, spell, amount, over, crit) end
-		if toMe then cb.healTaken = cb.healTaken + math.max(0, amount - over) end
-		return
-	elseif sub == "SPELL_CAST_SUCCESS" then
-		if fromMe and a13 then
-			cb.castN = cb.castN + 1
-			add(cb.casts, a13, 1)
-		end
-		return
-	elseif sub == "SPELL_AURA_APPLIED" then
-		local spell, auraType = a13, a15
-		if toMe and spell then
-			if auraType == "BUFF" then
-				cb.buffN = cb.buffN + 1
-				add(cb.buffs, spell, 1)
-			else
-				cb.debuffN = cb.debuffN + 1
-				add(cb.debuffs, spell, 1)
-			end
-		elseif fromMe and auraType == "BUFF" and not toMe then
-			cb.buffsGiven = cb.buffsGiven + 1
-		end
-		return
-	elseif sub == "SPELL_INTERRUPT" then
-		if fromMe or fromPet then cb.interrupts = cb.interrupts + 1 end
-		return
-	elseif sub == "SPELL_DISPEL" or sub == "SPELL_STOLEN" then
-		if fromMe or fromPet then cb.dispels = cb.dispels + 1 end
-		return
-	elseif sub == "SPELL_MISSED" or sub == "RANGE_MISSED" or sub == "SPELL_PERIODIC_MISSED" then
-		if fromMe or fromPet or has(srcFlags, GROUP) then tag(dstGUID, dstFlags) end
-		return
-	end
-end
-
-local clFrame
-local clErrors = 0
-
-local function onCombatLog()
-	if not s then return end
-	local ok, err = pcall(processCombatLog)
-	if not ok then
-		clErrors = clErrors + 1
-		if clErrors >= 5 then
-			s.combat.err = tostring(err):sub(1, 200)
-			if clFrame then clFrame:UnregisterAllEvents() end
-		end
-	end
-end
-
-local function startCombatLog()
-	if not _G.CombatLogGetCurrentEventInfo or not band then
-		s.combat.err = "no combat log API"
-		return
-	end
-	clFrame = clFrame or CreateFrame("Frame")
-	clFrame:SetScript("OnEvent", onCombatLog)
-	clErrors = 0
-	pcall(clFrame.RegisterEvent, clFrame, "COMBAT_LOG_EVENT_UNFILTERED")
-end
 
 ----------------------------------------------------------------------
 -- Player-only unit events (own frame: RegisterUnitEvent keeps it cheap)
@@ -1215,7 +832,9 @@ local function tick()
 	local tm = s.time
 	local function yes(v) return v and not isSecret(v) end
 	if yes(UnitIsAFK and UnitIsAFK("player")) then tm.afk = tm.afk + dt end
-	if yes(UnitAffectingCombat and UnitAffectingCombat("player")) then tm.combat = tm.combat + dt end
+	local fighting = yes(UnitAffectingCombat and UnitAffectingCombat("player"))
+		or (_G.InCombatLockdown and InCombatLockdown() == true)
+	if fighting then tm.combat = tm.combat + dt; rt.fightTick = t end
 	if yes(IsResting and IsResting()) then tm.rest = tm.rest + dt end
 	local dead = yes(UnitIsDeadOrGhost and UnitIsDeadOrGhost("player"))
 	if dead then tm.dead = tm.dead + dt end
@@ -1225,7 +844,9 @@ local function tick()
 
 	local z = zoneEntry(zoneName())
 	z.sec = z.sec + dt
-	pcall(watchAll)
+	-- look at target, nameplates and boss frames only in combat and shortly after (kills are counted there);
+	-- the unit events cover the rest, outside of fights this saves 49 unit checks every half second
+	if I.watchAll and (fighting or (rt.fightTick and t - rt.fightTick < 5)) then pcall(I.watchAll) end
 
 	-- the speed is protected in combat on newer clients: no distance then, everything else still counts
 	local speed = GetUnitSpeed and GetUnitSpeed("player") or 0
@@ -1316,10 +937,10 @@ function mod:OnEnable()
 		local last = list[#list]
 		local window = (tonumber(self.opt.resumeMinutes) or 15) * 60
 		if last and last.v == VERSION and last.char == LZ.charKey and last.saved and (time() - last.saved) <= window then
-			s = last -- /reload or quick relog: same session continues
+			setSession(last) -- /reload or quick relog: same session continues
 			s.resumes = (s.resumes or 0) + 1
 		else
-			s = newSession()
+			setSession(newSession())
 			push(list, s, MAX_SESSIONS)
 		end
 	end
@@ -1333,7 +954,7 @@ function mod:OnEnable()
 	rt.rep = nil
 	pcall(updateRep)
 	snapshotSkills(true)
-	startCombatLog()
+	I.startCombatLog()
 	startUnitEvents()
 	startTicker()
 	LZ.After(1, checkInstance)
@@ -1395,10 +1016,10 @@ end
 function mod:OnDisable()
 	self:Save()
 	stopTicker()
-	if clFrame then clFrame:UnregisterAllEvents() end
+	I.stopCombatLog()
 	if unitFrame then unitFrame:UnregisterAllEvents() end
 	rt.run = nil
-	s = nil
+	setSession(nil)
 end
 
 -- For other modules and tests.
@@ -1517,3 +1138,6 @@ end
 
 mod:Command({ "sitzung", "session" }, function(self) LZ.UI:Show(self.name) end,
 	{ "sitzung", "Laufende Sitzung anzeigen", "show the current session" })
+
+-- helpers for SessionKills.lua and SessionCombat.lua (zoneEntry is only defined above)
+I.on, I.now, I.text, I.isSecret, I.add, I.zoneName, I.zoneEntry = on, now, text, isSecret, add, zoneName, zoneEntry

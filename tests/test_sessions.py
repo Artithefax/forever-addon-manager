@@ -403,17 +403,71 @@ class QuestDBTests(unittest.TestCase):
             self.assertEqual(q.q[7][7][1], 783)
             self.assertEqual(q.q[176][8][5], "o")                            # Quest startet an einem Objekt
             self.assertEqual(q.zones[12], "Wald von Elwynn")
-        # written once into the installed addon, then left alone until something changes
+        # written once into the load-on-demand addon next to Leeroylink, then left alone until something changes
         addon = self.wow / "_forever_" / "Interface" / "AddOns" / "Leeroylink"
+        quests = addon.parent / "Leeroylink_Quests"
         addon.mkdir(parents=True, exist_ok=True)
-        (addon / "Leeroylink.toc").write_text("## Version: 0.4.0\n", encoding="utf-8")
+        (addon / "Leeroylink.toc").write_text("## Interface: 16001\n## Version: 0.7.0\n\nCore\\Core.lua\n", encoding="utf-8")
         self.assertEqual(lz.write_quest_data(str(self.wow), "_forever_"), "written")
+        toc = (quests / "Leeroylink_Quests.toc").read_text(encoding="utf-8")
+        self.assertIn("## LoadOnDemand: 1", toc)
+        self.assertIn("## Interface: 16001", toc)
+        self.assertIn("## Dependencies: Leeroylink", toc)
+        self.assertFalse((addon / "Quests.lua").exists())
         self.assertEqual(lz.write_quest_data(str(self.wow), "_forever_"), "unchanged")
         self.assertEqual(lz.write_quest_data(str(self.wow), "_forever_", {12: "Wald von Elwynn"}), "written")
-        # an addon update keeps the file
+        # an addon update leaves the quest data alone
         lz.install_link_addon(str(self.wow), "_forever_")
-        self.assertIn("Wald von Elwynn", (addon / "Quests.lua").read_text(encoding="utf-8"))
+        self.assertIn("Wald von Elwynn", (quests / "Quests.lua").read_text(encoding="utf-8"))
         self.assertEqual(lz.write_quest_data(str(self.wow), "_forever_", {12: "Wald von Elwynn"}), "unchanged")
+
+    def test_quest_data_for_old_leeroylink(self):
+        """Leeroylink up to 0.6 loads Quests.lua itself – then it stays in its folder."""
+        wow = TMP / "qdb-old" / "World of Warcraft"
+        shutil.copytree(self.wow / "_forever_" / "Interface" / "AddOns" / "QuestieDB",
+                        wow / "_forever_" / "Interface" / "AddOns" / "QuestieDB", dirs_exist_ok=True)
+        addon = wow / "_forever_" / "Interface" / "AddOns" / "Leeroylink"
+        addon.mkdir(parents=True, exist_ok=True)
+        (addon / "Leeroylink.toc").write_text("## Version: 0.6.0\n\nData.lua\nQuests.lua\n", encoding="utf-8")
+        self.assertEqual(lz.write_quest_data(str(wow), "_forever_"), "written")
+        self.assertIn("LeeroylinkQuests = {", (addon / "Quests.lua").read_text(encoding="utf-8"))
+        self.assertFalse((addon.parent / "Leeroylink_Quests").exists())
+
+    @unittest.skipIf(run_addon_test is None, "lupa not installed")
+    def test_quest_companion_in_game(self):
+        """Leeroylink with the quest data Leeroyzan wrote: nothing loaded at login, the companion loads it
+        on first use and finds quests, chains and texts."""
+        from lupa import lua51
+        wow = TMP / "qdb-game" / "World of Warcraft"
+        addons = wow / "_forever_" / "Interface" / "AddOns"
+        shutil.copytree(self.wow / "_forever_" / "Interface" / "AddOns" / "QuestieDB", addons / "QuestieDB", dirs_exist_ok=True)
+        shutil.copytree(ROOT / "Leeroylink", addons / "Leeroylink", dirs_exist_ok=True)
+        (wow / "_forever_" / "WTF").mkdir(parents=True, exist_ok=True)
+        (wow / "_forever_" / "WTF" / "Config.wtf").write_text('SET textLocale "deDE"\n', encoding="utf-8")
+        self.assertEqual(lz.write_quest_data(str(wow), "_forever_"), "written")
+        lua = lua51.LuaRuntime(unpack_returned_tuples=True)
+        g = lua.globals()
+        g.TESTS_DIR = str(ROOT / "tests")
+        lua.execute(f'dofile("{(ROOT / "tests" / "wow_stub.lua").as_posix()}")')
+        g.STUB.addonsRoot = str(addons.as_posix())
+        lua.execute(f'STUB.loadAddon("{(addons / "Leeroylink").as_posix()}")')
+        lua.execute('STUB.fire("ADDON_LOADED", "Leeroylink"); STUB.fire("PLAYER_LOGIN"); '
+                    'STUB.fire("PLAYER_ENTERING_WORLD", true, false); STUB.advance(2)')
+        lua.execute('STUB.testErrors = {}; seterrorhandler(function(e) table.insert(STUB.testErrors, tostring(e)) end)')
+        self.assertIsNone(g.LeeroylinkQuests, "quest data must not be loaded at login")
+        mod = g.Leeroylink.modules.QuestGuide
+        self.assertTrue(mod.enabled)
+        self.assertEqual(lua.eval('Leeroylink.modules.QuestGuide:Find("Kobold")'), 7)
+        self.assertIsNotNone(g.LeeroylinkQuests, "loaded on first use")
+        chain = lua.eval('(function() local l = Leeroylink.modules.QuestGuide:Chain(7); return table.concat(l, ",") end)()')
+        self.assertEqual(chain, "783,7,15")
+        text = lua.eval('Leeroylink.modules.QuestGuide:Text(7)')
+        self.assertIn("Säuberung im Koboldlager", text)
+        lua.execute('Leeroylink.modules.QuestGuide:Show(7)')
+        self.assertIn("Quests", lua.eval('Leeroylink.modules.QuestGuide:Report()'))
+        lua.execute('Leeroylink.coreCommands.quest("aus")')
+        self.assertFalse(g.Leeroylink.modules.QuestGuide.enabled)
+        self.assertEqual(list(lua.eval('STUB.testErrors').values()), [])
 
     def test_missing(self):
         with self.assertRaises(lz.QuestDBError):
@@ -456,7 +510,7 @@ class QuestDBTests(unittest.TestCase):
         addon.mkdir(parents=True, exist_ok=True)
         (addon / "Leeroylink.toc").write_text("## Version: 0.5.0\n", encoding="utf-8")
         self.assertEqual(lz.write_quest_data(str(self.wow), "_forever_", enabled=False), "off")
-        self.assertIn("LeeroylinkQuests = nil", (addon / "Quests.lua").read_text(encoding="utf-8"))
+        self.assertIn("LeeroylinkQuests = nil", (addon.parent / "Leeroylink_Quests" / "Quests.lua").read_text(encoding="utf-8"))
         self.assertEqual(lz.write_quest_data(str(self.wow), "_forever_", cm=cm), "written")
 
         # download from GitHub (faked): only once, and again only when the dump changed
