@@ -14,6 +14,7 @@ import tkinter as tk
 
 from .i18n import set_language, tr
 from .config import config_dir, load_config, log, setup_logging
+from . import crashlog
 from .selfupdate import FINISH_FLAG, clean_child_env, replace_exe, wait_for_exit
 from .ui.base import BaseTk
 from .ui.theme import THEME, apply_theme
@@ -190,5 +191,28 @@ def main():
         log.info("Update %s: setze die neue Version ein (%s)", finish[2], finish[0])
         finish_update_main(*finish)
         return
-    app = App()
-    app.mainloop()
+    prev = crashlog.start()
+    try:
+        app = App()
+    except Exception:  # noqa – Fehler beim Aufbau: ins Protokoll, dann wie bisher melden
+        log.exception("Start fehlgeschlagen")
+        raise
+    app.report_callback_exception = crashlog.tk_callback_error
+    if prev["unclean"]:
+        app.after(2500, lambda: _report_unclean_end(app, prev))
+    try:
+        app.mainloop()
+    finally:
+        crashlog.clean_exit()
+
+
+def _report_unclean_end(app, prev: dict) -> None:
+    from .files import open_in_explorer
+    text = tr("Leeroyzan wurde beim letzten Mal unerwartet beendet (Start: {0}).", prev["since"])
+    if prev["crash"]:
+        text += " " + tr("Details stehen in crash.log im Datenordner.")
+    try:
+        app.notify(text, "warn", [(tr("Datenordner öffnen"), lambda: open_in_explorer(config_dir()))],
+                   key="unclean-exit")
+    except Exception as e:  # noqa
+        log.warning("Hinweis auf unerwartetes Ende nicht angezeigt: %s", e)
