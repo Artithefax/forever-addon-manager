@@ -1101,4 +1101,6 @@ EN: dict[str, str] = {
     'Werkzeuge': 'Tools',
     'Tastenkürzel: Strg+1 bis Strg+9 wechseln die Seite (Reihenfolge wie links), Strg+, öffnet die Einstellungen, Strg+F sucht, F5 liest neu ein, Entf entfernt.': 'Shortcuts: Ctrl+1 to Ctrl+9 switch pages (in sidebar order), Ctrl+, opens the settings, Ctrl+F searches, F5 reloads, Del removes.',
     'Nicht entfernt (Datei in Benutzung?):': 'Not removed (file in use?):',
+    'Leeroyzan wurde beim letzten Mal unerwartet beendet (Start: {0}).': 'Leeroyzan closed unexpectedly last time (started {0}).',
+    'Details stehen in crash.log im Datenordner.': 'Details are in crash.log in the data folder.',
 }

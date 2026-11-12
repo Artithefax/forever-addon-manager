@@ -3,6 +3,15 @@
 The section of a version becomes the text of its GitHub release automatically
 (`tools/release_notes.py`, used by the *Build release exe* workflow).
 
+## 2.0.1
+
+### Fixed
+- `setup.bat` works again with an installed Python ("Das Sprungziel - with_python wurde nicht gefunden"). It now prefers Python 3.12, the version the releases are built with.
+
+### Crash diagnostics
+- If Leeroyzan closes unexpectedly, the cause is now recorded: hard crashes go to `crash.log` in the data folder (with the state of every thread), errors in the window and in background tasks go to `manager.log`.
+- On the next start Leeroyzan tells you that the last session ended unexpectedly and opens the data folder on request.
+
 ## 2.0.0
 
 **The big performance and stability update.** Leeroyzan 2.0 comes with Leeroylink 0.7.0.
