@@ -55,7 +55,7 @@ One window, no pop-ups. A sidebar with the game version, the pages and a big **P
 - Share **download lists** (`.lzlist` file or a plain-text code that fits into Discord/SMS messages)
 - Drag & drop for ZIP, `.lzpack` and `.lzlist` files (optional, via `tkinterdnd2`)
 - Log file of all changes
-- Remembers window size and position; keyboard shortcuts: **Ctrl+F** search, **F5** rescan (on *Updates*: check for updates), **Del** remove the selected addons (with confirmation)
+- Remembers window size and position; keyboard shortcuts: **Ctrl+F** search, **F5** rescan (on *Updates*: check for updates), **Del** remove the selected addons (with confirmation), **Ctrl+1 … Ctrl+9** switch pages, **Ctrl+,** settings
 - Self-update from GitHub releases
 
 ## Play sessions (Leeroylink)

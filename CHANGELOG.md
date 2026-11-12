@@ -26,7 +26,7 @@ The section of a version becomes the text of its GitHub release automatically
 - Checking for updates or searching no longer blocks other actions – you can start the game while Leeroyzan checks. Running background tasks are shown in the status bar.
 - If WoW closes right after starting (Battle.net is updating or repairing the game – "container locked"), Leeroyzan explains why and offers to open Battle.net.
 - The sidebar is grouped and adapts to small windows, so all pages and the Play button always fit.
-- New shortcuts: Ctrl+1 … Ctrl+9 switch pages, Ctrl+, opens the settings.
+- New shortcuts: F5 refreshes, Ctrl+F jumps to the search of the current page, Del removes the selected addons (after asking), Ctrl+1 … Ctrl+9 switch pages, Ctrl+, opens the settings.
 
 ### Leeroylink 0.7.0
 - The quest data now lives in its own load-on-demand addon **Leeroylink_Quests** (written by Leeroyzan) and is loaded only when the quest companion is used for the first time.
