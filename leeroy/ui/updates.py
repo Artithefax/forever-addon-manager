@@ -238,6 +238,10 @@ class UpdatesPage:
 
         def done(out):
             res, errors, sigs = out
+            for r, sig in sigs.items():          # übersprungen, weil seit der letzten Prüfung unverändert: aktuell
+                src = self.sources().get(r)
+                if r not in res and src is not None and sig and src.get("cf_sig") == sig and src.get("tag"):
+                    self.updates[r] = src["tag"]
             for r, info in res.items():
                 self.updates[r] = info["tag"]
                 self.update_info[r] = info
