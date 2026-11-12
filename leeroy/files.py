@@ -115,6 +115,23 @@ def recover_staging(root: str, flavor: str, min_age: float = 600) -> list[str]:
     return back
 
 
+MOVE_TRIES = 8
+
+
+def move_path(src: Path, dst: Path, tries: int | None = None) -> None:
+    """Verschieben (gleiches Laufwerk: Umbenennen) mit kurzen Wiederholungen: Unter Windows halten Virenscanner und
+    Indexdienst frisch entpackte Dateien oft einen Moment lang offen – dann scheitert das Umbenennen kurz."""
+    tries = tries or MOVE_TRIES
+    for attempt in range(tries):
+        try:
+            shutil.move(str(src), str(dst))
+            return
+        except PermissionError:
+            if attempt == tries - 1 or not src.exists() or dst.exists():
+                raise
+            time.sleep(0.15 * (attempt + 1))
+
+
 class FolderSwap:
     """Ordner tauschen mit Rückweg: Altes wird in den Arbeitsordner gelegt, Neues hineinbewegt. Geht ein Schritt
     schief, macht undo() alles rückgängig – ein Addon fehlt nie, weil das Kopieren mittendrin scheiterte."""
@@ -126,20 +143,20 @@ class FolderSwap:
 
     def take_out(self, path: Path) -> Path:
         dest = self.trash / f"{len(self.steps)}_{path.name}"
-        shutil.move(str(path), str(dest))
+        move_path(path, dest)
         self.steps.append((path, dest))
         return dest
 
     def put_in(self, src: Path, dest: Path) -> None:
         dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(src), str(dest))
+        move_path(src, dest)
         self.steps.append((src, dest))
 
     def undo(self) -> None:
         for back, now in reversed(self.steps):
             try:
                 if now.exists() and not back.exists():
-                    shutil.move(str(now), str(back))
+                    move_path(now, back)
             except OSError as e:
                 log.error("Rückgängig fehlgeschlagen (%s -> %s): %s", now, back, e)
         self.steps.clear()

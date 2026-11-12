@@ -78,7 +78,7 @@ def seal(value: str) -> str | dict:
         return value
     try:
         return {"dpapi": base64.b64encode(f[0](value.encode("utf-8"))).decode("ascii")}
-    except OSError:
+    except Exception:  # noqa – Verschlüsseln geht hier nicht: lieber im Klartext speichern als gar nicht
         return value
 
 

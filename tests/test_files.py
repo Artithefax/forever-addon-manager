@@ -61,13 +61,13 @@ class InstallTests(unittest.TestCase):
                 calls["n"] += 1
                 raise PermissionError("Datei gesperrt")
             return real(src, dst)
-        files.shutil.move = flaky
+        files.shutil.move, files.MOVE_TRIES = flaky, 2
         try:
             with self.assertRaises(PermissionError):
                 files.install_zip(make_zip(TMP / "a2.zip", {"Bar": "2", "BarData": "2"}), str(self.root), self.fl)
         finally:
-            files.shutil.move = real
-        self.assertEqual(calls["n"], 1)
+            files.shutil.move, files.MOVE_TRIES = real, 8
+        self.assertEqual(calls["n"], 2)                     # einmal wiederholt, dann aufgegeben
         self.assertEqual((self.version("Bar"), self.version("BarData")), ("1", "1"))
 
     def test_recover_after_crash(self):
@@ -194,3 +194,23 @@ class ScriptUpdateTests(unittest.TestCase):
         finally:
             selfupdate.download_with_progress = real
             shutil.rmtree(selfupdate.script_update_dir(), ignore_errors=True)
+
+
+class MoveRetryTests(unittest.TestCase):
+    def test_retries_while_locked(self):
+        src, dst = TMP / f"m{time.time_ns()}", TMP / f"n{time.time_ns()}"
+        src.mkdir()
+        real, calls = shutil.move, {"n": 0}
+
+        def flaky(a, b):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise PermissionError("in use")
+            return real(a, b)
+        files.shutil.move = flaky
+        try:
+            files.move_path(src, dst)
+        finally:
+            files.shutil.move = real
+        self.assertEqual(calls["n"], 3)
+        self.assertTrue(dst.is_dir())
