@@ -9,7 +9,7 @@ import tkinter as tk
 from ..i18n import tr
 from ..config import log, reconcile_sources, save_config
 from ..wow import Addon, clean_wow_text, compute_groups
-from ..files import addons_dir, open_in_explorer, plain_key, scan_addons, set_enabled
+from ..files import FolderSwap, addons_dir, open_in_explorer, plain_key, scan_addons, set_enabled, staging_dir
 from ..curseforge import (
     CFError,
     CF_PREFIX,
@@ -612,11 +612,27 @@ class AddonsPage:
         names = ", ".join(a.name for a in sel)
         if not self.ask(tr("{0} wirklich entfernen? Die Ordner werden gelöscht.", names), yes=tr("Entfernen"), no=tr("Abbrechen")):
             return
-        for a in sel:
-            shutil.rmtree(a.folder, ignore_errors=True)
-        log.info("Entfernt: %s", names)
+        # erst beiseite legen (Umbenennen, sofort und vollständig), dann löschen – nie ein halb gelöschtes Addon
+        removed, errors = [], []
+        work = staging_dir(self.root_path, self.flavor)
+        try:
+            swap = FolderSwap(work)
+            for a in sel:
+                try:
+                    swap.take_out(a.folder)
+                    removed.append(a.name)
+                except OSError as e:
+                    errors.append(f"{a.name}: {e}")
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+        if removed:
+            log.info("Entfernt: %s", ", ".join(removed))
+            # bewusst entfernt: Quellen dieser Ordner sofort parken (kommen zurück, wenn der Ordner wieder auftaucht)
+            reconcile_sources(self.cfg, self.flavor, {a.name for a in self.addons} - set(removed), healthy=True)
         self.refresh()
-        self.set_status(tr("Entfernt: {0}", names))
+        self.set_status(tr("Entfernt: {0}", ", ".join(removed)) if removed else "")
+        if errors:
+            self.error(tr("Nicht entfernt (Datei in Benutzung?):") + "\n" + "\n".join(errors))
 
     def open_folder(self, addons=None):
         """Öffnet den Ordner des gewählten Addons; mit addons=[] den AddOns-Ordner selbst."""
