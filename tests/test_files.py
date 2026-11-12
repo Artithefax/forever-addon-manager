@@ -150,3 +150,47 @@ class ConfigTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SignatureTests(unittest.TestCase):
+    def run_check(self, cur, new):
+        from leeroy import selfupdate
+        table = {"cur": cur, "new": new}
+        selfupdate.check_update_signature(Path("new"), Path("cur"), verify=lambda p: table[p.name])
+
+    def test_unsigned_to_unsigned_and_signed(self):
+        self.run_check(("NotSigned", ""), ("NotSigned", ""))
+        self.run_check(("NotSigned", ""), ("Valid", "CN=Leeroyzan"))
+        self.run_check(("", ""), ("", ""))                       # nicht prüfbar (kein Windows)
+
+    def test_signed_requires_same_signer(self):
+        self.run_check(("Valid", "CN=Leeroyzan"), ("Valid", "CN=Leeroyzan"))
+        with self.assertRaises(ValueError):
+            self.run_check(("Valid", "CN=Leeroyzan"), ("NotSigned", ""))
+        with self.assertRaises(ValueError):
+            self.run_check(("Valid", "CN=Leeroyzan"), ("Valid", "CN=Someone else"))
+        with self.assertRaises(ValueError):
+            self.run_check(("NotSigned", ""), ("HashMismatch", "CN=Leeroyzan"))
+
+
+class ScriptUpdateTests(unittest.TestCase):
+    def test_zipball_staging(self):
+        import io
+        from leeroy import selfupdate
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("Artithefax-leeroyzan-abc/leeroyzan.py", "print('hi')\n")
+            zf.writestr("Artithefax-leeroyzan-abc/leeroy/constants.py", 'APP_VERSION = "9.9.9"\n')
+            zf.writestr("Artithefax-leeroyzan-abc/Leeroylink/Leeroylink.toc", "## Version: 1\n")
+            zf.writestr("Artithefax-leeroyzan-abc/README.md", "nicht nötig")
+        real = selfupdate.download_with_progress
+        selfupdate.download_with_progress = lambda *a, **k: buf.getvalue()
+        try:
+            stage = selfupdate.download_script_update({"tag": "9.9.9"})
+            self.assertTrue((stage / "leeroy" / "constants.py").is_file())
+            self.assertFalse((stage / "README.md").exists())
+            with self.assertRaises(ValueError):
+                selfupdate.download_script_update({"tag": "9.9.8"})
+        finally:
+            selfupdate.download_with_progress = real
+            shutil.rmtree(selfupdate.script_update_dir(), ignore_errors=True)

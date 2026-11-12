@@ -110,6 +110,8 @@ def find_wow_exe(root: str, flavor: str) -> Path | None:
 def process_names() -> set[str]:
     """Namen aller laufenden Programme (klein geschrieben, nur Windows). Direkt über die Windows-Prozessliste –
     schneller als tasklist und unabhängig von der Systemsprache; tasklist bleibt der Rückweg."""
+    if not sys.platform.startswith("win"):
+        return set()
     try:
         return {n.lower() for n in _toolhelp_names()}
     except Exception:  # noqa – dann wie früher

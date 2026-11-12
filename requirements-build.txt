@@ -1,0 +1,5 @@
+# Feste Versionen für den .exe-Build (Release-Workflow und setup.bat).
+# Neue Versionen bewusst hier anheben – nicht still beim Build.
+pyinstaller==6.22.3
+pyinstaller-hooks-contrib==2026.10
+tkinterdnd2==0.7.0

@@ -195,13 +195,13 @@ def apply_theme(root) -> dict:
     style.configure("SideKicker.TLabel", background=t["header"], foreground=t["gold"], font=fonts["label"])
     style.configure("Nav.TButton", background=t["header"], foreground=t["text"], font=fonts["base"],
                     bordercolor=t["header"], lightcolor=t["header"], darkcolor=t["header"],
-                    anchor="w", padding=(14, 5), relief="flat")
+                    anchor="w", padding=(14, 4), relief="flat")
     style.map("Nav.TButton", background=[("active", t["panel"])], foreground=[("active", t["gold"])],
               bordercolor=[("active", t["header"])], lightcolor=[("active", t["panel"])],
               darkcolor=[("active", t["panel"])])
     style.configure("NavActive.TButton", background=t["active"], foreground=t["gold"], font=fonts["bold"],
                     bordercolor=t["gold"], lightcolor=t["active"], darkcolor=t["active"],
-                    anchor="w", padding=(14, 5), relief="flat")
+                    anchor="w", padding=(14, 4), relief="flat")
     style.map("NavActive.TButton", background=[("active", t["active"])])
     style.configure("Kicker.TLabel", background=t["bg"], foreground=t["gold"], font=fonts["label"])
     style.configure("PageTitle.TLabel", background=t["bg"], foreground=t["text"], font=fonts["page"])

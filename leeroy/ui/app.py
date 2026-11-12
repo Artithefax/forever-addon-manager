@@ -96,6 +96,11 @@ class App(LayoutMixin, NotifyMixin, WidgetsMixin, AddonsPage, DiscoverPage, Upda
         for seq, fn in (("<Control-f>", self._key_search), ("<Control-F>", self._key_search),
                         ("<F5>", self._key_refresh), ("<Delete>", self._key_delete)):
             self.bind(seq, fn)
+        # Strg+1 … Strg+9: Seiten in der Reihenfolge der Seitenleiste, Strg+, die Einstellungen
+        order = [k for _, keys in self.NAV_GROUPS for k in keys]
+        for i, key in enumerate(order[:9], 1):
+            self.bind(f"<Control-Key-{i}>", lambda e, k=key: self._key_page(k))
+        self.bind("<Control-comma>", lambda e: self._key_page("settings"))
         log.info("Gestartet: %s %s, Ordner=%s, Version=%s, Daten=%s", APP_NAME, APP_VERSION,
                  self.root_path, self.flavor, config_dir())
 
@@ -116,7 +121,10 @@ class App(LayoutMixin, NotifyMixin, WidgetsMixin, AddonsPage, DiscoverPage, Upda
         def work():
             return recover_staging(root, flavor), prune_rollbacks(flavor, keep)
 
-        def done(res):
+        def done(res, err):
+            if err:
+                log.warning("Aufräumen nach dem Start: %s", err)
+                return
             back, removed = res
             if removed:
                 log.info("%d alte Rückgängig-Versionen gelöscht", removed)
@@ -168,6 +176,11 @@ class App(LayoutMixin, NotifyMixin, WidgetsMixin, AddonsPage, DiscoverPage, Upda
         if entry is not None and entry.winfo_exists():
             entry.focus_set()
             entry.select_range(0, "end")
+        return "break"
+
+    def _key_page(self, key: str):
+        if not self.asking and key in self.pages:
+            self.show_page(key)
         return "break"
 
     def _key_refresh(self, event=None):

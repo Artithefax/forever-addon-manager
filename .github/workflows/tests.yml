@@ -1,0 +1,40 @@
+# Tests und Code-Prüfung – bei jedem Push auf main, bei Pull Requests und vor jedem Release-Build.
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+    inputs:
+      ref:
+        description: "Commit oder Tag, der geprüft wird (leer = der auslösende)"
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Werkzeuge installieren
+        run: |
+          python -m pip install -r requirements-dev.txt
+          sudo apt-get install -y --no-install-recommends xvfb >/dev/null
+
+      - name: Code-Prüfung (ruff)
+        run: ruff check .
+
+      - name: Tests (Logik, Leeroylink-Szenario, Übersetzungen, Fenster unter Xvfb)
+        run: xvfb-run -a python -m unittest discover -s tests -v

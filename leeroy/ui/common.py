@@ -1,6 +1,7 @@
 """Hauptfenster: CommonMixin."""
 from __future__ import annotations
 
+import os
 import queue
 import subprocess
 import sys
@@ -85,12 +86,13 @@ class CommonMixin:
             return
         try:
             flags = 0x00000008 | 0x00000200 if sys.platform.startswith("win") else 0  # losgelöst
-            subprocess.Popen([str(exe)], cwd=str(exe.parent), close_fds=True, creationflags=flags,
-                             env=clean_child_env())
+            proc = subprocess.Popen([str(exe)], cwd=str(exe.parent), close_fds=True, creationflags=flags,
+                                    env=clean_child_env())
         except OSError as e:
             self.error(tr("WoW konnte nicht gestartet werden:\n{0}", e))
             return
         log.info("WoW gestartet: %s", exe)
+        self._watch_game_start(proc, time.time())
         self.set_status(tr("{0} gestartet. Falls WoW nach dem Login fragt: Battle.net-App öffnen.", exe.name))
         btn = self.play_btn
         btn.state(["disabled"])
@@ -101,6 +103,28 @@ class CommonMixin:
             except tk.TclError:
                 pass          # Ansicht inzwischen gewechselt
         self.after(15000, enable)   # Doppelstarts vermeiden
+
+    GAME_EARLY_EXIT = 25            # Sekunden: endet WoW früher, ist meist die Battle.net-App im Weg
+
+    def _watch_game_start(self, proc, started: float):
+        """Endet WoW gleich nach dem Start wieder, steckt fast immer die Battle.net-App dahinter: Sie aktualisiert
+        oder repariert gerade das Spiel und hält dessen Daten gesperrt („container locked“)."""
+        code = proc.poll()
+        if code is None:
+            if time.time() - started < self.GAME_EARLY_EXIT:
+                self.after(1000, lambda: self._watch_game_start(proc, started))
+            return
+        log.warning("WoW nach %.0f s beendet (Code %s)", time.time() - started, code)
+        acts = [(tr("Battle.net öffnen"), self.open_battlenet)] if sys.platform.startswith("win") else []
+        self.notify(tr("WoW hat sich gleich nach dem Start wieder beendet. Meist aktualisiert oder repariert die "
+                       "Battle.net-App gerade das Spiel und hält seine Dateien gesperrt („container locked“). Warte, "
+                       "bis sie fertig ist, oder starte WoW einmal über die Battle.net-App."), "warn", acts, key="gamestart")
+
+    def open_battlenet(self):
+        try:
+            os.startfile("battlenet://")          # öffnet die Battle.net-App, wenn sie installiert ist
+        except (AttributeError, OSError) as e:
+            self.warn(tr("Die Battle.net-App ließ sich nicht öffnen: {0}", e))
 
     def open_header_link(self, url: str):
         self.open_link(wowhead_base(self.cfg.get("wowhead_edition", "classic")) if url == "wowhead" else url)

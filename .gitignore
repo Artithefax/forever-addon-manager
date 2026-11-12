@@ -2,6 +2,7 @@
 build/
 dist/
 *.spec
+!leeroyzan.spec
 .build_venv/
 .build_tools/
 
@@ -24,3 +25,7 @@ backups/
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# Wartebereich des Selbst-Updates (Python-Variante)
+.leeroyzan-update/
+*.bak

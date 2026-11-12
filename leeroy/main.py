@@ -119,15 +119,76 @@ def finish_update_main(old_exe: Path, pids: list[int], tag: str) -> None:
     root.mainloop()
 
 
+def parse_finish_args(argv: list[str]) -> tuple[Path, list[int], str] | None:
+    """--finish-update <alte .exe> <PIDs> <Tag> -> (Pfad, PIDs, Tag), sonst None."""
+    if len(argv) < 5 or argv[1] != FINISH_FLAG:
+        return None
+    pids = [int(x) for x in argv[3].split(",") if x.strip().isdigit()]
+    return Path(argv[2]), pids, argv[4]
+
+
+SELFTEST_FLAG = "--selftest"
+
+
+def selftest(out: Path | None) -> int:
+    """Rauchtest der fertigen .exe im Release-Workflow (vor dem Hochladen): Fenster aufbauen, jede Seite
+    zeigen, Mitgeliefertes prüfen. Ergebnis in die Datei out, Rückgabewert 0 = alles in Ordnung."""
+    import tempfile
+    import traceback
+    from .constants import APP_VERSION
+    from .i18n import TRANSLATIONS
+    from .linkaddon import bundled_link_dir
+    from .ui.base import HAS_DND
+    lines, ok = [f"version {APP_VERSION}", f"frozen {bool(getattr(sys, 'frozen', False))}"], True
+
+    def check(name: str, cond: bool, detail: str = "") -> None:
+        nonlocal ok
+        lines.append(f"{'ok  ' if cond else 'FAIL'} {name}{(': ' + detail) if detail else ''}")
+        ok = ok and cond
+
+    check("leeroylink", bundled_link_dir() is not None, str(bundled_link_dir()))
+    check("translations", len(TRANSLATIONS.get("en", {})) > 900, str(len(TRANSLATIONS.get("en", {}))))
+    check("drag-and-drop", HAS_DND or not getattr(sys, "frozen", False))
+    check("finish-update args", parse_finish_args(["x", FINISH_FLAG, "C:/a.exe", "1,2", "2.0.0"])
+          == (Path("C:/a.exe"), [1, 2], "2.0.0"))
+    try:
+        from .wow import process_names
+        check("process list", isinstance(process_names(), set))
+        os.environ["APPDATA"] = tempfile.mkdtemp(prefix="lz-selftest-")   # nie die echten Einstellungen anfassen
+        errors: list[str] = []
+        import logging
+
+        class Collect(logging.Handler):
+            def emit(self, record):
+                if record.levelno >= logging.ERROR and record.exc_info:
+                    errors.append(self.format(record))
+        log.addHandler(Collect())
+        app = App()
+        app.report_callback_exception = lambda e, v, tb: errors.append("".join(traceback.format_exception(e, v, tb)))
+        app.update()
+        for key in list(app.pages):
+            app.show_page(key)
+            app.update()
+        app.destroy()
+        check("window and pages", not errors, " | ".join(errors)[:2000])
+    except Exception:  # noqa
+        check("window and pages", False, traceback.format_exc()[-2000:])
+    text = "\n".join(lines) + "\n" + ("SELFTEST OK" if ok else "SELFTEST FAILED") + "\n"
+    if out:
+        out.write_text(text, encoding="utf-8")
+    elif sys.stdout:
+        sys.stdout.write(text)
+    return 0 if ok else 1
+
+
 def main():
+    if len(sys.argv) >= 2 and sys.argv[1] == SELFTEST_FLAG:
+        sys.exit(selftest(Path(sys.argv[2]) if len(sys.argv) >= 3 else None))
     setup_logging()
-    if len(sys.argv) >= 5 and sys.argv[1] == FINISH_FLAG:
-        try:
-            pids = [int(x) for x in sys.argv[3].split(",") if x.strip().isdigit()]
-        except ValueError:
-            pids = []
-        log.info("Update %s: setze die neue Version ein (%s)", sys.argv[4], sys.argv[2])
-        finish_update_main(Path(sys.argv[2]), pids, sys.argv[4])
+    finish = parse_finish_args(sys.argv)
+    if finish:
+        log.info("Update %s: setze die neue Version ein (%s)", finish[2], finish[0])
+        finish_update_main(*finish)
         return
     app = App()
     app.mainloop()

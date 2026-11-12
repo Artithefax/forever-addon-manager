@@ -4,6 +4,7 @@ Needs a display (on Linux: xvfb-run python3 -m unittest tests.test_gui). Without
 display the tests are skipped. Every exception from a Tk callback counts as a failure.
 """
 import json
+import logging
 import os
 import shutil
 import sys
@@ -57,6 +58,14 @@ class WindowSmokeTests(unittest.TestCase):
         write_config(layout, language)
         errors: list[str] = []
         lz.setup_logging()
+
+        class Collect(logging.Handler):          # Fehler, die Leeroyzan abfängt und nur ins Log schreibt
+            def emit(self, record):
+                if record.levelno >= logging.ERROR and record.exc_info:
+                    errors.append(self.format(record))
+        handler = Collect()
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        lz.log.addHandler(handler)
         app = lz.App()
         app.report_callback_exception = lambda e, v, tb: errors.append("".join(traceback.format_exception(e, v, tb)))
         try:
@@ -68,6 +77,7 @@ class WindowSmokeTests(unittest.TestCase):
                     errors.append(f"{key}: {traceback.format_exc()}")
                 app.update()
             app.refresh()
+            app._housekeeping()
             deadline = time.time() + 1.5
             while time.time() < deadline:       # background jobs and timers
                 app.update()
@@ -82,6 +92,7 @@ class WindowSmokeTests(unittest.TestCase):
             for job in app.tk.splitlist(app.tk.call("after", "info")):
                 app.after_cancel(job)
             app.destroy()
+            lz.log.removeHandler(handler)
         return errors
 
     def test_layouts_and_languages(self):
