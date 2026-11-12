@@ -25,7 +25,7 @@ class WindowsTests(unittest.TestCase):
         self.assertIsInstance(sealed, dict)
         self.assertNotIn("geheim", str(sealed))
         self.assertEqual(vault.unseal(sealed), "geheim – äöü")
-        with self.assertRaises(Exception):
+        with self.assertRaises(OSError):
             vault.unseal({"dpapi": "AAAA"})                  # fremde Daten: Fehler statt Unsinn
 
     def test_config_keeps_secrets_readable(self):
