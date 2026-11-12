@@ -148,9 +148,6 @@ class ConfigTests(unittest.TestCase):
             config.SECRETS_LOST.clear()
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class SignatureTests(unittest.TestCase):
     def run_check(self, cur, new):
@@ -214,3 +211,7 @@ class MoveRetryTests(unittest.TestCase):
             files.shutil.move = real
         self.assertEqual(calls["n"], 3)
         self.assertTrue(dst.is_dir())
+
+
+if __name__ == "__main__":
+    unittest.main()
