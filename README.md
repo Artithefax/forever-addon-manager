@@ -120,8 +120,9 @@ ruff check .
 - `tests/test_files.py` covers installing, undo, interrupted updates, parked sources, settings, encryption and signatures.
 - `tests/test_gui.py` opens the window in every layout and language and shows every page (on Linux: `xvfb-run -a python -m unittest tests.test_gui`).
 - `tests/test_i18n.py`, `tests/test_static.py` and `tests/test_lua_globals.py` check translations, typical mistakes in the source and stray Lua globals (needs `luac`).
+- `tests/test_windows.py` covers what only exists on Windows: encrypted keys (DPAPI), the process list, waiting for a process, replacing the `.exe` and the signature check.
 
-The same runs on GitHub for every push and pull request and before every release build.
+The same runs on GitHub for every push and pull request and before every release build – on Linux and on Windows, where the `.exe` is also built once and started in self-test mode.
 
 ## Requirements
 
