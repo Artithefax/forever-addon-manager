@@ -1,32 +1,47 @@
-# Baut Leeroyzan.exe, Leeroyzan-Portable.zip und Leeroylink.zip, sobald auf GitHub ein Release veröffentlicht wird,
-# und hängt beides (plus SHA-256-Prüfsumme der .exe) an das Release an.
+# Baut Leeroyzan.exe, Leeroyzan-Portable.zip und Leeroylink.zip und hängt sie (plus SHA-256 der .exe) an ein Release.
+#
+# Empfohlen: Actions -> Build release exe -> Run workflow, Version eintragen (z. B. 2.0.0).
+#   Der Workflow prüft die Tests, legt das Release als Entwurf an (Text aus CHANGELOG.md), baut und testet die .exe
+#   und veröffentlicht erst, wenn alles angehängt ist – niemand sieht ein Release ohne .exe.
+# Weiterhin möglich: ein Release von Hand veröffentlichen – dann wird danach gebaut (wie bisher), ein leerer
+#   Release-Text wird aus CHANGELOG.md ergänzt.
+#
+# Code-Signatur (optional): Sobald das Repository-Secret SIGNPATH_API_TOKEN und die Variable
+#   SIGNPATH_ORGANIZATION_ID gesetzt sind, wird die .exe über die SignPath Foundation signiert.
 # Python steckt in der .exe – wer Leeroyzan nutzt, braucht kein Python.
-# Der Auto-Updater im Manager lädt Leeroyzan.exe und Leeroyzan.exe.sha256.
 
 name: Build release exe
 
 on:
   release:
     types: [published]
-  workflow_dispatch:        # manuell startbar (Actions -> Build release exe -> Run workflow)
+  workflow_dispatch:
     inputs:
       tag:
-        description: "Release-Tag, an das die .exe angehängt wird (z. B. v2.2.0)"
+        description: "Version, z. B. 2.0.0 (muss zu APP_VERSION in leeroy/constants.py passen)"
         required: true
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
+  test:
+    uses: ./.github/workflows/tests.yml
+    with:
+      ref: ${{ github.event_name == 'release' && github.event.release.tag_name || github.sha }}
+
   build:
+    needs: test
     runs-on: windows-latest
     env:
       TAG: ${{ github.event.release.tag_name || inputs.tag }}
       GH_TOKEN: ${{ github.token }}
+      SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ env.TAG }}
+          ref: ${{ github.event_name == 'release' && github.event.release.tag_name || github.sha }}
 
       - uses: actions/setup-python@v5
         with:
@@ -35,7 +50,7 @@ jobs:
       - name: Versionsnummer prüfen
         shell: pwsh
         run: |
-          $line = Select-String -Path leeroyzan.py -Pattern '^APP_VERSION = "(.+)"' | Select-Object -First 1
+          $line = Select-String -Path leeroy\constants.py -Pattern '^APP_VERSION = "(.+)"' | Select-Object -First 1
           $code = $line.Matches[0].Groups[1].Value
           $tag  = $env:TAG -replace '^v', ''
           Write-Host "APP_VERSION im Code: $code  /  Release-Tag: $tag"
@@ -44,19 +59,73 @@ jobs:
             exit 1
           }
 
-      - name: Abhängigkeiten installieren
-        run: python -m pip install --upgrade pip pyinstaller tkinterdnd2
+      - name: Release-Text aus CHANGELOG.md
+        shell: pwsh
+        run: python tools/release_notes.py $env:TAG notes.md
 
-      - name: EXE bauen
+      - name: Release als Entwurf anlegen (Run workflow)
+        if: github.event_name == 'workflow_dispatch'
         shell: pwsh
         run: |
-          $icon = @()
-          if (Test-Path leeroyzan.ico) { $icon = @('--icon', 'leeroyzan.ico') }
-          pyinstaller --noconfirm --clean --onefile --windowed `
-            --name Leeroyzan @icon `
-            --collect-all tkinterdnd2 `
-            --add-data "Leeroylink;Leeroylink" `
-            leeroyzan.py
+          gh release view $env:TAG --json tagName *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $env:TAG --draft --title $env:TAG --notes-file notes.md --target $env:GITHUB_SHA
+          } else {
+            Write-Host "Release $env:TAG gibt es schon – es wird nur gebaut und angehängt."
+          }
+
+      - name: Leeren Release-Text ergänzen (Release von Hand)
+        if: github.event_name == 'release'
+        shell: pwsh
+        run: |
+          $body = gh release view $env:TAG --json body --jq .body
+          if (-not "$body".Trim()) { gh release edit $env:TAG --notes-file notes.md }
+
+      - name: Abhängigkeiten installieren (feste Versionen)
+        run: python -m pip install -r requirements-build.txt
+
+      - name: EXE bauen
+        run: python -m PyInstaller --noconfirm --clean leeroyzan.spec
+
+      - name: Unsignierte EXE bereitstellen (für SignPath)
+        if: env.SIGNPATH_API_TOKEN != ''
+        id: unsigned
+        uses: actions/upload-artifact@v4
+        with:
+          name: Leeroyzan-unsigned
+          path: dist/Leeroyzan.exe
+
+      - name: EXE signieren (SignPath Foundation)
+        if: env.SIGNPATH_API_TOKEN != ''
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: leeroyzan
+          signing-policy-slug: release-signing
+          github-artifact-id: ${{ steps.unsigned.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: dist/signed
+
+      - name: Signierte EXE übernehmen
+        if: env.SIGNPATH_API_TOKEN != ''
+        shell: pwsh
+        run: Copy-Item dist\signed\Leeroyzan.exe dist\Leeroyzan.exe -Force
+
+      - name: Rauchtest der fertigen .exe
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP "selftest"
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          Copy-Item dist\Leeroyzan.exe $dir
+          $out = Join-Path $dir "selftest.txt"
+          $p = Start-Process -FilePath (Join-Path $dir "Leeroyzan.exe") -ArgumentList "--selftest", "`"$out`"" -Wait -PassThru
+          if (Test-Path $out) { Get-Content $out } else { Write-Host "Keine Ausgabe vom Rauchtest." }
+          $want = "version " + ($env:TAG -replace '^v', '')
+          if ($p.ExitCode -ne 0 -or -not (Select-String -Path $out -SimpleMatch $want -Quiet)) {
+            Write-Error "Rauchtest der .exe fehlgeschlagen (Exit-Code $($p.ExitCode))."
+            exit 1
+          }
 
       - name: Prüfsumme erzeugen
         shell: pwsh
@@ -87,3 +156,8 @@ jobs:
           Copy-Item portable-readme.txt "$stage\Leeroyzan-Data\README.txt"
           Compress-Archive -Path $stage -DestinationPath dist\Leeroyzan-Portable.zip -Force
           gh release upload $env:TAG dist\Leeroyzan-Portable.zip --clobber
+
+      - name: Veröffentlichen (Run workflow)
+        if: github.event_name == 'workflow_dispatch'
+        shell: pwsh
+        run: gh release edit $env:TAG --draft=false --latest

@@ -1091,4 +1091,13 @@ EN: dict[str, str] = {
     'Alle Rückgängig-Versionen löschen': 'Delete all undo versions',
     'Rückgängig-Versionen: {0} für {1} Addons.': 'Undo versions: {0} for {1} addons.',
     'Lese Addons …': 'Reading addons …',
+    'Die Signatur der neuen Version ist ungültig ({0}) – Update abgebrochen.': 'The signature of the new version is invalid ({0}) – update cancelled.',
+    'Die neue Version ist nicht signiert, die installierte schon – Update abgebrochen.': 'The new version is not signed but the installed one is – update cancelled.',
+    'Die neue Version stammt von einem anderen Herausgeber ({0}) – Update abgebrochen.': 'The new version comes from a different publisher ({0}) – update cancelled.',
+    'WoW hat sich gleich nach dem Start wieder beendet. Meist aktualisiert oder repariert die Battle.net-App gerade das Spiel und hält seine Dateien gesperrt („container locked“). Warte, bis sie fertig ist, oder starte WoW einmal über die Battle.net-App.': 'WoW closed right after starting. Usually the Battle.net app is updating or repairing the game and keeps its files locked ("container locked"). Wait until it has finished, or start WoW once from the Battle.net app.',
+    'Battle.net öffnen': 'Open Battle.net',
+    'Die Battle.net-App ließ sich nicht öffnen: {0}': 'The Battle.net app could not be opened: {0}',
+    'Im Spiel': 'In game',
+    'Werkzeuge': 'Tools',
+    'Tastenkürzel: Strg+1 bis Strg+9 wechseln die Seite (Reihenfolge wie links), Strg+, öffnet die Einstellungen, Strg+F sucht, F5 liest neu ein, Entf entfernt.': 'Shortcuts: Ctrl+1 to Ctrl+9 switch pages (in sidebar order), Ctrl+, opens the settings, Ctrl+F searches, F5 reloads, Del removes.',
 }

@@ -74,6 +74,9 @@ class SettingsPage:
         for text, cmd in ((tr("Log öffnen"), self.open_log), (tr("Datenordner öffnen"), lambda: open_in_explorer(config_dir())),
                           (tr("Addon-Ordner öffnen"), lambda: self.open_folder([])), (tr("Neu einlesen"), self.refresh)):
             ttk.Button(hbox, text=text, command=cmd).pack(anchor="w", pady=(0, 6), fill="x")
+        ttk.Label(hbox, style="Panel.TLabel", foreground=THEME["text_faint2"], wraplength=360, justify="left",
+                  text=tr("Tastenkürzel: Strg+1 bis Strg+9 wechseln die Seite (Reihenfolge wie links), Strg+, öffnet "
+                          "die Einstellungen, Strg+F sucht, F5 liest neu ein, Entf entfernt.")).pack(anchor="w", pady=(2, 8))
         links = ttk.Frame(hbox, style="Panel.TFrame")
         links.pack(fill="x", pady=(6, 0))
         for i, (text, url) in enumerate(HEADER_LINKS):
@@ -82,7 +85,9 @@ class SettingsPage:
                 row=0, column=i, sticky="ew", padx=(0 if i == 0 else 6, 0))
 
     def refresh_rollback_usage(self):
-        def done(res):
+        def done(res, err):
+            if err or not res:
+                return
             size, count = res
             try:
                 self.rb_label.configure(text=tr("Rückgängig-Versionen: {0} für {1} Addons.", fmt_bytes(size), count))

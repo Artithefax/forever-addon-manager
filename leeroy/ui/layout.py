@@ -20,6 +20,9 @@ class LayoutMixin:
     PAGES = [("addons", "Meine Addons"), ("discover", "Entdecken"), ("updates", "Updates"),
              ("sessions", "Leeroylink"), ("characters", "Charaktere"), ("quests", "Quests"), ("auction", "Auktionshaus"), ("wowhead", "Wowhead"), ("diagnose", "Diagnose"),
              ("share", "Teilen"), ("sets", "Sets & Backups"), ("settings", "Einstellungen")]
+    NAV_GROUPS = [("Addons", ("addons", "discover", "updates")),
+                  ("Im Spiel", ("sessions", "characters", "quests", "auction", "wowhead")),
+                  ("Werkzeuge", ("diagnose", "share", "sets", "settings"))]
     TREE_SHOWN = ("status", "name", "version", "source", "update")
 
     def _build_ui(self):
@@ -125,19 +128,15 @@ class LayoutMixin:
                         if lf.measure(x) <= 144), "ADDON MANAGER")
         brand.create_text(64, 20, anchor="w", fill=t["gold"], font=self.fonts["label"], text=tagline)
         brand.create_text(63, 44, anchor="w", fill=t["gold"], font=self.fonts["side"], text="LEEROYZAN")
-        ttk.Label(side, text=spaced(tr("Spielversion")), style="SideKicker.TLabel").pack(anchor="w", pady=(18, 6))
-        self._w_flavor(side, width=22).pack(fill="x")
-        nav = ttk.Frame(side, style="Side.TFrame")
-        nav.pack(fill="x", pady=(18, 0))
-        for key, label in self.PAGES:
-            b = ttk.Button(nav, text=tr(label), style="Nav.TButton", cursor="hand2",
-                           command=lambda k=key: self.show_page(k))
-            b.pack(fill="x", pady=1)
-            self.nav_buttons[key] = b
+        self._nav_after_brand = ttk.Label(side, text=spaced(tr("Spielversion")), style="SideKicker.TLabel")
+        self._nav_after_brand.pack(anchor="w", pady=(18, 6))
+        self._nav_flavor = self._w_flavor(side, width=22)
+        self._nav_flavor.pack(fill="x")
         bottom = ttk.Frame(side, style="Side.TFrame")
         bottom.pack(side="bottom", fill="x")
         links = tk.Frame(bottom, bg=t["header"])
         links.pack(pady=(0, 10))
+        self._nav_links = links
         for i, (text, url) in enumerate(HEADER_LINKS):
             if i:
                 tk.Label(links, text="·", bg=t["header"], fg=t["text_faint"], font=self.fonts["small"]).pack(side="left", padx=1)
@@ -147,11 +146,33 @@ class LayoutMixin:
             lbl.bind("<Enter>", lambda e, w=lbl: w.configure(fg=t["gold"]))
             lbl.bind("<Leave>", lambda e, w=lbl: w.configure(fg=t["text_dim"]))
         tk.Frame(bottom, height=1, bg=t["line"]).pack(fill="x", pady=(0, 12))
-        self._w_play(bottom, style="BigPlay.TButton", text=tr("▶   SPIELEN")).pack(fill="x")
-        ttk.Label(bottom, textvariable=self.game_info_var, style="Side.TLabel", anchor="center",
-                  justify="center", wraplength=200).pack(fill="x", pady=(8, 0))
-        ttk.Label(bottom, text=tr("Leeroyzan v{0}", APP_VERSION), style="Side.TLabel",
-                  anchor="center").pack(fill="x")
+        self._nav_play = self._w_play(bottom, style="BigPlay.TButton", text=tr("▶   SPIELEN"))
+        self._nav_play.pack(fill="x")
+        self._nav_info = ttk.Label(bottom, textvariable=self.game_info_var, style="Side.TLabel", anchor="center",
+                                   justify="center", wraplength=200)
+        self._nav_info.pack(fill="x", pady=(8, 0))
+        self._nav_version = ttk.Label(bottom, text=tr("Leeroyzan v{0}", APP_VERSION), style="Side.TLabel", anchor="center")
+        self._nav_version.pack(fill="x")
+
+        nav = ttk.Frame(side, style="Side.TFrame")
+        nav.pack(fill="x", pady=(14, 0))
+        labels = dict(self.PAGES)
+        self._nav_heads = []
+        for i, (title, keys) in enumerate(self.NAV_GROUPS):
+            if i:                          # Gruppen durch eine feine Linie trennen (Titel kosten zu viel Höhe)
+                sep = tk.Frame(nav, height=1, bg=t["line"])
+                sep.pack(fill="x", padx=14, pady=6)
+                self._nav_heads.append(sep)
+            for key in keys:
+                b = ttk.Button(nav, text=tr(labels[key]), style="Nav.TButton", cursor="hand2",
+                               command=lambda k=key: self.show_page(k))
+                b.pack(fill="x", pady=1)
+                self.nav_buttons[key] = b
+        self._nav_brand, self._nav_frame, self._nav_bottom = brand, nav, bottom
+        self._nav_level, self._nav_need = 0, {}
+        for name in ("Nav.TButton", "NavActive.TButton"):      # nach einem Neuaufbau wieder normal beginnen
+            ttk.Style(self).configure(name, padding=self.NAV_PAD[False])
+        side.bind("<Configure>", lambda e: self.after_idle(lambda h=e.height: self._fit_sidebar(h)), add="+")
 
         main = ttk.Frame(root)
         main.pack(side="left", fill="both", expand=True)
@@ -173,6 +194,47 @@ class LayoutMixin:
         self._page_settings()
         self._fit_wraps(self.page_host)
         self.show_page(self.cfg.get("last_page", "addons"))
+
+    def _fit_sidebar(self, height: int):
+        """Passt die Seitenleiste an die Fensterhöhe an, damit alle Seiten und „Spielen“ sichtbar bleiben:
+        Stufe 1 ohne Links und Spielinfo, Stufe 2 zusätzlich ohne Logo und mit engeren Knöpfen. Gemessen wird
+        echt (Platzbedarf gegen Platz) – das klappt auch mit 125 % Windows-Skalierung."""
+        try:
+            if not self._nav_frame.winfo_exists() or self._nav_frame.winfo_height() <= 1:
+                return
+            level = self._nav_level
+            if level > 0 and height >= self._nav_need.get(level - 1, 1 << 30):
+                self._set_sidebar_level(level - 1)
+                self.after_idle(lambda: self._fit_sidebar(height))
+                return
+            overflow = self._nav_frame.winfo_reqheight() - self._nav_frame.winfo_height()
+            if overflow > 0 and level < 2:
+                self._nav_need[level] = height + overflow + 4
+                self._set_sidebar_level(level + 1)
+                self.after_idle(lambda: self._fit_sidebar(height))
+        except tk.TclError:
+            pass
+
+    NAV_PAD = {False: (14, 4), True: (14, 1)}
+
+    def _set_sidebar_level(self, level: int):
+        self._nav_level = level
+        compact = level >= 2
+        style = ttk.Style(self)
+        for name in ("Nav.TButton", "NavActive.TButton"):
+            style.configure(name, padding=self.NAV_PAD[compact])
+        for sep in self._nav_heads:
+            sep.pack_configure(pady=2 if compact else 6)
+        for w in (self._nav_brand, self._nav_after_brand, self._nav_links, self._nav_info, self._nav_version):
+            w.pack_forget()
+        if not compact:
+            self._nav_brand.pack(fill="x", before=self._nav_flavor)
+            self._nav_after_brand.pack(anchor="w", pady=(18, 6), before=self._nav_flavor)
+            self._nav_version.pack(fill="x", after=self._nav_play)
+        if level == 0:
+            self._nav_links.pack(pady=(0, 10), before=self._nav_bottom.pack_slaves()[0])
+            self._nav_info.pack(fill="x", pady=(8, 0), after=self._nav_play)
+        self._nav_frame.pack_configure(pady=(8, 0) if compact else (14, 0))
 
     def _fit_wraps(self, widget):
         """Längere Fließtexte an die tatsächliche Kastenbreite anpassen – sonst werden lange

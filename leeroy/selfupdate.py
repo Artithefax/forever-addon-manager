@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import re
@@ -12,6 +13,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 from datetime import datetime
 from pathlib import Path
 
@@ -86,8 +88,9 @@ def self_update_asset(info: dict) -> dict | None:
 
 def script_update_possible() -> bool:
     """Python-Variante: Skript darf sich selbst ersetzen (nicht in einer Git-Arbeitskopie)."""
-    p = app_dir() / SCRIPT_ASSET
-    return p.suffix == ".py" and not (p.parent / ".git").exists() and os.access(p.parent, os.W_OK)
+    base = app_dir()
+    return (base / SCRIPT_ASSET).is_file() and (base / "leeroy").is_dir() and not (base / ".git").exists() \
+        and os.access(base, os.W_OK)
 
 
 def update_ready(info: dict) -> bool:
@@ -152,33 +155,99 @@ def download_self_update(info: dict, token: str = "", progress: dict | None = No
         target.write_bytes(blob)
     except PermissionError:
         raise PermissionError(tr("Keine Schreibrechte in {0}. Verschiebe den Manager z. B. in deinen Benutzerordner oder lade das Update von der Release-Seite.", target.parent)) from None
+    try:
+        check_update_signature(target)
+    except ValueError:
+        target.unlink(missing_ok=True)
+        raise
     return target
+
+
+SCRIPT_PARTS = (SCRIPT_ASSET, "leeroy", "Leeroylink")     # was die Python-Variante beim Update austauscht
+
+
+def script_update_dir() -> Path:
+    return app_dir() / ".leeroyzan-update"
 
 
 def download_script_update(info: dict, token: str = "", progress: dict | None = None) -> Path:
-    """Python-Variante: lädt leeroyzan.py des Releases und prüft Version und Syntax."""
-    url = f"https://raw.githubusercontent.com/{UPDATE_REPO}/{urllib.parse.quote(info['tag'])}/{SCRIPT_ASSET}"
-    try:
-        text = http_get(url, token, accept="text/plain").decode("utf-8")
-    except UnicodeDecodeError:
-        raise ValueError(tr("Die geladene Datei ist kein gültiges Skript.")) from None
+    """Python-Variante: lädt den Quellcode des Releases (ZIP), legt leeroyzan.py, leeroy/ und Leeroylink/ in einen
+    Wartebereich und prüft Version und Syntax. Gibt den Wartebereich zurück."""
+    url = f"https://api.github.com/repos/{UPDATE_REPO}/zipball/{urllib.parse.quote(info['tag'])}"
+    blob = download_with_progress(url, token, accept="application/vnd.github+json", progress=progress)
+    stage = script_update_dir()
+    shutil.rmtree(stage, ignore_errors=True)
+    stage.mkdir(parents=True)
+    with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+        for m in zf.infolist():
+            parts = m.filename.split("/", 1)
+            if len(parts) < 2 or not parts[1] or not parts[1].startswith(SCRIPT_PARTS) or m.is_dir():
+                continue
+            dest = (stage / parts[1]).resolve()
+            if stage.resolve() not in dest.parents:
+                raise ValueError(tr("Unsicherer Pfad im Archiv: {0}", m.filename))
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(zf.read(m))
+    consts = stage / "leeroy" / "constants.py"
+    text = consts.read_text(encoding="utf-8") if consts.is_file() else ""
     m = re.search(r'^APP_VERSION = "([^"]+)"', text, re.M)
-    if not m or parse_version(m.group(1)) != parse_version(info["tag"]):
+    if not (stage / SCRIPT_ASSET).is_file() or not m or parse_version(m.group(1)) != parse_version(info["tag"]):
+        shutil.rmtree(stage, ignore_errors=True)
         raise ValueError(tr("Die geladene Datei passt nicht zur Release-Version."))
-    compile(text, SCRIPT_ASSET, "exec")          # Syntaxfehler -> Abbruch, das alte Skript bleibt
-    target = (app_dir() / SCRIPT_ASSET).with_suffix(".new.py")
-    target.write_text(text, encoding="utf-8")
-    return target
+    for py in [stage / SCRIPT_ASSET, *(stage / "leeroy").rglob("*.py")]:
+        compile(py.read_text(encoding="utf-8"), str(py), "exec")      # Syntaxfehler -> Abbruch, das Alte bleibt
+    return stage
 
 
-def apply_script_update(new_script: Path) -> None:
-    """Ersetzt das laufende Skript (alte Fassung bleibt als .py.bak) und startet es neu."""
-    cur = app_dir() / SCRIPT_ASSET
-    shutil.copy2(cur, cur.with_suffix(".py.bak"))
-    os.replace(new_script, cur)
+def apply_script_update(stage: Path) -> None:
+    """Ersetzt leeroyzan.py, leeroy/ und Leeroylink/ (die alten Fassungen bleiben mit .bak) und startet neu."""
+    base = app_dir()
+    for name in SCRIPT_PARTS:
+        new = stage / name
+        if not new.exists():
+            continue
+        cur, bak = base / name, base / (name + ".bak")
+        if bak.is_dir():
+            shutil.rmtree(bak, ignore_errors=True)
+        elif bak.exists():
+            bak.unlink()
+        if cur.exists():
+            os.replace(cur, bak)
+        os.replace(new, cur)
+    shutil.rmtree(stage, ignore_errors=True)
     flags = 0x00000008 if os.name == "nt" else 0          # losgelöst starten
-    subprocess.Popen([sys.executable, str(cur), *sys.argv[1:]], close_fds=True, creationflags=flags,
+    subprocess.Popen([sys.executable, str(base / SCRIPT_ASSET), *sys.argv[1:]], close_fds=True, creationflags=flags,
                      env=clean_child_env())
+
+
+def authenticode(path: Path) -> tuple[str, str]:
+    """(Status, Signierer) der Windows-Signatur einer Datei, z. B. ("Valid", "CN=…"). ("", "") wenn nicht prüfbar."""
+    if os.name != "nt":
+        return "", ""
+    lit = str(path).replace("'", "''")
+    ps = (f"$s = Get-AuthenticodeSignature -LiteralPath '{lit}'; "
+          "Write-Output $s.Status; if ($s.SignerCertificate) { Write-Output $s.SignerCertificate.Subject }")
+    try:
+        out = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps], capture_output=True,
+                             text=True, timeout=60, creationflags=0x08000000).stdout.splitlines()
+    except (OSError, subprocess.SubprocessError):
+        return "", ""
+    out = [line.strip() for line in out if line.strip()]
+    return (out[0] if out else ""), (out[1] if len(out) > 1 else "")
+
+
+def check_update_signature(new_exe: Path, current: Path | None = None, verify=authenticode) -> None:
+    """Ist die laufende .exe signiert, muss die neue gültig und vom selben Herausgeber signiert sein. Eine kaputte
+    Signatur wird immer abgelehnt. (Die Prüfsumme allein beweist nur einen heilen Download, nicht die Herkunft.)"""
+    cur_status, cur_signer = verify(current or Path(sys.executable))
+    new_status, new_signer = verify(new_exe)
+    if new_status and new_status not in ("Valid", "NotSigned", "UnknownError"):
+        raise ValueError(tr("Die Signatur der neuen Version ist ungültig ({0}) – Update abgebrochen.", new_status))
+    if cur_status == "Valid":
+        if new_status != "Valid":
+            raise ValueError(tr("Die neue Version ist nicht signiert, die installierte schon – Update abgebrochen."))
+        if new_signer != cur_signer:
+            raise ValueError(tr("Die neue Version stammt von einem anderen Herausgeber ({0}) – Update abgebrochen.", new_signer))
 
 
 def clean_child_env() -> dict:
@@ -258,7 +327,7 @@ def cleanup_self_update(tries: int = 0) -> bool:
                 return True                              # diese Instanz IST die neue Datei
             new_exe_path().unlink(missing_ok=True)
         else:
-            (app_dir() / SCRIPT_ASSET).with_suffix(".new.py").unlink(missing_ok=True)
+            shutil.rmtree(script_update_dir(), ignore_errors=True)
         return True
     except OSError:
         return False

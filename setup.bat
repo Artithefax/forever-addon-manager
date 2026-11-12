@@ -21,8 +21,8 @@ REM  (siehe .gitattributes) - sonst bricht cmd.exe still ab.
 REM ==========================================================
 setlocal EnableExtensions
 cd /d "%~dp0"
-if not exist leeroyzan.py (
-    echo [ERROR] leeroyzan.py not found next to setup.bat.
+if not exist leeroyzan.spec (
+    echo [ERROR] leeroyzan.spec not found next to setup.bat.
     pause
     exit /b 1
 )
@@ -62,36 +62,15 @@ if errorlevel 1 goto :fail
 .build_tools\uv.exe venv --python 3.12 .build_venv
 if errorlevel 1 goto :fail
 echo [2/5] %M_DEPS%
-.build_tools\uv.exe pip install --python .build_venv\Scripts\python.exe pyinstaller tkinterdnd2
+.build_tools\uv.exe pip install --python .build_venv\Scripts\python.exe -r requirements-build.txt
 if errorlevel 1 goto :fail
 goto :build
-
-:with_python
-echo %M_USING% %PY%
-if exist .build_venv rmdir /s /q .build_venv
-echo [1/5] %M_ENV%
-%PY% -m venv .build_venv
-if errorlevel 1 goto :fail
-echo [2/5] %M_DEPS%
-.build_venv\Scripts\python.exe -m pip install --upgrade pip pyinstaller --quiet
-if errorlevel 1 goto :fail
-.build_venv\Scripts\python.exe -m pip install --upgrade tkinterdnd2 --quiet
-
-:build
-set "DND_OPT="
-.build_venv\Scripts\python.exe -c "import tkinterdnd2" >nul 2>&1 && set "DND_OPT=--collect-all tkinterdnd2"
-if not defined DND_OPT echo %M_NODND%
-set "ICON_OPT="
-if exist leeroyzan.ico set "ICON_OPT=--icon leeroyzan.ico"
-REM Das Begleit-Addon Leeroylink steckt mit in der .exe (Leeroyzan installiert es auf Wunsch)
-set "LINK_OPT="
-if exist Leeroylink\Leeroylink.toc set "LINK_OPT=--add-data Leeroylink;Leeroylink"
+.build_venv\Scripts\python.exe -c "import tkinterdnd2" >nul 2>&1 || echo %M_NODND%
+REM Bauplan leeroyzan.spec: Leeroylink steckt mit in der .exe, ungenutzte Tcl-Daten fehlen (schnellerer Start)
 echo [3/5] %M_BUILD%
-.build_venv\Scripts\python.exe -m PyInstaller --noconfirm --clean --onefile --windowed ^
-    --name Leeroyzan %ICON_OPT% %DND_OPT% %LINK_OPT% leeroyzan.py
+.build_venv\Scripts\python.exe -m PyInstaller --noconfirm --clean leeroyzan.spec
 if errorlevel 1 goto :fail
 if exist build rmdir /s /q build
-if exist Leeroyzan.spec del /q Leeroyzan.spec
 
 REM ---- Fertiger Ordner: .exe + "Leeroyzan-Data" ----------------------------
 REM Vorhandene Daten in dist\Leeroyzan-Portable\Leeroyzan-Data bleiben erhalten.
