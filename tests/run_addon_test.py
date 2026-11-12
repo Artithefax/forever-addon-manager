@@ -52,7 +52,7 @@ def run(addon: Path, part: int, sv_in: Path | None, start_now=None) -> tuple[int
     g.PART = part
     g.SV_IN = str(sv_in) if sv_in else None
     g.START_NOW = start_now
-    failures = lua.execute(f'return dofile("{HERE / "scenario.lua"}")')
+    failures = lua.execute(f'return dofile("{(HERE / "scenario.lua").as_posix()}")')
     return failures, serialize(lua, "LeeroylinkDB"), g.STUB.now
 
 
