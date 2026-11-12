@@ -1,7 +1,7 @@
 @echo off
 REM ==========================================================
 REM  setup.bat - baut die portable Version von Leeroyzan aus
-REM  leeroyzan.py:
+REM  dem Quellcode (leeroyzan.py + leeroy\):
 REM    dist\Leeroyzan-Portable\      fertiger Ordner zum Starten
 REM    dist\Leeroyzan-Portable.zip    zum Weitergeben (ohne deine
 REM                                   Einstellungen)
@@ -23,24 +23,30 @@ setlocal EnableExtensions
 cd /d "%~dp0"
 if not exist leeroyzan.spec (
     echo [ERROR] leeroyzan.spec not found next to setup.bat.
-    pause
+    if not defined LZ_CI pause
     exit /b 1
 )
 
 echo.
 echo   Leeroyzan Setup
 echo   ---------------
+REM LZ_LANG=de/en vorab gesetzt: keine Sprachfrage (z. B. im Test auf GitHub)
+if /i "%LZ_LANG%"=="de" goto :lang_set
+if /i "%LZ_LANG%"=="en" goto :lang_set
 echo   1 = Deutsch    2 = English
 echo.
 choice /c 12 /n /m "  > "
 if errorlevel 2 (set "LZ_LANG=en") else (set "LZ_LANG=de")
+:lang_set
 call :lang_%LZ_LANG%
 echo.
 
-REM Echtes Python suchen: zuerst den py-Launcher, dann python.
+REM Echtes Python suchen: zuerst Python 3.12 (damit bauen auch die Releases), dann
+REM irgendein Python 3.10+ ueber den py-Launcher, dann python.
 REM Der Microsoft-Store-Platzhalter besteht den Versionstest nicht.
 set "PY="
-py -3 -c "import sys; assert sys.version_info >= (3, 10)" >nul 2>&1 && set "PY=py -3"
+py -3.12 -c "import sys" >nul 2>&1 && set "PY=py -3.12"
+if not defined PY py -3 -c "import sys; assert sys.version_info >= (3, 10)" >nul 2>&1 && set "PY=py -3"
 if not defined PY python -c "import sys; assert sys.version_info >= (3, 10)" >nul 2>&1 && set "PY=python"
 if defined PY goto :with_python
 
@@ -65,6 +71,19 @@ echo [2/5] %M_DEPS%
 .build_tools\uv.exe pip install --python .build_venv\Scripts\python.exe -r requirements-build.txt
 if errorlevel 1 goto :fail
 goto :build
+
+:with_python
+echo %M_USING% %PY%
+if exist .build_venv rmdir /s /q .build_venv
+echo [1/5] %M_ENV%
+%PY% -m venv .build_venv
+if errorlevel 1 goto :fail
+echo [2/5] %M_DEPS%
+.build_venv\Scripts\python.exe -m pip install --upgrade pip --quiet
+.build_venv\Scripts\python.exe -m pip install -r requirements-build.txt --quiet
+if errorlevel 1 goto :fail
+
+:build
 .build_venv\Scripts\python.exe -c "import tkinterdnd2" >nul 2>&1 || echo %M_NODND%
 REM Bauplan leeroyzan.spec: Leeroylink steckt mit in der .exe, ungenutzte Tcl-Daten fehlen (schnellerer Start)
 echo [3/5] %M_BUILD%
@@ -97,25 +116,26 @@ echo   %~dp0dist\Leeroyzan-Portable\Leeroyzan.exe
 echo %M_PORTDONE%
 echo   %~dp0dist\Leeroyzan-Portable.zip
 echo.
+if defined LZ_CI goto :end
 choice /c %M_YN% /n /m "%M_START% "
 if errorlevel 2 goto :end
 start "" "%~dp0dist\Leeroyzan-Portable\Leeroyzan.exe"
 :end
 echo.
-pause
+if not defined LZ_CI pause
 endlocal
 exit /b 0
 
 :running
 echo.
 echo %M_RUNNING%
-pause
+if not defined LZ_CI pause
 exit /b 1
 
 :fail
 echo.
 echo %M_FAIL%
-pause
+if not defined LZ_CI pause
 exit /b 1
 
 REM ---- Texte ---------------------------------------------------------------
