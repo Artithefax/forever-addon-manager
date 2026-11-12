@@ -20,9 +20,10 @@ from pathlib import Path
 from .constants import USER_AGENT
 from .i18n import cur_lang, tr
 from .config import config_dir, log, write_text_atomic
+from .wow import parse_toc
 from .files import addons_dir, disabled_dir
 from .github import http_get
-from .linkaddon import installed_link_dir
+from .linkaddon import LINK_ADDON, installed_link_dir
 from .linkdata import lua_string
 
 
@@ -680,6 +681,42 @@ def quest_rewards(db: QuestDB, qid: int, cm: dict | None, learned: dict | None, 
 
 QUEST_DATA_FORMAT = 2
 QUEST_DATA_FILE = "Quests.lua"
+QUEST_ADDON = "Leeroylink_Quests"        # Load-on-Demand-Addon mit den Questdaten (ab Leeroylink 0.7)
+
+
+def quest_addon_toc(link_folder: Path) -> str:
+    """.toc des Questdaten-Addons: gleiche Interface-Version wie Leeroylink, lädt nur bei Bedarf."""
+    meta = parse_toc(link_folder / f"{LINK_ADDON}.toc")
+    lines = [f"## Interface: {meta.get('interface') or '11507'}",
+             "## Title: Leeroylink Quests",
+             "## Notes: Quest data for the Leeroylink quest companion, written by Leeroyzan from QuestieDB. Loaded only when needed.",
+             "## Notes-deDE: Questdaten fuer den Questbegleiter von Leeroylink, von Leeroyzan aus QuestieDB geschrieben. Wird nur bei Bedarf geladen.",
+             "## Author: Leeroyzan"]
+    if meta.get("version"):
+        lines.append(f"## Version: {meta['version']}")
+    lines += ["## LoadOnDemand: 1", f"## Dependencies: {LINK_ADDON}", "## Category: Utility", "", QUEST_DATA_FILE, ""]
+    return "\n".join(lines)
+
+
+def quest_data_target(link_folder: Path) -> Path:
+    """Wohin Quests.lua gehört: Leeroylink bis 0.6 lädt sie selbst (steht in seiner .toc), ab 0.7 liegt sie im
+    Load-on-Demand-Addon Leeroylink_Quests daneben – das legt Leeroyzan hier an."""
+    try:
+        own = (link_folder / f"{LINK_ADDON}.toc").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        own = ""
+    if re.search(r"^\s*Quests\.lua\s*$", own, re.M):
+        return link_folder / QUEST_DATA_FILE
+    folder = link_folder.parent / QUEST_ADDON
+    folder.mkdir(parents=True, exist_ok=True)
+    toc, text = folder / f"{QUEST_ADDON}.toc", quest_addon_toc(link_folder)
+    try:
+        same = toc.read_text(encoding="utf-8") == text
+    except OSError:
+        same = False
+    if not same:
+        write_text_atomic(toc, text, newline="\n")
+    return folder / QUEST_DATA_FILE
 
 
 def _lua_num(v) -> str:
@@ -762,12 +799,12 @@ QUEST_DATA_OFF = ("-- sig: off\n-- Quests.lua: Der Questbegleiter ist in Leeroyz
 
 def write_quest_data(root: str, flavor: str, zone_names: dict | None = None, faction_names: dict | None = None,
                      cm: dict | None = None, item_names: dict | None = None, enabled: bool = True) -> str:
-    """Schreibt Quests.lua ins installierte Leeroylink. Ergebnis: written | unchanged | missing | noqdb | off.
+    """Schreibt Quests.lua (siehe quest_data_target). Ergebnis: written | unchanged | missing | noqdb | off.
     Ausgeschaltet bleibt die Datei leer – dann belegen die Questdaten im Spiel keinen Speicher."""
     folder = installed_link_dir(root, flavor)
     if not folder:
         return "missing"
-    target = folder / QUEST_DATA_FILE
+    target = quest_data_target(folder)
     if not enabled:
         try:
             if target.read_text(encoding="utf-8", errors="replace") == QUEST_DATA_OFF:

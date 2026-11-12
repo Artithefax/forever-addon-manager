@@ -96,7 +96,6 @@ def migrate_link_addon(root: str, flavor: str) -> dict:
 
 def install_link_addon(root: str, flavor: str, base: Path | None = None) -> str:
     """Kopiert das mitgelieferte Addon in den AddOns-Ordner. Data.lua (schreibt Leeroyzan) bleibt erhalten."""
-    from .questdb import QUEST_DATA_FILE
     src = bundled_link_dir()
     if not src:
         raise RuntimeError(tr("Diese Leeroyzan-Version enthält das Addon nicht."))
@@ -104,7 +103,7 @@ def install_link_addon(root: str, flavor: str, base: Path | None = None) -> str:
     dest = current or ((base or addons_dir(root, flavor)) / LINK_ADDON)
     dest.parent.mkdir(parents=True, exist_ok=True)
     keep = {}
-    for name in ("Data.lua", QUEST_DATA_FILE):               # schreibt Leeroyzan – bleiben erhalten
+    for name in ("Data.lua",):                 # schreibt Leeroyzan – bleibt erhalten (Questdaten: Leeroylink_Quests)
         if (dest / name).is_file():
             keep[name] = (dest / name).read_bytes()
     tmp = dest.parent / f".{LINK_ADDON}.new"

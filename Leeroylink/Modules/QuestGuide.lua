@@ -3,7 +3,9 @@
 -- in its quest chain and what the next quests ask for and give.
 --
 -- Data: Quests.lua (LeeroylinkQuests), written by Leeroyzan from QuestieDB, with the
--- rewards from the cMaNGOS game database (Classic). What a character actually sees at a
+-- rewards from the cMaNGOS game database (Classic). It lives in the load-on-demand addon
+-- Leeroylink_Quests (also written by Leeroyzan) and is only loaded when it is needed for the
+-- first time – a session without quest windows does not keep several MB of quest data. What a character actually sees at a
 -- quest giver or in the quest log wins (global.questRewards) – for all characters.
 local ADDON, LZ = ...
 local T, P, C = LZ.T, LZ.P, LZ.C
@@ -45,8 +47,21 @@ local function known(v)
 	return v
 end
 
-local function data()
+local QUEST_ADDON = "Leeroylink_Quests"
+local loadTried, loadReason
+
+-- noLoad: only what is already loaded (does not load the quest data addon)
+local function data(noLoad)
 	local d = _G.LeeroylinkQuests
+	if type(d) ~= "table" and not noLoad and not loadTried then
+		loadTried = true
+		local ok, reason = C.LoadAddOn(QUEST_ADDON)
+		if not ok then loadReason = reason end
+		d = _G.LeeroylinkQuests
+		if type(d) == "table" then
+			LZ.After(2, function() LZ:Safe(mod.CollectNames, mod) end)
+		end
+	end
 	if type(d) == "table" and type(d.q) == "table" then return d end
 end
 
@@ -648,9 +663,12 @@ function mod:OnDisable()
 end
 
 function mod:CollectNames()
-	local d = data()
-	if not d then return end
 	local names = LZ.gdb.names
+	-- the very first time the data is loaded for this (Leeroyzan needs the names in the language of the game);
+	-- later only when the quest data is loaded anyway
+	local first = not (names and names.zones and next(names.zones))
+	local d = data(not first)
+	if not d then return end
 	if not names then names = {}; LZ.gdb.names = names end
 	names.zones, names.factions = names.zones or {}, names.factions or {}
 	if _G.C_Map and C_Map.GetAreaInfo then
@@ -741,6 +759,9 @@ function mod:Report()
 			lines[#lines + 1] = T("Belohnungen: cMaNGOS-Spieldatenbank (Classic), ergänzt um alles, was deine Charaktere sehen.",
 				"Rewards: cMaNGOS game database (Classic), completed by everything your characters see.")
 		end
+	elseif loadReason == "DISABLED" then
+		lines[#lines + 1] = T("Das Addon „Leeroylink_Quests“ (die Questdaten) ist in der Addon-Liste ausgeschaltet – dort einschalten und /reload.",
+			"The addon \"Leeroylink_Quests\" (the quest data) is switched off in the addon list – switch it on there and /reload.")
 	else
 		lines[#lines + 1] = T("Noch keine Questdaten. Leeroyzan schreibt sie aus QuestieDB (muss nur installiert sein, nicht geladen) – danach /reload.",
 			"No quest data yet. Leeroyzan writes it from QuestieDB (only needs to be installed, not loaded) – then /reload.")

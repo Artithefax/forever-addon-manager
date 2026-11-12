@@ -301,6 +301,25 @@ end
 function GetAddOnMetadata(name, field) if field == "Version" then return "0.2.0" end end
 function IsAddOnLoaded() return true end
 function IsAddOnLoadOnDemand() return false end
+
+-- load-on-demand addons: STUB.addonsRoot/<name>/<name>.toc (only the files listed there)
+C_AddOns = C_AddOns or {}
+STUB.loadedAddons = {}
+function C_AddOns.LoadAddOn(name)
+	if STUB.loadedAddons[name] then return true end
+	local dir = STUB.addonsRoot and (STUB.addonsRoot .. "/" .. name)
+	local f = dir and io.open(dir .. "/" .. name .. ".toc")
+	if not f then return false, "MISSING" end
+	for line in f:lines() do
+		line = line:gsub("\r", "")
+		if line:match("%S") and not line:match("^#") then
+			assert(loadfile(dir .. "/" .. line:gsub("\\", "/")))(name, {})
+		end
+	end
+	f:close()
+	STUB.loadedAddons[name] = true
+	return true
+end
 function GetAddOnDependencies() return end
 function GetAddOnEnableState() return 2 end
 function GetAddOnMemoryUsage() return 100 end

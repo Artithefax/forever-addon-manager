@@ -4,7 +4,7 @@
 ## Notes: Companion addon for the Leeroyzan addon manager: session log and recipes for Leeroyzan, error log, load status, profiles, update hints - plus extra tools (alt overview, checklists, AH prices, loot log and more).
 ## Notes-deDE: Begleit-Addon zum Addon-Manager Leeroyzan: Sitzungsprotokoll und Rezepte fuer Leeroyzan, Fehlerprotokoll, Ladestatus, Profile, Update-Hinweise - dazu Zusatzwerkzeuge (Twink-Uebersicht, Checklisten, AH-Preise, Beute-Tagebuch u.v.m.).
 ## Author: Artithefax
-## Version: 0.6.0
+## Version: 0.7.0
 ## IconTexture: Interface\Icons\Ability_Warrior_Charge
 ## SavedVariables: LeeroylinkDB
 ## Category: Utility
@@ -13,7 +13,6 @@ Core\Compat.lua
 Core\Core.lua
 Core\Bridge.lua
 Data.lua
-Quests.lua
 
 Modules\ErrorLog.lua
 Modules\LoadStatus.lua
@@ -22,6 +21,8 @@ Modules\Profiles.lua
 Modules\Wishlist.lua
 Modules\Updates.lua
 Modules\Session.lua
+Modules\SessionKills.lua
+Modules\SessionCombat.lua
 Modules\Recipes.lua
 Modules\QuestGuide.lua
 
