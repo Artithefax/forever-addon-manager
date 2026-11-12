@@ -1,4 +1,4 @@
-"""Hauptfenster: SetsPage."""
+"""Seite „Sets & Backups“: Addon-Sets umschalten, WTF sichern und wiederherstellen. (Mixin, wird in App eingemischt)."""
 from __future__ import annotations
 
 

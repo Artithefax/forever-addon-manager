@@ -1,4 +1,4 @@
-"""Hauptfenster: LinkDataMixin."""
+"""Leeroylink: Data.lua und Quests.lua fürs Spiel schreiben, Spieldaten übernehmen. (Mixin, wird in App eingemischt)."""
 from __future__ import annotations
 
 import time

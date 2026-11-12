@@ -1,4 +1,4 @@
-"""Hauptfenster: CommonMixin."""
+"""Gemeinsame Helfer des Hauptfensters: Hintergrund-Vorgänge, Spielstart, Pfade und Versionen. (Mixin, wird in App eingemischt)."""
 from __future__ import annotations
 
 import os

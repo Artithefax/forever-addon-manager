@@ -1,4 +1,4 @@
-"""Hauptfenster: DiscoverPage."""
+"""Seite „Entdecken“: CurseForge-Suche und direkte Installation. (Mixin, wird in App eingemischt)."""
 from __future__ import annotations
 
 from datetime import datetime

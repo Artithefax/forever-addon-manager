@@ -1,4 +1,4 @@
-"""Hauptfenster: CharactersPage."""
+"""Seite „Charaktere“: Taschen, Bank, Berufe und Rezepte aus Leeroylink. (Mixin, wird in App eingemischt)."""
 from __future__ import annotations
 
 from datetime import datetime

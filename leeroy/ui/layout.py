@@ -1,4 +1,4 @@
-"""Hauptfenster: LayoutMixin."""
+"""Aufbau des Fensters: Seitenleiste, Seiten, Kacheln. (Mixin, wird in App eingemischt)."""
 from __future__ import annotations
 
 import re

@@ -1,4 +1,4 @@
-"""Hauptfenster: SettingsPage."""
+"""Seite „Einstellungen“: WoW-Ordner, CurseForge, Sprache, Speicher, Hilfe. (Mixin, wird in App eingemischt)."""
 from __future__ import annotations
 
 

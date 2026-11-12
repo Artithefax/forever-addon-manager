@@ -1,4 +1,4 @@
-"""Hauptfenster: DownloadsMixin."""
+"""Browser-Downloads: Addons, die nur im Browser geladen werden dürfen, automatisch einspielen. (Mixin, wird in App eingemischt)."""
 from __future__ import annotations
 
 import time

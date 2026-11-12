@@ -39,7 +39,18 @@ def make_wow() -> Path:
     demo = addons / "DemoAddon"
     demo.mkdir(exist_ok=True)
     (demo / "DemoAddon.toc").write_text("## Interface: 16001\n## Title: Demo\n## Version: 1.0\nDemo.lua\n", encoding="utf-8")
-    (wow / "_forever_" / "WTF" / "Account" / "1#1" / "SavedVariables").mkdir(parents=True, exist_ok=True)
+    sv = wow / "_forever_" / "WTF" / "Account" / "1#1" / "SavedVariables"
+    sv.mkdir(parents=True, exist_ok=True)
+    if not (sv / "Leeroylink.lua").exists():      # echte Daten aus dem Leeroylink-Szenario (Sitzungen, Fehler, Charaktere)
+        try:
+            sys.path.insert(0, str(ROOT / "tests"))
+            import run_addon_test
+            _, text1, now = run_addon_test.run(ROOT / "Leeroylink", 1, None)
+            (sv / "Leeroylink.lua").write_text(text1, encoding="utf-8")
+            _, text2, _ = run_addon_test.run(ROOT / "Leeroylink", 2, sv / "Leeroylink.lua", start_now=now + 15)
+            (sv / "Leeroylink.lua").write_text(text2, encoding="utf-8")
+        except ImportError:                        # ohne lupa: leerer Ordner
+            pass
     (wow / ".build.info").write_text("Branch!STRING:0|Version!STRING:0|Product!STRING:0\neu|1.60.1.1|wow_forever\n")
     return wow
 
@@ -82,6 +93,17 @@ class WindowSmokeTests(unittest.TestCase):
             while time.time() < deadline:       # background jobs and timers
                 app.update()
                 time.sleep(0.02)
+            app.show_page("diagnose")
+            for key, _ in app.DIAG_VIEWS:            # jede Ansicht, ohne und mit Auswahl
+                app._diag_select_view(key)
+                tv = app.diag_lists[key][1]
+                for item in tv.get_children()[:3]:
+                    tv.selection_set(item)
+                    app.update()
+            app.show_page("sessions")
+            for key, _ in app.SESS_VIEWS:
+                app._sess_select_view(key)
+                app.update()
             other = "en" if language == "de" else "de"
             app.change_language(other)
             app.update()

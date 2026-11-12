@@ -1,4 +1,4 @@
-"""Hauptfenster: SharePage."""
+"""Seite „Teilen“: Download-Listen und Addon-Pakete. (Mixin, wird in App eingemischt)."""
 from __future__ import annotations
 
 from datetime import datetime

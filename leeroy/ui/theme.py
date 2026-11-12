@@ -58,29 +58,8 @@ def pick_font(root, candidates, size, weight="normal"):
     return ("TkDefaultFont", size, weight)
 
 
-def apply_theme(root) -> dict:
-    t = THEME
-    style = ttk.Style(root)
-    style.theme_use("clam")      # einziges Theme, das Farben überall zuverlässig übernimmt
-    serif = ["Georgia", "Cambria", "Book Antiqua", "Times New Roman"]
-    sans = ["Segoe UI", "Source Sans 3", "Helvetica", "Arial"]
-    fonts = {
-        "base":  pick_font(root, sans, 10),
-        "small": pick_font(root, sans, 9),
-        "bold":  pick_font(root, ["Segoe UI Semibold"] + sans, 10, "bold"),
-        "label": pick_font(root, ["Segoe UI Semibold"] + sans, 8, "bold"),
-        "brand": pick_font(root, serif, 9, "bold"),
-        "title": pick_font(root, serif, 22, "bold"),
-        "sub":   pick_font(root, serif, 10, "italic"),
-        "page":  pick_font(root, serif, 18, "bold"),
-        "side":  pick_font(root, serif, 14, "bold"),
-        "hero":  pick_font(root, serif, 26, "bold"),
-        "play":  pick_font(root, serif, 15, "bold"),
-        "tile":  pick_font(root, serif, 20, "bold"),
-        "card":  pick_font(root, serif, 13, "bold"),
-    }
-    root.configure(bg=t["bg"])
-
+def _style_base(style: ttk.Style, t: dict, fonts: dict) -> None:
+    """Grundfarben, Rahmen, Beschriftungen und Knöpfe."""
     style.configure(".", background=t["bg"], foreground=t["text"], font=fonts["base"],
                     bordercolor=t["border_soft"], darkcolor=t["bg"], lightcolor=t["bg"],
                     troughcolor=t["bg"], focuscolor=t["gold"],
@@ -160,6 +139,9 @@ def apply_theme(root) -> dict:
               bordercolor=[("active", t["gold"])],
               lightcolor=[("active", t["panel"])], darkcolor=[("active", t["panel"])])
 
+
+def _style_inputs(style: ttk.Style, t: dict, fonts: dict) -> None:
+    """Eingabefelder, Auswahllisten und Häkchen."""
     style.configure("TEntry", fieldbackground=t["bg"], foreground=t["text"],
                     bordercolor=t["field_line"], lightcolor=t["bg"], darkcolor=t["bg"],
                     padding=5)
@@ -173,12 +155,15 @@ def apply_theme(root) -> dict:
               selectforeground=[("readonly", t["text"])],
               background=[("active", t["active"])],
               bordercolor=[("focus", t["gold"]), ("active", t["gold"])])
-    root.option_add("*TCombobox*Listbox.background", t["panel"])
-    root.option_add("*TCombobox*Listbox.foreground", t["text"])
-    root.option_add("*TCombobox*Listbox.selectBackground", t["active"])
-    root.option_add("*TCombobox*Listbox.selectForeground", t["gold"])
-    root.option_add("*TCombobox*Listbox.font", fonts["base"])
+    style.master.option_add("*TCombobox*Listbox.background", t["panel"])
+    style.master.option_add("*TCombobox*Listbox.foreground", t["text"])
+    style.master.option_add("*TCombobox*Listbox.selectBackground", t["active"])
+    style.master.option_add("*TCombobox*Listbox.selectForeground", t["gold"])
+    style.master.option_add("*TCombobox*Listbox.font", fonts["base"])
 
+
+def _style_lists(style: ttk.Style, t: dict, fonts: dict) -> None:
+    """Listen und Karten."""
     style.configure("Treeview", background=t["row_a"], fieldbackground=t["row_a"],
                     foreground=t["text"], rowheight=30, bordercolor=t["border_soft"],
                     lightcolor=t["row_a"], darkcolor=t["row_a"], borderwidth=1)
@@ -189,6 +174,9 @@ def apply_theme(root) -> dict:
                     darkcolor=t["header"], relief="flat", padding=(8, 7))
     style.map("Treeview.Heading", background=[("active", t["panel"])])
 
+
+def _style_sidebar(style: ttk.Style, t: dict, fonts: dict) -> None:
+    """Ansicht „Seitenleiste“."""
     # --- Ansicht „Seitenleiste“ ---
     style.configure("Side.TFrame", background=t["header"])
     style.configure("Side.TLabel", background=t["header"], foreground=t["text_dim"], font=fonts["small"])
@@ -216,6 +204,9 @@ def apply_theme(root) -> dict:
                     lightcolor=t["bg"], darkcolor=t["bg"])
     style.map("Danger.TButton", background=[("active", "#21160c")], bordercolor=[("active", t["warn"])])
 
+
+def _style_launcher(style: ttk.Style, t: dict, fonts: dict) -> None:
+    """Ansicht „Launcher“ und Menüknöpfe."""
     # --- Ansicht „Launcher“ ---
     style.configure("Head.TFrame", background=t["header"])
     style.configure("HeadKicker.TLabel", background=t["header"], foreground=t["gold"], font=fonts["brand"])
@@ -255,10 +246,39 @@ def apply_theme(root) -> dict:
         style.map(name, background=[("active", t["active"] if name == "TMenubutton" else t["btn_primary_hi"])],
                   foreground=[("active", t["gold"] if name == "TMenubutton" else t["btn_text"])])
 
+
+def _style_scrollbar(style: ttk.Style, t: dict, fonts: dict) -> None:
+    """Bildlaufleisten."""
     style.configure("Vertical.TScrollbar", background=t["panel"], troughcolor=t["bg"],
                     bordercolor=t["bg"], arrowcolor=t["gold"],
                     lightcolor=t["panel"], darkcolor=t["panel"], gripcount=0)
     style.map("Vertical.TScrollbar", background=[("active", t["border"])])
+
+
+def apply_theme(root) -> dict:
+    t = THEME
+    style = ttk.Style(root)
+    style.theme_use("clam")      # einziges Theme, das Farben überall zuverlässig übernimmt
+    serif = ["Georgia", "Cambria", "Book Antiqua", "Times New Roman"]
+    sans = ["Segoe UI", "Source Sans 3", "Helvetica", "Arial"]
+    fonts = {
+        "base":  pick_font(root, sans, 10),
+        "small": pick_font(root, sans, 9),
+        "bold":  pick_font(root, ["Segoe UI Semibold"] + sans, 10, "bold"),
+        "label": pick_font(root, ["Segoe UI Semibold"] + sans, 8, "bold"),
+        "brand": pick_font(root, serif, 9, "bold"),
+        "title": pick_font(root, serif, 22, "bold"),
+        "sub":   pick_font(root, serif, 10, "italic"),
+        "page":  pick_font(root, serif, 18, "bold"),
+        "side":  pick_font(root, serif, 14, "bold"),
+        "hero":  pick_font(root, serif, 26, "bold"),
+        "play":  pick_font(root, serif, 15, "bold"),
+        "tile":  pick_font(root, serif, 20, "bold"),
+        "card":  pick_font(root, serif, 13, "bold"),
+    }
+    root.configure(bg=t["bg"])
+    for part in (_style_base, _style_inputs, _style_lists, _style_sidebar, _style_launcher, _style_scrollbar):
+        part(style, t, fonts)
     return fonts
 
 

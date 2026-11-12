@@ -1,4 +1,4 @@
-"""Hauptfenster: AuctionPage."""
+"""Seite „Auktionshaus“: Preise aus Auctionator, filterbar, mit Verlauf. (Mixin, wird in App eingemischt)."""
 from __future__ import annotations
 
 
