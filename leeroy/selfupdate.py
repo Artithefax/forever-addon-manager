@@ -312,6 +312,10 @@ def replace_exe(src: Path, dst: Path) -> None:
     tmp = dst.with_name(dst.name + ".tmp")
     shutil.copyfile(src, tmp)
     try:
+        shutil.copymode(src, tmp)                 # außerhalb von Windows: ausführbar bleiben
+    except OSError:
+        pass
+    try:
         os.replace(tmp, dst)
     except OSError:
         tmp.unlink(missing_ok=True)
