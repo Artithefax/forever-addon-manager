@@ -1,0 +1,74 @@
+# Einmaliges Aufräumen der GitHub-Seite. Start: Actions -> "Aufräumen" -> Run workflow.
+# Löscht alle Branches außer main, alle Releases und Tags außer dem angegebenen Release
+# und alte Workflow-Läufe (je Workflow bleibt der letzte). Der Code-Verlauf in main bleibt unberührt.
+name: Aufräumen
+
+on:
+  workflow_dispatch:
+    inputs:
+      keep:
+        description: "Dieses Release (Tag) behalten"
+        required: true
+        default: "2.0.0"
+      dry_run:
+        description: "Nur anzeigen, nichts löschen"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      KEEP: ${{ inputs.keep }}
+      DRY: ${{ inputs.dry_run }}
+    steps:
+      - name: Prüfen, dass das zu behaltende Release existiert
+        run: |
+          gh release view "$KEEP" --repo "$REPO" --json tagName,assets --jq '"behalte \(.tagName) mit \(.assets|length) Dateien"'
+
+      - name: Aufräumen
+        run: |
+          set -u
+          del() { if [ "$DRY" = "true" ]; then echo "würde löschen: $*"; else echo "lösche: $*"; fi; }
+          run() { [ "$DRY" = "true" ] || "$@"; }
+
+          echo "## Branches" >> "$GITHUB_STEP_SUMMARY"
+          default=$(gh api "repos/$REPO" --jq .default_branch)
+          for b in $(gh api "repos/$REPO/branches" --paginate --jq '.[].name'); do
+            [ "$b" = "$default" ] && continue
+            del "Branch $b"; run gh api -X DELETE "repos/$REPO/git/refs/heads/$b" >/dev/null
+            echo "- $b" >> "$GITHUB_STEP_SUMMARY"
+          done
+
+          echo "## Releases" >> "$GITHUB_STEP_SUMMARY"
+          for t in $(gh api "repos/$REPO/releases" --paginate --jq '.[].tag_name'); do
+            [ "$t" = "$KEEP" ] && continue
+            del "Release $t"; run gh release delete "$t" --repo "$REPO" --yes --cleanup-tag
+            echo "- $t" >> "$GITHUB_STEP_SUMMARY"
+          done
+
+          echo "## Tags ohne Release" >> "$GITHUB_STEP_SUMMARY"
+          for t in $(gh api "repos/$REPO/tags" --paginate --jq '.[].name'); do
+            [ "$t" = "$KEEP" ] && continue
+            del "Tag $t"; run gh api -X DELETE "repos/$REPO/git/refs/tags/$t" >/dev/null
+            echo "- $t" >> "$GITHUB_STEP_SUMMARY"
+          done
+
+          echo "## Alte Workflow-Läufe" >> "$GITHUB_STEP_SUMMARY"
+          n=0
+          for wf in $(gh api "repos/$REPO/actions/workflows" --jq '.workflows[].id'); do
+            for id in $(gh api "repos/$REPO/actions/workflows/$wf/runs?status=completed&per_page=100" --paginate --jq '.workflow_runs[1:][].id'); do
+              [ "$id" = "$GITHUB_RUN_ID" ] && continue
+              run gh api -X DELETE "repos/$REPO/actions/runs/$id" >/dev/null
+              n=$((n+1))
+            done
+          done
+          del "$n alte Workflow-Läufe"
+          echo "- $n Läufe" >> "$GITHUB_STEP_SUMMARY"
