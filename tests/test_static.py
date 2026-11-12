@@ -43,6 +43,22 @@ class StaticTests(unittest.TestCase):
                     bad.append(f"{path.relative_to(ROOT)}:{node.lineno}")
         self.assertEqual(bad, [])
 
+    def test_changelog_has_current_version(self):
+        """Der Release-Workflow nimmt den Text aus CHANGELOG.md – ohne Abschnitt bricht er ab."""
+        import re
+        import sys
+        sys.path.insert(0, str(ROOT / "tools"))
+        from release_notes import section
+        version = re.search(r'^APP_VERSION = "([^"]+)"', (ROOT / "leeroy" / "constants.py").read_text(encoding="utf-8"), re.M)[1]
+        self.assertTrue(section((ROOT / "CHANGELOG.md").read_text(encoding="utf-8"), version).strip())
+
+    def test_leeroylink_versions_agree(self):
+        toc = (ROOT / "Leeroylink" / "Leeroylink.toc").read_text(encoding="utf-8")
+        core = (ROOT / "Leeroylink" / "Core" / "Core.lua").read_text(encoding="utf-8")
+        import re
+        version = re.search(r"^## Version: (\S+)", toc, re.M)[1]
+        self.assertIn(f'or "{version}"', core)
+
 
 if __name__ == "__main__":
     unittest.main()

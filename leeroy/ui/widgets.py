@@ -159,18 +159,31 @@ class WidgetsMixin:
         self.tree.bind("<<TreeviewSelect>>", lambda e: (self.update_detail(), self._hint_update_link()))
         return body
 
-    def _scroll_area(self, parent, bg):
-        """Scrollbarer Bereich (Canvas + Frame) mit Mausrad-Unterstützung."""
+    def _scroll_area(self, parent, bg, cards: bool = True):
+        """Scrollbarer Bereich (Canvas + Frame) mit Mausrad-Unterstützung. cards=False: eine normale Seite, deren
+        Bildlaufleiste nur erscheint, wenn der Inhalt nicht ganz hineinpasst."""
         wrap = tk.Frame(parent, bg=bg)
         canvas = tk.Canvas(wrap, bg=bg, highlightthickness=0)
         vsb = ttk.Scrollbar(wrap, orient="vertical", command=canvas.yview)
         inner = tk.Frame(canvas, bg=bg)
         win = canvas.create_window(0, 0, window=inner, anchor="nw")
-        inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.bind("<Configure>", lambda e: (canvas.itemconfigure(win, width=e.width), self._relayout_cards()))
+
+        def fit(_e=None):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            if not cards:
+                need = inner.winfo_reqheight() > canvas.winfo_height() > 1
+                if need and not vsb.winfo_ismapped():
+                    vsb.pack(side="right", fill="y", before=canvas)
+                elif not need and vsb.winfo_ismapped():
+                    vsb.pack_forget()
+                    canvas.yview_moveto(0)
+        inner.bind("<Configure>", fit)
+        canvas.bind("<Configure>", lambda e: (canvas.itemconfigure(win, width=e.width), fit(),
+                                              self._relayout_cards() if cards else None))
         canvas.configure(yscrollcommand=vsb.set)
+        if cards:
+            vsb.pack(side="right", fill="y")
         canvas.pack(side="left", fill="both", expand=True)
-        vsb.pack(side="right", fill="y")
 
         def wheel(e):
             delta = -1 if (getattr(e, "delta", 0) > 0 or getattr(e, "num", 0) == 4) else 1
@@ -181,7 +194,8 @@ class WidgetsMixin:
         canvas.bind("<Leave>", lambda e: (canvas.unbind_all("<MouseWheel>"),
                                           canvas.unbind_all("<Button-4>"),
                                           canvas.unbind_all("<Button-5>")))
-        self.cards_canvas = canvas
+        if cards:
+            self.cards_canvas = canvas
         return wrap, inner
 
     def update_game_info(self):
