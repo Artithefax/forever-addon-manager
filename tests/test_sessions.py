@@ -217,7 +217,7 @@ class LinkDataTests(unittest.TestCase):
         lua = lua51.LuaRuntime(unpack_returned_tuples=True)
         g = lua.globals()
         g.ADDON_DIR, g.TESTS_DIR, g.DATA_FILE = str(ROOT / "Leeroylink"), str(ROOT / "tests"), str(data)
-        self.assertEqual(lua.execute(f'return dofile("{ROOT / "tests" / "import_check.lua"}")'), 0)
+        self.assertEqual(lua.execute(f'return dofile("{(ROOT / "tests" / "import_check.lua").as_posix()}")'), 0)
 
     def test_write_only_when_changed(self):
         wow = make_wow("LeeroylinkDB = {}\n", "w#1")

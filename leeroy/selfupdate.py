@@ -227,12 +227,20 @@ def authenticode(path: Path) -> tuple[str, str]:
     lit = str(path).replace("'", "''")
     ps = (f"$s = Get-AuthenticodeSignature -LiteralPath '{lit}'; "
           "Write-Output $s.Status; if ($s.SignerCertificate) { Write-Output $s.SignerCertificate.Subject }")
+    exe = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+    # Ohne PSModulePath: Aus PowerShell 7 heraus gestartet, lädt Windows PowerShell sonst die Module von 7
+    # und findet Get-AuthenticodeSignature nicht.
+    env = {k: v for k, v in os.environ.items() if k.upper() != "PSMODULEPATH"}
     try:
-        out = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps], capture_output=True,
-                             text=True, timeout=60, creationflags=0x08000000).stdout.splitlines()
-    except (OSError, subprocess.SubprocessError):
+        res = subprocess.run([str(exe) if exe.is_file() else "powershell", "-NoProfile", "-NonInteractive",
+                              "-ExecutionPolicy", "Bypass", "-Command", ps], capture_output=True, text=True,
+                             timeout=60, creationflags=0x08000000, env=env)
+    except (OSError, subprocess.SubprocessError) as e:
+        log.warning("Signaturprüfung nicht möglich: %s", e)
         return "", ""
-    out = [line.strip() for line in out if line.strip()]
+    out = [line.strip() for line in res.stdout.splitlines() if line.strip()]
+    if not out:
+        log.warning("Signaturprüfung ohne Ergebnis: %s", (res.stderr or "").strip()[:500])
     return (out[0] if out else ""), (out[1] if len(out) > 1 else "")
 
 
