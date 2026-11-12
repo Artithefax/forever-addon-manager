@@ -34,6 +34,7 @@ jobs:
   build:
     needs: test
     runs-on: windows-latest
+    timeout-minutes: 60
     env:
       TAG: ${{ github.event.release.tag_name || inputs.tag }}
       GH_TOKEN: ${{ github.token }}
@@ -113,6 +114,7 @@ jobs:
         run: Copy-Item dist\signed\Leeroyzan.exe dist\Leeroyzan.exe -Force
 
       - name: Rauchtest der fertigen .exe
+        timeout-minutes: 5
         shell: pwsh
         run: |
           $dir = Join-Path $env:RUNNER_TEMP "selftest"
