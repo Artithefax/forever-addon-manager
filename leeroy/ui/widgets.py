@@ -1,4 +1,4 @@
-"""Hauptfenster: WidgetsMixin."""
+"""Gemeinsame Bausteine der Seiten: Statusleiste, Listen, Karten, Seitenwechsel. (Mixin, wird in App eingemischt)."""
 from __future__ import annotations
 
 

@@ -1,4 +1,4 @@
-"""Hauptfenster: DiagnosePage."""
+"""Seite „Diagnose“: Lua-Fehler, Ladeprobleme, Speicher und Wunschliste aus dem Spiel. (Mixin, wird in App eingemischt)."""
 from __future__ import annotations
 
 import urllib.parse
@@ -163,106 +163,126 @@ class DiagnosePage:
                    "einmal ein und wieder aus.") + "\n", "")
         elif view == "errors":
             if row is None:
-                add(tr("Lua-Fehler aus dem Spiel") + "\n", "title")
-                n_cur = sum(1 for r in self._diag_rows if r["current"])
-                add(tr("Leeroylink ordnet jeden Lua-Fehler dem verursachenden Addon zu und zählt ihn pro Version. "
-                       "Gelb markiert: Fehler in der Version, die jetzt installiert ist.") + "\n\n", "dim")
-                if not self._diag_rows:
-                    add(tr("Keine Fehler – alles sauber.") + "\n", "ok")
-                elif n_cur:
-                    add(plural(n_cur, "{0} Addon hat Fehler in der aktuellen Version.",
-                               "{0} Addons haben Fehler in der aktuellen Version.") + "\n", "warn")
-                blocked = sorted(st["blocked"], key=lambda b: b["count"], reverse=True)[:8]
-                if blocked:
-                    add("\n" + tr("Blockierte Aktionen") + "\n", "head")
-                    add(tr("„Aktion wurde durch ein Addon blockiert“ – diese Addons haben geschützte Funktionen aufgerufen:") + "\n", "dim")
-                    for b in blocked:
-                        add(f"{b['addon']}: {b['func']} ×{b['count']}" + (tr(" (verboten)") if b["forbidden"] else "") + "\n")
+                self._diag_errors_overview(st, add)
             else:
-                add(row["addon"] + "\n", "title")
-                if row["installed"]:
-                    add(tr("Installiert: {0}", row["version"] or "?") + "\n", "dim")
-                else:
-                    add(tr("Nicht (mehr) installiert.") + "\n", "dim")
-                if row["addon"] in ("?", "Blizzard"):
-                    add(tr("Fehler, die keinem Addon zugeordnet werden konnten (oder in Blizzards eigener Oberfläche).") + "\n", "dim")
-                add("\n" + tr("Nach Version") + "\n", "head")
-                for v, n in sorted(row["byVersion"].items(), key=lambda kv: kv[1], reverse=True):
-                    cur = row["installed"] and clean_wow_text(v) == row["version"]
-                    add(f"{v}: {fmt_int(n)}" + (tr("  ← installiert") if cur else "") + "\n", "warn" if cur else "")
-                add("\n" + tr("Meldungen") + "\n", "head")
-                for e in row["errors"][:8]:
-                    add(f"×{e['count']}  ", "hl")
-                    add(e["msg"] + "\n")
-                    add("    " + tr("zuerst {0}, zuletzt {1}", datetime.fromtimestamp(e["first"]).strftime(tr("%d.%m.%Y  %H:%M")),
-                                    datetime.fromtimestamp(e["last"]).strftime(tr("%d.%m.%Y  %H:%M"))) + "\n", "dim")
-                if row["errors"] and row["errors"][0]["stack"]:
-                    add("\n" + tr("Aufrufkette (häufigster Fehler)") + "\n", "head")
-                    add(row["errors"][0]["stack"][:600] + "\n", "mono")
-                sid = self._source_of(row["addon"])
-                rb = self.rollback_info(sid) if sid else None
-                addon = self._addon_by_name(row["addon"])
-                if rb:
-                    btns.append((tr("↶ Zurück auf {0}", rb["source"].get("tag") or "?"), lambda sid=sid: self.rollback(sid), "Primary.TButton"))
-                if sid:
-                    btns.append((tr("Freigeben") if self.is_held(sid) else tr("Festhalten"), lambda sid=sid: (self.toggle_hold(sid=sid), self.refresh_diagnose()), "TButton"))
-                if addon is not None:
-                    btns.append((tr("Deaktivieren") if addon.enabled else tr("Aktivieren"), lambda a=addon: (self.toggle_selected([a]), self.refresh_diagnose()), "TButton"))
-                btns.append((tr("Ausblenden"), lambda r=row: self._diag_hide(r), "TButton"))
+                self._diag_errors_detail(row, add, btns)
         elif view == "load":
-            if row is None:
-                add(tr("Ladeprobleme") + "\n", "title")
-                add(tr("Addons, die aktiviert sind, die WoW aber nicht geladen hat – mit dem Grund aus dem Spiel.") + "\n\n", "dim")
-                if not self._diag_rows:
-                    add(tr("Alle aktivierten Addons wurden geladen.") + "\n", "ok")
-            else:
-                add(row["name"] + "\n", "title")
-                add(tr(LOAD_REASONS.get(row["reason"], row["reason"] or "unbekannt")) + "\n\n", "warn")
-                if row["reason"] == "INTERFACE_VERSION":
-                    add(tr("Das Addon ist für eine andere Spielversion gebaut. Suche ein Update oder setze im Addon-Menü "
-                           "des Spiels den Haken bei „Veraltete AddOns laden“.") + "\n", "")
-                for dep in row["missing"]:
-                    other = self._addon_by_name(dep)
-                    if other is not None and not other.enabled:
-                        add(tr("{0} ist installiert, aber deaktiviert.", dep) + "\n")
-                        btns.append((tr("{0} aktivieren", dep), lambda a=other: (self.toggle_selected([a]), self.refresh_diagnose()), "Primary.TButton"))
-                    elif other is None:
-                        add(tr("{0} fehlt.", dep) + "\n")
-                        btns.append((tr("{0} suchen", dep), lambda d=dep: self.search_addon(d), "Primary.TButton"))
-                addon = self._addon_by_name(row["name"])
-                if addon is not None:
-                    btns.append((tr("Ordner öffnen"), lambda a=addon: self.open_folder([a]), "TButton"))
+            self._diag_load(row, add, btns)
         elif view == "memory":
-            mem = st["memory"]
-            add(tr("Speicherverbrauch") + "\n", "title")
-            if mem["t"]:
-                add(tr("Gemessen am {0} · gesamt {1}", datetime.fromtimestamp(mem["t"]).strftime(tr("%d.%m.%Y  %H:%M")),
-                       f"{mem['total'] / 1024:.0f} MB") + "\n\n", "dim")
-            add(tr("Viel Speicher ist kein Fehler – große Datenbanken (Questie, AtlasLoot) brauchen ihn. Spürbar wird es "
-                   "erst bei Rucklern beim Laden oder auf schwachen Rechnern.") + "\n", "dim")
-            if row is not None:
-                add("\n" + row["name"] + "\n", "head")
-                add(f"{row['kb'] / 1024:.1f} MB · {fmt_pct(row['kb'], mem['total'] or 1)}\n")
-                if row["cpu"]:
-                    add(tr("Rechenzeit zuletzt: {0} ms pro Bild", f"{row['cpu']:.2f}") + "\n", "dim")
-                addon = self._addon_by_name(row["name"])
-                if addon is not None:
-                    btns.append((tr("Deaktivieren") if addon.enabled else tr("Aktivieren"), lambda a=addon: (self.toggle_selected([a]), self.refresh_diagnose()), "TButton"))
+            self._diag_memory(st, row, add, btns)
         else:
-            add(tr("Wunschliste aus dem Spiel") + "\n", "title")
-            add(tr("Im Spiel mit /lz merken <Name> vorgemerkt. Installierte Einträge meldet Leeroyzan ans Addon zurück, "
-                   "das sie dann von der Liste nimmt.") + "\n\n", "dim")
-            if not self._diag_rows:
-                add(tr("Nichts vorgemerkt.") + "\n", "dim")
-            if row is not None:
-                add(row["name"] + "\n", "head")
-                if row["note"]:
-                    add(row["note"] + "\n")
-                add((tr("Ist installiert.") if row["done"] else tr("Noch nicht installiert.")) + "\n", "ok" if row["done"] else "")
-                if not row["done"]:
-                    btns.append((tr("Auf CurseForge suchen"), lambda n=row["name"]: self.search_addon(n), "Primary.TButton"))
+            self._diag_wishlist(row, add, btns)
         self._set_text(self.diag_text, parts=P)
         self._diag_buttons(btns)
+
+    def _diag_errors_overview(self, st, add):
+        """Lua-Fehler: Übersicht ohne Auswahl, dazu blockierte Aktionen."""
+        add(tr("Lua-Fehler aus dem Spiel") + "\n", "title")
+        n_cur = sum(1 for r in self._diag_rows if r["current"])
+        add(tr("Leeroylink ordnet jeden Lua-Fehler dem verursachenden Addon zu und zählt ihn pro Version. "
+               "Gelb markiert: Fehler in der Version, die jetzt installiert ist.") + "\n\n", "dim")
+        if not self._diag_rows:
+            add(tr("Keine Fehler – alles sauber.") + "\n", "ok")
+        elif n_cur:
+            add(plural(n_cur, "{0} Addon hat Fehler in der aktuellen Version.",
+                       "{0} Addons haben Fehler in der aktuellen Version.") + "\n", "warn")
+        blocked = sorted(st["blocked"], key=lambda b: b["count"], reverse=True)[:8]
+        if blocked:
+            add("\n" + tr("Blockierte Aktionen") + "\n", "head")
+            add(tr("„Aktion wurde durch ein Addon blockiert“ – diese Addons haben geschützte Funktionen aufgerufen:") + "\n", "dim")
+            for b in blocked:
+                add(f"{b['addon']}: {b['func']} ×{b['count']}" + (tr(" (verboten)") if b["forbidden"] else "") + "\n")
+
+    def _diag_errors_detail(self, row, add, btns):
+        """Lua-Fehler eines Addons: nach Version, Meldungen, Aufrufkette, Knöpfe."""
+        add(row["addon"] + "\n", "title")
+        if row["installed"]:
+            add(tr("Installiert: {0}", row["version"] or "?") + "\n", "dim")
+        else:
+            add(tr("Nicht (mehr) installiert.") + "\n", "dim")
+        if row["addon"] in ("?", "Blizzard"):
+            add(tr("Fehler, die keinem Addon zugeordnet werden konnten (oder in Blizzards eigener Oberfläche).") + "\n", "dim")
+        add("\n" + tr("Nach Version") + "\n", "head")
+        for v, n in sorted(row["byVersion"].items(), key=lambda kv: kv[1], reverse=True):
+            cur = row["installed"] and clean_wow_text(v) == row["version"]
+            add(f"{v}: {fmt_int(n)}" + (tr("  ← installiert") if cur else "") + "\n", "warn" if cur else "")
+        add("\n" + tr("Meldungen") + "\n", "head")
+        for e in row["errors"][:8]:
+            add(f"×{e['count']}  ", "hl")
+            add(e["msg"] + "\n")
+            add("    " + tr("zuerst {0}, zuletzt {1}", datetime.fromtimestamp(e["first"]).strftime(tr("%d.%m.%Y  %H:%M")),
+                            datetime.fromtimestamp(e["last"]).strftime(tr("%d.%m.%Y  %H:%M"))) + "\n", "dim")
+        if row["errors"] and row["errors"][0]["stack"]:
+            add("\n" + tr("Aufrufkette (häufigster Fehler)") + "\n", "head")
+            add(row["errors"][0]["stack"][:600] + "\n", "mono")
+        sid = self._source_of(row["addon"])
+        rb = self.rollback_info(sid) if sid else None
+        addon = self._addon_by_name(row["addon"])
+        if rb:
+            btns.append((tr("↶ Zurück auf {0}", rb["source"].get("tag") or "?"), lambda sid=sid: self.rollback(sid), "Primary.TButton"))
+        if sid:
+            btns.append((tr("Freigeben") if self.is_held(sid) else tr("Festhalten"), lambda sid=sid: (self.toggle_hold(sid=sid), self.refresh_diagnose()), "TButton"))
+        if addon is not None:
+            btns.append((tr("Deaktivieren") if addon.enabled else tr("Aktivieren"), lambda a=addon: (self.toggle_selected([a]), self.refresh_diagnose()), "TButton"))
+        btns.append((tr("Ausblenden"), lambda r=row: self._diag_hide(r), "TButton"))
+
+    def _diag_load(self, row, add, btns):
+        """Ladeprobleme: Grund aus dem Spiel und fehlende Abhängigkeiten."""
+        if row is None:
+            add(tr("Ladeprobleme") + "\n", "title")
+            add(tr("Addons, die aktiviert sind, die WoW aber nicht geladen hat – mit dem Grund aus dem Spiel.") + "\n\n", "dim")
+            if not self._diag_rows:
+                add(tr("Alle aktivierten Addons wurden geladen.") + "\n", "ok")
+        else:
+            add(row["name"] + "\n", "title")
+            add(tr(LOAD_REASONS.get(row["reason"], row["reason"] or "unbekannt")) + "\n\n", "warn")
+            if row["reason"] == "INTERFACE_VERSION":
+                add(tr("Das Addon ist für eine andere Spielversion gebaut. Suche ein Update oder setze im Addon-Menü "
+                       "des Spiels den Haken bei „Veraltete AddOns laden“.") + "\n", "")
+            for dep in row["missing"]:
+                other = self._addon_by_name(dep)
+                if other is not None and not other.enabled:
+                    add(tr("{0} ist installiert, aber deaktiviert.", dep) + "\n")
+                    btns.append((tr("{0} aktivieren", dep), lambda a=other: (self.toggle_selected([a]), self.refresh_diagnose()), "Primary.TButton"))
+                elif other is None:
+                    add(tr("{0} fehlt.", dep) + "\n")
+                    btns.append((tr("{0} suchen", dep), lambda d=dep: self.search_addon(d), "Primary.TButton"))
+            addon = self._addon_by_name(row["name"])
+            if addon is not None:
+                btns.append((tr("Ordner öffnen"), lambda a=addon: self.open_folder([a]), "TButton"))
+
+    def _diag_memory(self, st, row, add, btns):
+        """Speicherverbrauch der Addons."""
+        mem = st["memory"]
+        add(tr("Speicherverbrauch") + "\n", "title")
+        if mem["t"]:
+            add(tr("Gemessen am {0} · gesamt {1}", datetime.fromtimestamp(mem["t"]).strftime(tr("%d.%m.%Y  %H:%M")),
+                   f"{mem['total'] / 1024:.0f} MB") + "\n\n", "dim")
+        add(tr("Viel Speicher ist kein Fehler – große Datenbanken (Questie, AtlasLoot) brauchen ihn. Spürbar wird es "
+               "erst bei Rucklern beim Laden oder auf schwachen Rechnern.") + "\n", "dim")
+        if row is not None:
+            add("\n" + row["name"] + "\n", "head")
+            add(f"{row['kb'] / 1024:.1f} MB · {fmt_pct(row['kb'], mem['total'] or 1)}\n")
+            if row["cpu"]:
+                add(tr("Rechenzeit zuletzt: {0} ms pro Bild", f"{row['cpu']:.2f}") + "\n", "dim")
+            addon = self._addon_by_name(row["name"])
+            if addon is not None:
+                btns.append((tr("Deaktivieren") if addon.enabled else tr("Aktivieren"), lambda a=addon: (self.toggle_selected([a]), self.refresh_diagnose()), "TButton"))
+
+    def _diag_wishlist(self, row, add, btns):
+        """Wunschliste aus dem Spiel."""
+        add(tr("Wunschliste aus dem Spiel") + "\n", "title")
+        add(tr("Im Spiel mit /lz merken <Name> vorgemerkt. Installierte Einträge meldet Leeroyzan ans Addon zurück, "
+               "das sie dann von der Liste nimmt.") + "\n\n", "dim")
+        if not self._diag_rows:
+            add(tr("Nichts vorgemerkt.") + "\n", "dim")
+        if row is not None:
+            add(row["name"] + "\n", "head")
+            if row["note"]:
+                add(row["note"] + "\n")
+            add((tr("Ist installiert.") if row["done"] else tr("Noch nicht installiert.")) + "\n", "ok" if row["done"] else "")
+            if not row["done"]:
+                btns.append((tr("Auf CurseForge suchen"), lambda n=row["name"]: self.search_addon(n), "Primary.TButton"))
 
     def _diag_hide(self, row):
         self.cfg.setdefault("diag_hidden", {}).setdefault(self.flavor, {})[row["addon"]] = row["total"]

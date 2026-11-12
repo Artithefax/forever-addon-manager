@@ -1,4 +1,4 @@
-"""Hauptfenster: WowheadPage."""
+"""Seite „Wowhead“: Suche mit Vorschau und Favoriten. (Mixin, wird in App eingemischt)."""
 from __future__ import annotations
 
 

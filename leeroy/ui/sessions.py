@@ -1,4 +1,4 @@
-"""Hauptfenster: SessionsPage."""
+"""Seite „Leeroylink“: Spielsitzungen, Berichte, Diagramme, Auswertung und Discord. (Mixin, wird in App eingemischt)."""
 from __future__ import annotations
 
 from datetime import datetime

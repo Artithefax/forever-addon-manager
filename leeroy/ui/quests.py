@@ -1,4 +1,4 @@
-"""Hauptfenster: QuestsPage."""
+"""Seite „Quests“: Questdatenbank aus QuestieDB mit Questreihen und Belohnungen. (Mixin, wird in App eingemischt)."""
 from __future__ import annotations
 
 import time
@@ -9,7 +9,7 @@ import tkinter as tk
 
 from ..i18n import cur_lang, tr
 from ..config import log, save_config
-from ..reports import CLASS_NAMES, fmt_int, fmt_money, plural
+from ..reports import CLASS_NAMES, ReportParts, fmt_int, fmt_money, plural
 from ..wowhead import wowhead_url
 from ..questdb import (
     QuestDBError,
@@ -290,18 +290,22 @@ class QuestsPage:
         return "; ".join(out)
 
     def _qdb_parts(self, qid: int) -> list:
+        """Alles zu einer Quest als (Text, Tag)-Teile für das Detailfeld."""
         db, loc = self.qdb, self._qdb_locale()
         q = db.quests[qid]
-        zn, fn = self.link_state.get("zoneNames", {}), self.link_state.get("factionNames", {})
-        parts: list = []
+        chain = db.chain(qid)
+        out = ReportParts()
+        self._qdb_part_head(out, db, loc, q, qid)
+        self._qdb_part_chain(out, db, loc, qid, chain)
+        self._qdb_part_task(out, db, loc, q, qid)
+        self._qdb_part_reward(out, db, loc, q, qid)
+        self._qdb_part_links(out, db, loc, q, qid, chain)
+        return out.parts
 
-        def line(text="", tag=""):
-            parts.append((text + "\n", tag))
-
-        def head(text):
-            parts.append(("\n" + text + "\n", "head"))
-
-        line(db.quest_name(qid, loc), "title")
+    def _qdb_part_head(self, out, db, loc, q, qid):
+        """Name, Stufe, Zone, Fraktion, Klassen."""
+        zn = self.link_state.get("zoneNames", {})
+        out.line(db.quest_name(qid, loc), "title")
         meta = [tr("Stufe {0}", q["lvl"])]
         if q["req"] > 1:
             meta.append(tr("ab Stufe {0}", q["req"]))
@@ -313,39 +317,46 @@ class QuestsPage:
             meta.append(", ".join(classes))
         if q["repeatable"]:
             meta.append(tr("wiederholbar"))
-        line("  ·  ".join(meta) + f"  ·  ID {qid}", "dim")
+        out.line("  ·  ".join(meta) + f"  ·  ID {qid}", "dim")
 
-        chain = db.chain(qid)
+    def _qdb_part_chain(self, out, db, loc, qid, chain):
+        """Die Questreihe mit der aktuellen Quest."""
         if len(chain) > 1:
             pos = chain.index(qid) + 1
-            head(tr("Questreihe – Teil {0} von {1}", pos, len(chain)))
+            out.head(tr("Questreihe – Teil {0} von {1}", pos, len(chain)))
             for i, cid in enumerate(chain, 1):
                 c = db.quests[cid]
-                parts.append((f"{i:>2}. ", "dim"))
+                out.parts.append((f"{i:>2}. ", "dim"))
                 if cid == qid:
-                    parts.append((db.quest_name(cid, loc), "title"))
+                    out.parts.append((db.quest_name(cid, loc), "title"))
                 else:
-                    self._qdb_link(parts, cid, db.quest_name(cid, loc), c["side"] or "hl")
-                parts.append((f"  [{c['lvl']}]\n", "dim"))
+                    self._qdb_link(out.parts, cid, db.quest_name(cid, loc), c["side"] or "hl")
+                out.parts.append((f"  [{c['lvl']}]\n", "dim"))
+
+    def _qdb_part_task(self, out, db, loc, q, qid):
+        """Questgeber, Abgabe, Aufgabentext und Ziele."""
         start, end = self._qdb_where(q["start"]), self._qdb_where(q["end"])
         if start or end:
-            head(tr("Questgeber und Abgabe"))
+            out.head(tr("Questgeber und Abgabe"))
             if start:
-                line(tr("Beginnt bei: {0}", start))
+                out.line(tr("Beginnt bei: {0}", start))
             if end:
-                line(tr("Abgabe bei: {0}", end))
+                out.line(tr("Abgabe bei: {0}", end))
         texts = db.quest_text(qid, loc)
         if texts:
-            head(tr("Aufgabe"))
+            out.head(tr("Aufgabe"))
             for t in texts:
-                line(t)
+                out.line(t)
         goals = ([tr("Besiegen: {0}", ", ".join((db.npc(n, loc) or {}).get("name", f"#{n}") for n in q["kill"][:6]))] if q["kill"] else []) + \
                 ([tr("Sammeln: {0}", ", ".join(db.item_name(i, loc) for i in q["items"][:6]))] if q["items"] else []) + \
                 ([tr("Benutzen: {0}", ", ".join(db.obj_name(o, loc) for o in q["objs"][:6]))] if q["objs"] else [])
         for g in goals:
-            line("• " + g, "dim")
+            out.line("• " + g, "dim")
 
-        head(tr("Belohnung"))
+    def _qdb_part_reward(self, out, db, loc, q, qid):
+        """Belohnung mit Quelle."""
+        fn = self.link_state.get("factionNames", {})
+        out.head(tr("Belohnung"))
         seen = self.link_state.get("questRewards", {}).get(qid)
         rw = quest_rewards(db, qid, self.qdb_rewards, seen, loc, self.link_state.get("items", {}))
         xp = (seen or {}).get("xp") or (db.xp.get(qid) or (0, 0))[1]
@@ -358,59 +369,62 @@ class QuestsPage:
             bits.append(f"{db.faction_name(fid, fn)} {'+' if val > 0 else ''}{val}")
         if rw["spell"]:
             bits.append(tr("Zauber {0}", rw["spell"]) if isinstance(rw["spell"], int) else str(rw["spell"]))
-        line("  ·  ".join(bits) if bits else "–")
+        out.line("  ·  ".join(bits) if bits else "–")
 
         def items(lst):
             for it in lst:
-                parts.append(("• ", ""))
-                parts.append((it["name"], f"q{min(max(it['q'], 0), 6)}"))
-                parts.append(((f" ×{it['n']}" if it["n"] > 1 else "") + "\n", ""))
+                out.parts.append(("• ", ""))
+                out.parts.append((it["name"], f"q{min(max(it['q'], 0), 6)}"))
+                out.parts.append(((f" ×{it['n']}" if it["n"] > 1 else "") + "\n", ""))
         items(rw["items"])
         if rw["choice"]:
-            line(tr("Eine davon zur Wahl:"), "dim")
+            out.line(tr("Eine davon zur Wahl:"), "dim")
             items(rw["choice"])
         if rw["unsure"]:
-            line(tr("Gegenstände (laut QuestieDB – ob fest oder zur Wahl, ist nicht bekannt):"), "dim")
+            out.line(tr("Gegenstände (laut QuestieDB – ob fest oder zur Wahl, ist nicht bekannt):"), "dim")
             items(rw["unsure"])
         if rw["maxmoney"] and not rw["money"]:
-            line(tr("Auf Höchststufe statt Erfahrung: {0}", fmt_money(rw["maxmoney"])), "dim")
+            out.line(tr("Auf Höchststufe statt Erfahrung: {0}", fmt_money(rw["maxmoney"])), "dim")
         src = {"game": tr("Quelle: im Spiel gesehen am {0}", datetime.fromtimestamp((seen or {}).get("t") or 0).strftime(tr("%d.%m.%Y"))),
                "cmangos": tr("Quelle: Spieldatenbank von cMaNGOS (Classic) – in WoW Forever kann es Abweichungen geben"),
                "questie": tr("Quelle: QuestieDB (Gold unbekannt)")}.get(rw["src"])
         if src:
-            line(src, "dim")
+            out.line(src, "dim")
         elif self.qdb_rewards is None and REWARD_REPOS.get(self.flavor):
-            line(tr("Gegenstände und Gold: Die Belohnungsdaten werden gerade geladen …"), "dim")
+            out.line(tr("Gegenstände und Gold: Die Belohnungsdaten werden gerade geladen …"), "dim")
         else:
-            line(tr("Gegenstände und Gold: unbekannt. Leeroylink merkt sie sich, sobald einer deiner Charaktere "
+            out.line(tr("Gegenstände und Gold: unbekannt. Leeroylink merkt sie sich, sobald einer deiner Charaktere "
                     "die Quest sieht – bis dahin hilft Wowhead."), "dim")
 
+    def _qdb_part_links(self, out, db, loc, q, qid, chain):
+        """Voraussetzungen, freigeschaltete und ausschließende Quests, Summe bis zum Ende der Reihe."""
+        fn = self.link_state.get("factionNames", {})
         pre = [p for p in q["pre"] if p in db.quests and p not in chain]
         if pre or q["skill"]:
-            head(tr("Voraussetzungen"))
+            out.head(tr("Voraussetzungen"))
             if q["skill"]:
-                line(tr("Beruf/Fertigkeit {0}: mindestens {1}", q["skill"][0], q["skill"][1]))
+                out.line(tr("Beruf/Fertigkeit {0}: mindestens {1}", q["skill"][0], q["skill"][1]))
             if pre:
-                parts.append((tr("Erst abschließen ({0}): ", tr("alle") if q["pre_all"] else tr("eine davon")), ""))
+                out.parts.append((tr("Erst abschließen ({0}): ", tr("alle") if q["pre_all"] else tr("eine davon")), ""))
                 for i, p in enumerate(pre[:8]):
                     if i:
-                        parts.append((", ", ""))
-                    self._qdb_link(parts, p, db.quest_name(p, loc), db.quests[p]["side"] or "hl")
-                parts.append(("\n", ""))
+                        out.parts.append((", ", ""))
+                    self._qdb_link(out.parts, p, db.quest_name(p, loc), db.quests[p]["side"] or "hl")
+                out.parts.append(("\n", ""))
         more = [n for n in db.next_of.get(qid, []) if n not in chain]
         if more:
-            head(tr("Schaltet außerdem frei"))
+            out.head(tr("Schaltet außerdem frei"))
             for n in more[:10]:
-                parts.append(("• ", ""))
-                self._qdb_link(parts, n, db.quest_name(n, loc), db.quests[n]["side"] or "hl")
-                parts.append((f"  [{db.quests[n]['lvl']}]\n", "dim"))
+                out.parts.append(("• ", ""))
+                self._qdb_link(out.parts, n, db.quest_name(n, loc), db.quests[n]["side"] or "hl")
+                out.parts.append((f"  [{db.quests[n]['lvl']}]\n", "dim"))
         excl = [x for x in q["exclusive"] if x in db.quests]
         if excl:
-            head(tr("Schließt sich aus mit"))
+            out.head(tr("Schließt sich aus mit"))
             for x in excl[:6]:
-                parts.append(("• ", ""))
-                self._qdb_link(parts, x, db.quest_name(x, loc))
-                parts.append(("\n", ""))
+                out.parts.append(("• ", ""))
+                self._qdb_link(out.parts, x, db.quest_name(x, loc))
+                out.parts.append(("\n", ""))
         if len(chain) > 1 and chain.index(qid) < len(chain) - 1:
             rest = chain[chain.index(qid):]
             total_xp = sum(((self.link_state.get("questRewards", {}).get(c) or {}).get("xp") or
@@ -419,9 +433,8 @@ class QuestsPage:
             for c in rest:
                 for fid, val in db.quests[c]["rep"]:
                     reps[fid] = reps.get(fid, 0) + val
-            head(tr("Bis zum Ende der Reihe ({0} Quests)", len(rest)))
-            line("  ·  ".join([f"{fmt_int(total_xp)} XP"] + [f"{db.faction_name(f, fn)} +{v}" for f, v in reps.items()]))
-        return parts
+            out.head(tr("Bis zum Ende der Reihe ({0} Quests)", len(rest)))
+            out.line("  ·  ".join([f"{fmt_int(total_xp)} XP"] + [f"{db.faction_name(f, fn)} +{v}" for f, v in reps.items()]))
 
     def qdb_back(self):
         if self.qdb_history:

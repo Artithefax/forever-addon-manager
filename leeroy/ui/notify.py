@@ -1,4 +1,4 @@
-"""Hauptfenster: NotifyMixin."""
+"""Hinweisleiste oben im Fenster statt Pop-up-Fenstern, Fragen und Eingaben. (Mixin, wird in App eingemischt)."""
 from __future__ import annotations
 
 import time

@@ -73,6 +73,110 @@ def _items(v) -> dict:
     return out
 
 
+def _norm_quests(qu: dict) -> dict:
+    """Angenommene, erledigte und abgebrochene Quests."""
+    return {
+        "accepted": [{"id": _int(_map(q).get("id")), "title": _text(_map(q).get("title")),
+                      "lvl": _int(_map(q).get("lvl")), "t": _int(_map(q).get("t"))} for q in _list(qu.get("accepted"))],
+        "done": [{"id": _int(_map(q).get("id")), "title": _text(_map(q).get("title")),
+                  "xp": _int(_map(q).get("xp")), "money": _int(_map(q).get("money")),
+                  "t": _int(_map(q).get("t")), "zone": _text(_map(q).get("zone"))} for q in _list(qu.get("done"))],
+        "abandoned": [{"title": _text(_map(q).get("title")), "t": _int(_map(q).get("t"))}
+                      for q in _list(qu.get("abandoned"))],
+    }
+
+
+def _norm_loot(lo: dict) -> dict:
+    """Beute mit Qualitäten und besonderen Funden."""
+    return {"n": _int(lo.get("n")), "value": _int(lo.get("value")),
+        "q": {str(_int(k) if str(k).lstrip("-").isdigit() else k): _int(v) for k, v in _map(lo.get("q")).items()},
+        "items": _items(lo.get("items")),
+        "notable": [{"id": _int(_map(e).get("id")), "name": _text(_map(e).get("name")),
+                     "q": _int(_map(e).get("q"), 2), "n": _int(_map(e).get("n"), 1),
+                     "t": _int(_map(e).get("t")), "zone": _text(_map(e).get("zone")),
+                     "src": _text(_map(e).get("src")), "boss": _text(_map(e).get("boss"))}
+                    for e in _list(lo.get("notable"))]}
+
+
+def _norm_combat(cb: dict) -> dict:
+    """Kampfwerte: Schaden, Heilung, Treffer, Zauber."""
+    return {
+        **{k: _int(cb.get(k)) for k in ("dmg", "dmgPet", "hits", "crits", "maxHit", "heal", "over", "maxHeal",
+                                         "taken", "maxTaken", "healTaken", "castN", "buffN", "debuffN",
+                                         "buffsGiven", "interrupts", "dispels")},
+        **{k: _text(cb.get(k)) for k in ("maxHitSpell", "maxHealSpell", "maxTakenBy", "maxTakenSpell", "err")},
+        "maxHitCrit": bool(cb.get("maxHitCrit")),
+        "spells": {k: [_int(x) for x in (_list(v) + [0, 0, 0])[:3]] for k, v in _map(cb.get("spells")).items()},
+        "heals": {k: [_int(x) for x in (_list(v) + [0, 0, 0])[:3]] for k, v in _map(cb.get("heals")).items()},
+        "casts": _counts(cb.get("casts")), "buffs": _counts(cb.get("buffs")), "debuffs": _counts(cb.get("debuffs")),
+        "takenBy": _counts(cb.get("takenBy")), "env": _counts(cb.get("env")),
+        "swings": {k: _int(_map(cb.get("swings")).get(k))
+                   for k in ("n", "hit", "crit", "miss", "dodge", "parry", "block", "glance")},
+        "swingsTaken": {k: _int(_map(cb.get("swingsTaken")).get(k))
+                        for k in ("n", "hit", "crit", "miss", "dodge", "parry", "block")},
+    }
+
+
+def _norm_kills(ki: dict) -> dict:
+    """Kills nach Art und Gegner."""
+    return {**{k: _int(ki.get(k)) for k in ("n", "normal", "elite", "rare", "rareelite", "boss", "players", "blows")},
+        "mobs": {k: {"name": _text(_map(e).get("name")) or "?", "n": _int(_map(e).get("n")),
+                     "c": _text(_map(e).get("c")) or "normal"} for k, e in _map(ki.get("mobs")).items()}}
+
+
+def _norm_prof(pr: dict) -> dict:
+    """Berufe: Fertigkeiten, Hergestelltes, Gesammeltes."""
+    return {
+        "skills": {k: {"h": _text(_map(e).get("h")), "a": _int(_map(e).get("a")), "b": _int(_map(e).get("b")),
+                       "m": _int(_map(e).get("m"))} for k, e in _map(pr.get("skills")).items()},
+        "ups": _int(pr.get("ups")),
+        "crafted": _items(pr.get("crafted")),
+        "gathered": {k: _items(v) for k, v in _map(pr.get("gathered")).items() if _items(v)},
+        "learned": [_text(_map(e).get("name")) for e in _list(pr.get("learned")) if _map(e).get("name")],
+    }
+
+
+def _norm_explore(ex: dict) -> dict:
+    """Entdeckte Orte und Zeit je Zone."""
+    return {
+        "found": [{"name": _text(_map(e).get("name")), "xp": _int(_map(e).get("xp")), "zone": _text(_map(e).get("zone")),
+                   "t": _int(_map(e).get("t"))} for e in _list(ex.get("found"))],
+        "zones": {k: {"sec": _int(_map(z).get("sec")), "subs": sorted(str(x) for x in _map(_map(z).get("subs"))),
+                      "xp": _int(_map(z).get("xp")), "money": _int(_map(z).get("money")),
+                      "kills": _int(_map(z).get("kills"))}
+                  for k, z in _map(ex.get("zones")).items()},
+    }
+
+
+def _norm_runs(raw) -> list:
+    """Dungeons, Schlachtzüge und Schlachtfelder."""
+    return [{"name": _text(_map(x).get("name")), "kind": _text(_map(x).get("kind")), "diff": _text(_map(x).get("diff")),
+         "size": _int(_map(x).get("size")), "start": _int(_map(x).get("start")), "stop": _int(_map(x).get("stop")),
+         "kills": _int(_map(x).get("kills")), "bosses": [_text(b) for b in _list(_map(x).get("bosses"))],
+         "wipes": _int(_map(x).get("wipes")), "deaths": _int(_map(x).get("deaths")), "xp": _int(_map(x).get("xp")),
+         "money": _int(_map(x).get("money")), "loot": _int(_map(x).get("loot")), "group": _int(_map(x).get("group")),
+         "drops": [{"id": _int(_map(d).get("id")), "name": _text(_map(d).get("name")), "q": _int(_map(d).get("q"), 2),
+                    "n": _int(_map(d).get("n"), 1), "boss": _text(_map(d).get("boss"))}
+                   for d in _list(_map(x).get("drops"))]}
+        for x in _list(raw)]
+
+
+def _session_fixups(s: dict) -> None:
+    """Werte, die ältere Leeroylink-Versionen oder geschützte Chatzeilen nicht liefern, ergänzen."""
+    # Kill-XP: Neuere Clients schützen die Chatzeile im Kampf – dann zählt die XP, die im Kampf kam (Link 0.3.1)
+    x = s["xp"]
+    if x["combat"] > x["kills"]:
+        x["kills"] = x["combat"]
+        x["other"] = max(0, x["total"] - x["kills"] - x["quests"] - x["explore"])
+    # Ältere Sitzungen aus WoW Forever (kein Kampflog, Link ≤ 0.3.1): Kills aus den XP-Zeilen nehmen
+    k = s["kills"]
+    if k["n"] == 0 and x["killsN"] > 0:
+        k["n"] = k["normal"] = x["killsN"]
+    # Spielzeit fehlt (z. B. Absturz vor dem ersten Speichern): Zeitraum nehmen
+    if s["played"] <= 0:
+        s["played"] = max(0, s["stop"] - s["start"])
+
+
 def normalize_session(raw, flavor: str = "", account: str = "") -> dict | None:
     """Bringt eine Sitzung aus dem Addon in eine feste Form (JSON-tauglich, alle Felder vorhanden)."""
     r = _map(raw)
@@ -100,41 +204,10 @@ def normalize_session(raw, flavor: str = "", account: str = "") -> dict | None:
         "xp": {k: _int(xp.get(k)) for k in ("total", "kills", "quests", "explore", "other", "killsN", "combat")},
         "money": {"start": _int(mo.get("start")), "stop": _int(mo.get("stop")), "income": _int(mo.get("income")),
                   "spent": _int(mo.get("spent")), "gain": _counts(mo.get("gain")), "spend": _counts(mo.get("spend"))},
-        "quests": {
-            "accepted": [{"id": _int(_map(q).get("id")), "title": _text(_map(q).get("title")),
-                          "lvl": _int(_map(q).get("lvl")), "t": _int(_map(q).get("t"))} for q in _list(qu.get("accepted"))],
-            "done": [{"id": _int(_map(q).get("id")), "title": _text(_map(q).get("title")),
-                      "xp": _int(_map(q).get("xp")), "money": _int(_map(q).get("money")),
-                      "t": _int(_map(q).get("t")), "zone": _text(_map(q).get("zone"))} for q in _list(qu.get("done"))],
-            "abandoned": [{"title": _text(_map(q).get("title")), "t": _int(_map(q).get("t"))}
-                          for q in _list(qu.get("abandoned"))],
-        },
-        "loot": {"n": _int(lo.get("n")), "value": _int(lo.get("value")),
-                 "q": {str(_int(k) if str(k).lstrip("-").isdigit() else k): _int(v) for k, v in _map(lo.get("q")).items()},
-                 "items": _items(lo.get("items")),
-                 "notable": [{"id": _int(_map(e).get("id")), "name": _text(_map(e).get("name")),
-                              "q": _int(_map(e).get("q"), 2), "n": _int(_map(e).get("n"), 1),
-                              "t": _int(_map(e).get("t")), "zone": _text(_map(e).get("zone")),
-                              "src": _text(_map(e).get("src")), "boss": _text(_map(e).get("boss"))}
-                             for e in _list(lo.get("notable"))]},
-        "combat": {
-            **{k: _int(cb.get(k)) for k in ("dmg", "dmgPet", "hits", "crits", "maxHit", "heal", "over", "maxHeal",
-                                             "taken", "maxTaken", "healTaken", "castN", "buffN", "debuffN",
-                                             "buffsGiven", "interrupts", "dispels")},
-            **{k: _text(cb.get(k)) for k in ("maxHitSpell", "maxHealSpell", "maxTakenBy", "maxTakenSpell", "err")},
-            "maxHitCrit": bool(cb.get("maxHitCrit")),
-            "spells": {k: [_int(x) for x in (_list(v) + [0, 0, 0])[:3]] for k, v in _map(cb.get("spells")).items()},
-            "heals": {k: [_int(x) for x in (_list(v) + [0, 0, 0])[:3]] for k, v in _map(cb.get("heals")).items()},
-            "casts": _counts(cb.get("casts")), "buffs": _counts(cb.get("buffs")), "debuffs": _counts(cb.get("debuffs")),
-            "takenBy": _counts(cb.get("takenBy")), "env": _counts(cb.get("env")),
-            "swings": {k: _int(_map(cb.get("swings")).get(k))
-                       for k in ("n", "hit", "crit", "miss", "dodge", "parry", "block", "glance")},
-            "swingsTaken": {k: _int(_map(cb.get("swingsTaken")).get(k))
-                            for k in ("n", "hit", "crit", "miss", "dodge", "parry", "block")},
-        },
-        "kills": {**{k: _int(ki.get(k)) for k in ("n", "normal", "elite", "rare", "rareelite", "boss", "players", "blows")},
-                  "mobs": {k: {"name": _text(_map(e).get("name")) or "?", "n": _int(_map(e).get("n")),
-                               "c": _text(_map(e).get("c")) or "normal"} for k, e in _map(ki.get("mobs")).items()}},
+        "quests": _norm_quests(qu),
+        "loot": _norm_loot(lo),
+        "combat": _norm_combat(cb),
+        "kills": _norm_kills(ki),
         "bosses": [{"name": _text(_map(b).get("name")), "t": _int(_map(b).get("t")), "inst": _text(_map(b).get("inst")),
                     "sec": _int(_map(b).get("sec"))} for b in _list(r.get("bosses"))],
         "wipes": _int(r.get("wipes")),
@@ -142,48 +215,15 @@ def normalize_session(raw, flavor: str = "", account: str = "") -> dict | None:
                     for k in ("t", "zone", "sub", "by", "spell", "lvl", "inst")} for d in _list(r.get("deaths"))],
         "deathN": _int(r.get("deathN")),
         "move": {k: _num(mv.get(k)) for k in ("foot", "mount", "swim", "taxi", "ghost", "steps", "jumps")},
-        "prof": {
-            "skills": {k: {"h": _text(_map(e).get("h")), "a": _int(_map(e).get("a")), "b": _int(_map(e).get("b")),
-                           "m": _int(_map(e).get("m"))} for k, e in _map(pr.get("skills")).items()},
-            "ups": _int(pr.get("ups")),
-            "crafted": _items(pr.get("crafted")),
-            "gathered": {k: _items(v) for k, v in _map(pr.get("gathered")).items() if _items(v)},
-            "learned": [_text(_map(e).get("name")) for e in _list(pr.get("learned")) if _map(e).get("name")],
-        },
+        "prof": _norm_prof(pr),
         "spellsLearned": [_text(_map(e).get("name")) for e in _list(r.get("spellsLearned")) if _map(e).get("name")],
-        "explore": {
-            "found": [{"name": _text(_map(e).get("name")), "xp": _int(_map(e).get("xp")), "zone": _text(_map(e).get("zone")),
-                       "t": _int(_map(e).get("t"))} for e in _list(ex.get("found"))],
-            "zones": {k: {"sec": _int(_map(z).get("sec")), "subs": sorted(str(x) for x in _map(_map(z).get("subs"))),
-                          "xp": _int(_map(z).get("xp")), "money": _int(_map(z).get("money")),
-                          "kills": _int(_map(z).get("kills"))}
-                      for k, z in _map(ex.get("zones")).items()},
-        },
-        "runs": [{"name": _text(_map(x).get("name")), "kind": _text(_map(x).get("kind")), "diff": _text(_map(x).get("diff")),
-                  "size": _int(_map(x).get("size")), "start": _int(_map(x).get("start")), "stop": _int(_map(x).get("stop")),
-                  "kills": _int(_map(x).get("kills")), "bosses": [_text(b) for b in _list(_map(x).get("bosses"))],
-                  "wipes": _int(_map(x).get("wipes")), "deaths": _int(_map(x).get("deaths")), "xp": _int(_map(x).get("xp")),
-                  "money": _int(_map(x).get("money")), "loot": _int(_map(x).get("loot")), "group": _int(_map(x).get("group")),
-                  "drops": [{"id": _int(_map(d).get("id")), "name": _text(_map(d).get("name")), "q": _int(_map(d).get("q"), 2),
-                             "n": _int(_map(d).get("n"), 1), "boss": _text(_map(d).get("boss"))}
-                            for d in _list(_map(x).get("drops"))]}
-                 for x in _list(r.get("runs"))],
+        "explore": _norm_explore(ex),
+        "runs": _norm_runs(r.get("runs")),
         "rep": _counts(r.get("rep")),
         "xpNow": _int(r.get("xpNow")), "xpMax": _int(r.get("xpMax")),
         "legacy": False,
     }
-    # Kill-XP: Neuere Clients schützen die Chatzeile im Kampf – dann zählt die XP, die im Kampf kam (Link 0.3.1)
-    x = s["xp"]
-    if x["combat"] > x["kills"]:
-        x["kills"] = x["combat"]
-        x["other"] = max(0, x["total"] - x["kills"] - x["quests"] - x["explore"])
-    # Ältere Sitzungen aus WoW Forever (kein Kampflog, Link ≤ 0.3.1): Kills aus den XP-Zeilen nehmen
-    k = s["kills"]
-    if k["n"] == 0 and x["killsN"] > 0:
-        k["n"] = k["normal"] = x["killsN"]
-    # Spielzeit fehlt (z. B. Absturz vor dem ersten Speichern): Zeitraum nehmen
-    if s["played"] <= 0:
-        s["played"] = max(0, s["stop"] - s["start"])
+    _session_fixups(s)
     return s
 
 

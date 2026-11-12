@@ -1,4 +1,4 @@
-"""Hauptfenster: SelfUpdateMixin."""
+"""Selbst-Update des Managers mit sichtbarem Fortschritt. (Mixin, wird in App eingemischt)."""
 from __future__ import annotations
 
 import sys

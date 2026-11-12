@@ -1,4 +1,4 @@
-"""Hauptfenster: InstallMixin."""
+"""Installieren: ZIP, GitHub, CurseForge-Verknüpfung, Drag & Drop. (Mixin, wird in App eingemischt)."""
 from __future__ import annotations
 
 from pathlib import Path

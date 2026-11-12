@@ -203,188 +203,217 @@ def _join_and(parts: list[str]) -> str:
     return ", ".join(parts[:-1]) + tr(" und ") + parts[-1]
 
 
-def session_report(s: dict) -> list[tuple[str, str]]:
-    """Ausführliche Zusammenfassung einer Sitzung als (Text, Tag)-Teile für ein Text-Feld."""
-    P: list[tuple[str, str]] = []
-    add = lambda text, tag="": P.append((text, tag))   # noqa: E731
+class ReportParts:
+    """Sammelt (Text, Tag)-Teile für ein Text-Feld."""
 
-    def head(text):
-        add("\n" + text + "\n", "head")
+    def __init__(self):
+        self.parts: list[tuple[str, str]] = []
 
-    def line(text, tag=""):
-        add(text + "\n", tag)
+    def add(self, text: str, tag: str = "") -> None:
+        self.parts.append((text, tag))
 
-    def pairs(items, tag=""):
+    def head(self, text: str) -> None:
+        self.add("\n" + text + "\n", "head")
+
+    def line(self, text: str, tag: str = "") -> None:
+        self.add(text + "\n", tag)
+
+    def pairs(self, items, tag: str = "") -> None:
         items = [i for i in items if i]
         if items:
-            line(" · ".join(items), tag)
+            self.line(" · ".join(items), tag)
 
+
+def _report_header(out: ReportParts, s: dict) -> None:
+    """Titel, Charakter und Hinweise über der Zusammenfassung."""
     cls = tr(CLASS_NAMES.get(s["class"], s["class"].title())) if s["class"] else ""
-    add(session_title(s) + "\n", "title")
+    out.add(session_title(s) + "\n", "title")
     who = s["name"] or s["char"]
     lv = s["level"]
     level = (tr("Stufe {0}", lv["to"]) if lv["from"] in (0, lv["to"]) else tr("Stufe {0} → {1}", lv["from"], lv["to"]))
-    pairs([who, cls, level, s["realm"]])
+    out.pairs([who, cls, level, s["realm"]])
     if s["legacy"]:
-        line(tr("Aufgezeichnet mit Leeroylink 0.1 – nur Dauer, Erfahrung, Gold und Kills."), "dim")
+        out.line(tr("Aufgezeichnet mit Leeroylink 0.1 – nur Dauer, Erfahrung, Gold und Kills."), "dim")
     if s["resumes"]:
-        line(tr("Fortgesetzt nach {0}× /reload oder kurzem Ausloggen.", s["resumes"]), "dim")
+        out.line(tr("Fortgesetzt nach {0}× /reload oder kurzem Ausloggen.", s["resumes"]), "dim")
 
-    head(tr("Zusammenfassung"))
-    line(_summary_sentence(s))
+
+def _report_summary(out: ReportParts, s: dict) -> None:
+    """Abschnitt „Zusammenfassung und Höhepunkte“."""
+    out.head(tr("Zusammenfassung"))
+    out.line(_summary_sentence(s))
     hl = _highlights(s)
     if hl:
         for h in hl:
-            add("★ ", "hl")
-            line(h)
+            out.add("★ ", "hl")
+            out.line(h)
 
-    head(tr("Zeit"))
+
+def _report_time(out: ReportParts, s: dict) -> None:
+    """Abschnitt „Zeit“."""
+    out.head(tr("Zeit"))
     t = s["time"]
-    pairs([tr("Spielzeit {0}", fmt_dur(s["played"])), tr("im Kampf {0}", fmt_dur(t["combat"])) if t["combat"] else "",
+    out.pairs([tr("Spielzeit {0}", fmt_dur(s["played"])), tr("im Kampf {0}", fmt_dur(t["combat"])) if t["combat"] else "",
            tr("AFK {0}", fmt_dur(t["afk"])) if t["afk"] else "", tr("ausgeruht {0}", fmt_dur(t["rest"])) if t["rest"] else "",
            tr("in Instanzen {0}", fmt_dur(t["instance"])) if t["instance"] else "",
            tr("Flugroute {0}", fmt_dur(t["taxi"])) if t["taxi"] else "", tr("tot {0}", fmt_dur(t["dead"])) if t["dead"] else ""])
     if s["playedTotal"]:
-        line(tr("Gesamtspielzeit des Charakters: {0}", fmt_dur(s["playedTotal"])), "dim")
+        out.line(tr("Gesamtspielzeit des Charakters: {0}", fmt_dur(s["playedTotal"])), "dim")
 
+
+def _report_xp(out: ReportParts, s: dict) -> None:
+    """Abschnitt „Erfahrung“."""
+    lv = s["level"]
     x = s["xp"]
     if x["total"] or lv["ups"]:
-        head(tr("Erfahrung"))
+        out.head(tr("Erfahrung"))
         per_h = x["total"] * 3600 / s["played"] if s["played"] >= 300 else 0
-        pairs([tr("{0} XP", fmt_int(x["total"])), tr("{0} pro Stunde", fmt_int(per_h)) if per_h else ""])
-        pairs([tr("Kills {0} ({1})", fmt_int(x["kills"]), fmt_pct(x["kills"], x["total"])) if x["kills"] else "",
+        out.pairs([tr("{0} XP", fmt_int(x["total"])), tr("{0} pro Stunde", fmt_int(per_h)) if per_h else ""])
+        out.pairs([tr("Kills {0} ({1})", fmt_int(x["kills"]), fmt_pct(x["kills"], x["total"])) if x["kills"] else "",
                tr("Quests {0} ({1})", fmt_int(x["quests"]), fmt_pct(x["quests"], x["total"])) if x["quests"] else "",
                tr("Entdecken {0} ({1})", fmt_int(x["explore"]), fmt_pct(x["explore"], x["total"])) if x["explore"] else "",
                tr("Sonstiges {0}", fmt_int(x["other"])) if x["other"] else ""], "dim")
         if lv["ups"]:
-            line(tr("Stufenaufstiege: {0}", ", ".join(tr("{0} um {1}", u["l"], fmt_clock(u["t"])) for u in lv["ups"])))
+            out.line(tr("Stufenaufstiege: {0}", ", ".join(tr("{0} um {1}", u["l"], fmt_clock(u["t"])) for u in lv["ups"])))
 
+
+def _report_gold(out: ReportParts, s: dict) -> None:
+    """Abschnitt „Gold“."""
     m = s["money"]
     net = session_net_money(s)
-    head(tr("Gold"))
+    out.head(tr("Gold"))
     if s["legacy"]:
-        line(tr("netto {0}", fmt_money(net, sign=True)))
+        out.line(tr("netto {0}", fmt_money(net, sign=True)))
     else:
-        pairs([tr("{0} → {1}", fmt_money(m["start"]), fmt_money(m["stop"])), tr("netto {0}", fmt_money(net, sign=True))])
+        out.pairs([tr("{0} → {1}", fmt_money(m["start"]), fmt_money(m["stop"])), tr("netto {0}", fmt_money(net, sign=True))])
         if m["gain"]:
-            line(tr("Einnahmen {0}: {1}", fmt_money(m["income"]), ", ".join(
+            out.line(tr("Einnahmen {0}: {1}", fmt_money(m["income"]), ", ".join(
                 f"{tr(MONEY_SOURCES.get(k, k))} {fmt_money(v)}" for k, v in _top(m["gain"], 9))), "dim")
         if m["spend"]:
-            line(tr("Ausgaben {0}: {1}", fmt_money(m["spent"]), ", ".join(
+            out.line(tr("Ausgaben {0}: {1}", fmt_money(m["spent"]), ", ".join(
                 f"{tr(MONEY_SOURCES.get(k, k))} {fmt_money(v)}" for k, v in _top(m["spend"], 9))), "dim")
 
+
+def _report_quests(out: ReportParts, s: dict) -> None:
+    """Abschnitt „Quests“."""
     q = s["quests"]
     if q["done"] or q["accepted"] or q["abandoned"]:
-        head(tr("Quests"))
-        pairs([tr("{0} abgeschlossen", len(q["done"])), tr("{0} angenommen", len(q["accepted"])),
+        out.head(tr("Quests"))
+        out.pairs([tr("{0} abgeschlossen", len(q["done"])), tr("{0} angenommen", len(q["accepted"])),
                tr("{0} abgebrochen", len(q["abandoned"])) if q["abandoned"] else ""])
         for e in q["done"]:
-            add("✓ ", "ok")
+            out.add("✓ ", "ok")
             reward = [tr("{0} XP", fmt_int(e["xp"])) if e["xp"] else "", fmt_money(e["money"]) if e["money"] else ""]
             reward = [r for r in reward if r]
-            line((e["title"] or tr("Quest {0}", e["id"])) + (f"  ({', '.join(reward)})" if reward else ""))
+            out.line((e["title"] or tr("Quest {0}", e["id"])) + (f"  ({', '.join(reward)})" if reward else ""))
         open_q = [e for e in q["accepted"] if e["id"] not in {d["id"] for d in q["done"]}]
         if open_q:
-            line(tr("Neu angenommen: {0}", ", ".join(e["title"] or tr("Quest {0}", e["id"]) for e in open_q)), "dim")
+            out.line(tr("Neu angenommen: {0}", ", ".join(e["title"] or tr("Quest {0}", e["id"]) for e in open_q)), "dim")
         if q["abandoned"]:
-            line(tr("Abgebrochen: {0}", ", ".join(e["title"] for e in q["abandoned"])), "dim")
+            out.line(tr("Abgebrochen: {0}", ", ".join(e["title"] for e in q["abandoned"])), "dim")
 
+
+def _report_loot(out: ReportParts, s: dict) -> None:
+    """Abschnitt „Beute“."""
     lo = s["loot"]
     if lo["n"]:
-        head(tr("Beute"))
-        pairs([plural(lo["n"], "{0} Gegenstand", "{0} Gegenstände"), tr("Händlerwert {0}", fmt_money(lo["value"])) if lo["value"] else ""])
+        out.head(tr("Beute"))
+        out.pairs([plural(lo["n"], "{0} Gegenstand", "{0} Gegenstände"), tr("Händlerwert {0}", fmt_money(lo["value"])) if lo["value"] else ""])
         by_q = []
         for qi in range(len(QUALITY_NAMES)):
             n = lo["q"].get(str(qi))
             if n:
                 by_q.append(f"{fmt_int(n)} {tr(QUALITY_NAMES[qi]).lower()}")
         if by_q:
-            line(", ".join(by_q), "dim")
+            out.line(", ".join(by_q), "dim")
         if lo["notable"]:
-            add(tr("Besondere Beute: "))
+            out.add(tr("Besondere Beute: "))
             for i, e in enumerate(lo["notable"][-12:]):
                 if i:
-                    add(", ")
-                add(f"[{e['name']}]", f"q{min(max(e['q'], 0), 6)}")
+                    out.add(", ")
+                out.add(f"[{e['name']}]", f"q{min(max(e['q'], 0), 6)}")
                 if e["n"] > 1:
-                    add(f" ×{e['n']}")
-            add("\n")
+                    out.add(f" ×{e['n']}")
+            out.add("\n")
         common = _top(lo["items"], 8, key=lambda e: e["n"])
         if common:
-            add(tr("Am häufigsten: "), "dim")
+            out.add(tr("Am häufigsten: "), "dim")
             for i, (_, e) in enumerate(common):
                 if i:
-                    add(", ", "dim")
-                add(e["name"], f"q{min(max(e['q'], 0), 6)}")
-                add(f" ×{fmt_int(e['n'])}", "dim")
-            add("\n")
+                    out.add(", ", "dim")
+                out.add(e["name"], f"q{min(max(e['q'], 0), 6)}")
+                out.add(f" ×{fmt_int(e['n'])}", "dim")
+            out.add("\n")
 
+
+def _report_combat(out: ReportParts, s: dict) -> None:
+    """Abschnitt „Kampf“."""
     cb = s["combat"]
     k = s["kills"]
     if k["n"] or cb["dmg"] or cb["taken"] or s["deathN"]:
-        head(tr("Gegner"))
+        out.head(tr("Gegner"))
         bosses = max(k["boss"], len(s["bosses"]))
-        pairs([tr("{0} besiegt", fmt_int(k["n"])), tr("{0} normal", fmt_int(k["normal"])),
+        out.pairs([tr("{0} besiegt", fmt_int(k["n"])), tr("{0} normal", fmt_int(k["normal"])),
                tr("{0} Elite", fmt_int(k["elite"] + k["rareelite"])) if k["elite"] + k["rareelite"] else "",
                tr("{0} selten", fmt_int(k["rare"] + k["rareelite"])) if k["rare"] + k["rareelite"] else "",
                plural(bosses, "{0} Boss", "{0} Bosse") if bosses else "",
                tr("{0} Spieler", k["players"]) if k["players"] else "",
                tr("{0} Todesstöße", fmt_int(k["blows"])) if k["blows"] else ""])
         if s["bosses"]:
-            line(tr("Bosse: {0}", ", ".join(b["name"] for b in s["bosses"])))
+            out.line(tr("Bosse: {0}", ", ".join(b["name"] for b in s["bosses"])))
         mobs = _top(k["mobs"], 10, key=lambda e: e["n"])
         if mobs:
             labels = {"elite": tr("Elite"), "rare": tr("selten"), "rareelite": tr("seltene Elite"), "boss": tr("Boss")}
-            line(tr("Am häufigsten: {0}", ", ".join(
+            out.line(tr("Am häufigsten: {0}", ", ".join(
                 f"{e['name']} ×{e['n']}" + (f" ({labels[e['c']]})" if e["c"] in labels else "") for _, e in mobs)), "dim")
 
         if not cb["err"] and (cb["dmg"] or cb["taken"] or cb["heal"]):
-            head(tr("Kampf"))
+            out.head(tr("Kampf"))
             dps = cb["dmg"] / s["time"]["combat"] if s["time"]["combat"] >= 10 else 0
-            pairs([tr("Schaden {0}", fmt_int(cb["dmg"])) + (tr(" (davon Begleiter {0})", fmt_int(cb["dmgPet"])) if cb["dmgPet"] else ""),
+            out.pairs([tr("Schaden {0}", fmt_int(cb["dmg"])) + (tr(" (davon Begleiter {0})", fmt_int(cb["dmgPet"])) if cb["dmgPet"] else ""),
                    tr("{0} DPS im Kampf", fmt_int(dps)) if dps else "",
                    tr("Krit-Rate {0}", fmt_pct(cb["crits"], cb["hits"])) if cb["hits"] else ""])
             if cb["maxHit"]:
-                line(tr("Größter Treffer: {0} mit {1}{2}", fmt_int(cb["maxHit"]), cb["maxHitSpell"] or "?",
+                out.line(tr("Größter Treffer: {0} mit {1}{2}", fmt_int(cb["maxHit"]), cb["maxHitSpell"] or "?",
                         tr(" (kritisch)") if cb["maxHitCrit"] else ""), "dim")
             if cb["heal"] or cb["over"]:
-                pairs([tr("Heilung {0}", fmt_int(cb["heal"])), tr("Überheilung {0}", fmt_int(cb["over"])) if cb["over"] else "",
+                out.pairs([tr("Heilung {0}", fmt_int(cb["heal"])), tr("Überheilung {0}", fmt_int(cb["over"])) if cb["over"] else "",
                        tr("größte Heilung {0} ({1})", fmt_int(cb["maxHeal"]), cb["maxHealSpell"]) if cb["maxHeal"] else ""])
-            pairs([tr("erlittener Schaden {0}", fmt_int(cb["taken"])), tr("erhaltene Heilung {0}", fmt_int(cb["healTaken"])) if cb["healTaken"] else "",
+            out.pairs([tr("erlittener Schaden {0}", fmt_int(cb["taken"])), tr("erhaltene Heilung {0}", fmt_int(cb["healTaken"])) if cb["healTaken"] else "",
                    tr("härtester Treffer {0} von {1}", fmt_int(cb["maxTaken"]), cb["maxTakenBy"] or tr(ENV_KINDS.get(cb["maxTakenSpell"], cb["maxTakenSpell"]) or "?"))
                    if cb["maxTaken"] else ""])
             if cb["env"]:
-                line(tr("Umgebung: {0}", ", ".join(f"{tr(ENV_KINDS.get(kk, kk))} {fmt_int(v)}" for kk, v in _top(cb["env"], 6))), "dim")
+                out.line(tr("Umgebung: {0}", ", ".join(f"{tr(ENV_KINDS.get(kk, kk))} {fmt_int(v)}" for kk, v in _top(cb["env"], 6))), "dim")
             sw, st = cb["swings"], cb["swingsTaken"]
             if sw["n"]:
-                pairs([tr("{0} Hiebe", fmt_int(sw["n"])), tr("{0} Treffer", fmt_int(sw["hit"])), tr("{0} kritisch", fmt_int(sw["crit"])),
+                out.pairs([tr("{0} Hiebe", fmt_int(sw["n"])), tr("{0} Treffer", fmt_int(sw["hit"])), tr("{0} kritisch", fmt_int(sw["crit"])),
                        tr("{0} verfehlt", fmt_int(sw["miss"])) if sw["miss"] else "", tr("{0} ausgewichen", fmt_int(sw["dodge"])) if sw["dodge"] else "",
                        tr("{0} pariert", fmt_int(sw["parry"])) if sw["parry"] else "", tr("{0} geblockt", fmt_int(sw["block"])) if sw["block"] else "",
                        tr("{0} gestreift", fmt_int(sw["glance"])) if sw["glance"] else ""])
             if st["n"]:
                 avoided = st["miss"] + st["dodge"] + st["parry"]
-                pairs([tr("{0} Hiebe eingesteckt", fmt_int(st["n"])), tr("{0} abgewehrt ({1})", fmt_int(avoided), fmt_pct(avoided, st["n"])) if avoided else "",
+                out.pairs([tr("{0} Hiebe eingesteckt", fmt_int(st["n"])), tr("{0} abgewehrt ({1})", fmt_int(avoided), fmt_pct(avoided, st["n"])) if avoided else "",
                        tr("{0} kritisch", fmt_int(st["crit"])) if st["crit"] else ""], )
             top_dmg = _top(cb["spells"], 6, key=lambda v: v[0])
             if top_dmg:
-                line(tr("Schaden nach Fähigkeit: {0}", ", ".join(
+                out.line(tr("Schaden nach Fähigkeit: {0}", ", ".join(
                     f"{name} {fmt_int(v[0])} ({fmt_pct(v[0], cb['dmg'])})" for name, v in top_dmg)), "dim")
             if cb["castN"]:
-                line(plural(cb["castN"], "1 Zauber gewirkt", "{0} Zauber gewirkt") + ": " + ", ".join(
+                out.line(plural(cb["castN"], "1 Zauber gewirkt", "{0} Zauber gewirkt") + ": " + ", ".join(
                     f"{name} ×{fmt_int(n)}" for name, n in _top(cb["casts"], 8)), "dim")
             if cb["buffN"]:
-                line(plural(cb["buffN"], "{0} Buff erhalten", "{0} Buffs erhalten") + ": " + ", ".join(
+                out.line(plural(cb["buffN"], "{0} Buff erhalten", "{0} Buffs erhalten") + ": " + ", ".join(
                     f"{name} ×{fmt_int(n)}" for name, n in _top(cb["buffs"], 8)), "dim")
             if cb["debuffN"]:
-                line(plural(cb["debuffN"], "{0} Schwächung erlitten", "{0} Schwächungen erlitten") + ": " + ", ".join(
+                out.line(plural(cb["debuffN"], "{0} Schwächung erlitten", "{0} Schwächungen erlitten") + ": " + ", ".join(
                     f"{name} ×{fmt_int(n)}" for name, n in _top(cb["debuffs"], 6)), "dim")
-            pairs([tr("{0} Buffs auf andere", fmt_int(cb["buffsGiven"])) if cb["buffsGiven"] else "",
+            out.pairs([tr("{0} Buffs auf andere", fmt_int(cb["buffsGiven"])) if cb["buffsGiven"] else "",
                    tr("{0} Unterbrechungen", cb["interrupts"]) if cb["interrupts"] else "",
                    tr("{0} Bannungen", cb["dispels"]) if cb["dispels"] else ""], )
         elif cb["err"]:
-            line(tr("Kampfdaten waren im Spiel nicht verfügbar ({0}).", cb["err"]), "dim")
+            out.line(tr("Kampfdaten waren im Spiel nicht verfügbar ({0}).", cb["err"]), "dim")
         if s["deathN"]:
-            line(tr("Tode: {0}", s["deathN"]), "warn")
+            out.line(tr("Tode: {0}", s["deathN"]), "warn")
             for d in s["deaths"]:
                 where = d["inst"] or d["zone"] or "?"
                 if d["sub"] and not d["inst"]:
@@ -392,72 +421,99 @@ def session_report(s: dict) -> list[tuple[str, str]]:
                 cause = d["by"] or tr(ENV_KINDS.get(d["spell"], d["spell"] or "")) or tr("unbekannt")
                 if d["by"] and d["spell"]:
                     cause += f" – {d['spell']}"
-                line(tr("✝ {0}  {1}, durch {2}", fmt_clock(d["t"]), where, cause), "dim")
+                out.line(tr("✝ {0}  {1}, durch {2}", fmt_clock(d["t"]), where, cause), "dim")
 
+
+def _report_travel(out: ReportParts, s: dict) -> None:
+    """Abschnitt „Unterwegs“."""
     mv = s["move"]
     if any(mv[kk] for kk in ("foot", "mount", "swim", "taxi", "ghost", "jumps")):
-        head(tr("Unterwegs"))
+        out.head(tr("Unterwegs"))
         walked = mv["foot"] + mv["ghost"]
-        pairs([tr("{0} zu Fuß", fmt_dist(walked)) + (tr(" (≈ {0} Schritte)", fmt_int(mv["steps"])) if mv["steps"] else "") if walked else "",
+        out.pairs([tr("{0} zu Fuß", fmt_dist(walked)) + (tr(" (≈ {0} Schritte)", fmt_int(mv["steps"])) if mv["steps"] else "") if walked else "",
                tr("{0} beritten", fmt_dist(mv["mount"])) if mv["mount"] else "",
                tr("{0} geschwommen", fmt_dist(mv["swim"])) if mv["swim"] else "",
                tr("{0} Flugroute", fmt_dist(mv["taxi"])) if mv["taxi"] else "",
                tr("{0} Sprünge", fmt_int(mv["jumps"])) if mv["jumps"] else ""])
         if mv["ghost"]:
-            line(tr("Davon als Geist: {0}", fmt_dist(mv["ghost"])), "dim")
+            out.line(tr("Davon als Geist: {0}", fmt_dist(mv["ghost"])), "dim")
 
+
+def _report_professions(out: ReportParts, s: dict) -> None:
+    """Abschnitt „Berufe“."""
     pr = s["prof"]
     profs = [(n, e) for n, e in pr["skills"].items()
              if skill_group(e["h"]) == "prof" or skill_group_by_name(n) == "prof"]
     raised = [(n, e) for n, e in pr["skills"].items() if e["b"] > e["a"]]
     if profs or raised or pr["crafted"] or pr["gathered"] or pr["learned"]:
-        head(tr("Berufe und Fertigkeiten"))
+        out.head(tr("Berufe und Fertigkeiten"))
         for n, e in sorted(raised, key=lambda kv: kv[1]["b"] - kv[1]["a"], reverse=True):
-            add(f"{n} {e['a']} → {e['b']}", "")
-            add(f"  (+{e['b'] - e['a']}{'/' + str(e['m']) if e['m'] else ''})\n", "ok")
+            out.add(f"{n} {e['a']} → {e['b']}", "")
+            out.add(f"  (+{e['b'] - e['a']}{'/' + str(e['m']) if e['m'] else ''})\n", "ok")
         rest = [f"{n} {e['b']}/{e['m']}" for n, e in sorted(profs) if e["b"] <= e["a"]]
         if rest:
-            line(tr("Unverändert: {0}", ", ".join(rest)), "dim")
+            out.line(tr("Unverändert: {0}", ", ".join(rest)), "dim")
         if pr["crafted"]:
-            line(tr("Hergestellt: {0}", ", ".join(f"{e['name']} ×{fmt_int(e['n'])}" for _, e in _top(pr["crafted"], 10, key=lambda e: e["n"]))))
+            out.line(tr("Hergestellt: {0}", ", ".join(f"{e['name']} ×{fmt_int(e['n'])}" for _, e in _top(pr["crafted"], 10, key=lambda e: e["n"]))))
         for kind, items in pr["gathered"].items():
-            line(tr("{0}: {1}", tr(GATHER_KINDS.get(kind, kind)),
+            out.line(tr("{0}: {1}", tr(GATHER_KINDS.get(kind, kind)),
                     ", ".join(f"{e['name']} ×{fmt_int(e['n'])}" for _, e in _top(items, 10, key=lambda e: e["n"]))))
         if pr["learned"]:
-            line(tr("Neue Rezepte: {0}", ", ".join(pr["learned"])), "dim")
+            out.line(tr("Neue Rezepte: {0}", ", ".join(pr["learned"])), "dim")
     if s["spellsLearned"]:
-        line(tr("Neue Zauber und Fähigkeiten: {0}", ", ".join(s["spellsLearned"])), "dim")
+        out.line(tr("Neue Zauber und Fähigkeiten: {0}", ", ".join(s["spellsLearned"])), "dim")
 
+
+def _report_explore(out: ReportParts, s: dict) -> None:
+    """Abschnitt „Entdeckt“."""
     ex = s["explore"]
     if ex["found"] or ex["zones"]:
-        head(tr("Entdeckt und bereist"))
+        out.head(tr("Entdeckt und bereist"))
         if ex["found"]:
             xp_found = sum(e["xp"] for e in ex["found"])
-            line(plural(len(ex["found"]), "{0} neues Gebiet", "{0} neue Gebiete") + (tr(" (+{0} XP)", fmt_int(xp_found)) if xp_found else "") + ": "
+            out.line(plural(len(ex["found"]), "{0} neues Gebiet", "{0} neue Gebiete") + (tr(" (+{0} XP)", fmt_int(xp_found)) if xp_found else "") + ": "
                  + ", ".join(e["name"] for e in ex["found"]))
         zones = _top(ex["zones"], 10, key=lambda z: z["sec"])
         if zones:
-            line(tr("Zonen: {0}", ", ".join(f"{name} {fmt_dur(z['sec'])}" for name, z in zones if z["sec"] >= 30) or "–"), "dim")
+            out.line(tr("Zonen: {0}", ", ".join(f"{name} {fmt_dur(z['sec'])}" for name, z in zones if z["sec"] >= 30) or "–"), "dim")
 
+
+def _report_instances(out: ReportParts, s: dict) -> None:
+    """Abschnitt „Dungeons und Schlachtzüge“."""
     if s["runs"]:
-        head(tr("Dungeons und Schlachtzüge"))
+        out.head(tr("Dungeons und Schlachtzüge"))
         for r in s["runs"]:
             kind = tr(INSTANCE_KINDS.get(r["kind"], r["kind"] or "Instanz"))
             dur = fmt_dur((r["stop"] or s["stop"]) - r["start"]) if r["start"] else ""
             details = [kind + (f", {r['diff']}" if r["diff"] else "") + (tr(", {0} Spieler", r["group"]) if r["group"] > 1 else ""),
                        f"{fmt_clock(r['start'])}–{fmt_clock(r['stop'] or s['stop'])}" if r["start"] else "", dur]
-            add(r["name"] or "?", "hl")
-            line("  " + " · ".join(d for d in details if d), "dim")
-            pairs([plural(r["kills"], "{0} Kill", "{0} Kills"), tr("Bosse: {0}", ", ".join(r["bosses"])) if r["bosses"] else "",
+            out.add(r["name"] or "?", "hl")
+            out.line("  " + " · ".join(d for d in details if d), "dim")
+            out.pairs([plural(r["kills"], "{0} Kill", "{0} Kills"), tr("Bosse: {0}", ", ".join(r["bosses"])) if r["bosses"] else "",
                    plural(r["wipes"], "{0} Wipe", "{0} Wipes") if r["wipes"] else "",
                    plural(r["deaths"], "{0} Tod", "{0} Tode") if r["deaths"] else "",
                    tr("{0} XP", fmt_int(r["xp"])) if r["xp"] else "",
                    plural(r["loot"], "{0} Gegenstand", "{0} Gegenstände") if r["loot"] else ""])
 
+
+def _report_reputation(out: ReportParts, s: dict) -> None:
+    """Abschnitt „Ruf“."""
     if s["rep"]:
-        head(tr("Ruf"))
-        line(", ".join(f"{name} {'+' if v > 0 else ''}{fmt_int(v)}" for name, v in _top(s["rep"], 12, key=abs)))
-    return P
+        out.head(tr("Ruf"))
+        out.line(", ".join(f"{name} {'+' if v > 0 else ''}{fmt_int(v)}" for name, v in _top(s["rep"], 12, key=abs)))
+
+
+REPORT_SECTIONS = (_report_header, _report_summary, _report_time, _report_xp, _report_gold, _report_quests, _report_loot,
+                   _report_combat, _report_travel, _report_professions, _report_explore, _report_instances,
+                   _report_reputation)
+
+
+def session_report(s: dict) -> list[tuple[str, str]]:
+    """Ausführliche Zusammenfassung einer Sitzung als (Text, Tag)-Teile für ein Text-Feld."""
+    r = ReportParts()
+    for section in REPORT_SECTIONS:
+        section(r, s)
+    return r.parts
 
 
 def _highlights(s: dict) -> list[str]:

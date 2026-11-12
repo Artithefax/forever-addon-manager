@@ -1,4 +1,4 @@
-"""Hauptfenster: AddonsPage."""
+"""Seite „Meine Addons“: Liste und Kacheln, Details, Abhängigkeiten, Aktivieren und Entfernen. (Mixin, wird in App eingemischt)."""
 from __future__ import annotations
 
 import shutil

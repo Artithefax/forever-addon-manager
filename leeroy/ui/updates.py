@@ -1,4 +1,4 @@
-"""Hauptfenster: UpdatesPage."""
+"""Seite „Updates“: prüfen, aktualisieren, festhalten und rückgängig machen. (Mixin, wird in App eingemischt)."""
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
