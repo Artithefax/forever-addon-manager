@@ -22,8 +22,10 @@ class SettingsPage:
     # --- Einstellungen ---------------------------------------------------------------- #
     def _page_settings(self):
         page, _ = self._page("settings", tr("Einstellungen"), tr("Leeroyzan einrichten"))
-        cols = ttk.Frame(page)
-        cols.pack(fill="both", expand=True, pady=(12, 0))
+        wrap, inner = self._scroll_area(page, THEME["bg"], cards=False)     # passt nicht immer in niedrige Fenster
+        wrap.pack(fill="both", expand=True, pady=(12, 0))
+        cols = ttk.Frame(inner)
+        cols.pack(fill="both", expand=True, padx=(0, 4))
         cols.columnconfigure(0, weight=3, uniform="c")
         cols.columnconfigure(1, weight=2, uniform="c")
         lf = ttk.Frame(cols)

@@ -77,7 +77,7 @@ Leeroyzan comes with its own companion addon, **Leeroylink** (folder `Leeroylink
 
 **Diagnostics:** the addon counts Lua errors per addon *and* version. If an addon has errors since its last update and Leeroyzan kept the previous version, it offers the rollback right away. `/lz problem <addon>` in the game reports and disables an addon – Leeroyzan then offers the rollback too.
 
-**Quest companion:** Leeroylink shows a small window of its own at quest givers and when you pick a quest in the quest log: which quest chain it belongs to, what the next quests ask for, where they start and what they give, and the sum until the end of the chain. It works with any quest UI (also DialogueUI) and does not need Questie or QuestieDB to be loaded: Leeroyzan writes the quest data from the installed QuestieDB into `Leeroylink\Quests.lua`. Rewards (items, choices, gold, spells) come from three sources, best first: what your characters have seen at quest givers or in the quest log; the open game database of the [cMaNGOS](https://github.com/cmangos/classic-db) project (Classic quests – Leeroyzan downloads it once from GitHub, about 13 MB, and keeps only the rewards in `Leeroyzan-Data\questdata`); and QuestieDB itself, which knows the reward items of WoW Forever's own quests. `/lz quest <name>` looks up any quest; `/lz quest off` (or the switch on Leeroyzan's *Quests* page) turns the companion off – then Leeroyzan leaves the quest data out and it takes no memory in the game.
+**Quest companion:** Leeroylink shows a small window of its own at quest givers and when you pick a quest in the quest log: which quest chain it belongs to, what the next quests ask for, where they start and what they give, and the sum until the end of the chain. It works with any quest UI (also DialogueUI) and does not need Questie or QuestieDB to be loaded: Leeroyzan writes the quest data from the installed QuestieDB into the small load-on-demand addon `Leeroylink_Quests` next to Leeroylink – the game loads it only when the companion is used for the first time. Rewards (items, choices, gold, spells) come from three sources, best first: what your characters have seen at quest givers or in the quest log; the open game database of the [cMaNGOS](https://github.com/cmangos/classic-db) project (Classic quests – Leeroyzan downloads it once from GitHub, about 13 MB, and keeps only the rewards in `Leeroyzan-Data\questdata`); and QuestieDB itself, which knows the reward items of WoW Forever's own quests. `/lz quest <name>` looks up any quest; `/lz quest off` (or the switch on Leeroyzan's *Quests* page) turns the companion off – then Leeroyzan leaves the quest data out and it takes no memory in the game.
 
 **Characters and recipes:** opening a profession window stores its recipes with reagents (Leeroylink 0.3). Leeroyzan then tells you, for any recipe and quantity, what you have, which alt has the rest and what is missing.
 
@@ -110,7 +110,18 @@ A download list is the lightweight way to share many addons: it contains **only 
 
 ## Tests
 
-`tests/` drives the addon through a small imitation of the WoW API (a scripted play session with a `/reload` in the middle) and checks the import and the summaries: `pip install lupa`, then `python tests/test_sessions.py`.
+```bat
+pip install -r requirements-dev.txt
+python -m unittest discover -s tests
+ruff check .
+```
+
+- `tests/test_sessions.py` drives Leeroylink through a small imitation of the WoW API (a scripted play session with a `/reload` in the middle, the quest companion with real quest data) and checks the import, the summaries, QuestieDB, rewards, the auction house and the self-update.
+- `tests/test_files.py` covers installing, undo, interrupted updates, parked sources, settings, encryption and signatures.
+- `tests/test_gui.py` opens the window in every layout and language and shows every page (on Linux: `xvfb-run -a python -m unittest tests.test_gui`).
+- `tests/test_i18n.py`, `tests/test_static.py` and `tests/test_lua_globals.py` check translations, typical mistakes in the source and stray Lua globals (needs `luac`).
+
+The same runs on GitHub for every push and pull request and before every release build.
 
 ## Requirements
 
@@ -124,13 +135,15 @@ python leeroyzan.py
 
 From source, data goes to `%APPDATA%\Leeroyzan` – unless a `Leeroyzan-Data` folder exists next to `leeroyzan.py` (it is git-ignored).
 
+The code lives in the package `leeroy/`: the logic in `leeroy/*.py` (WoW folders, installing, GitHub, CurseForge, Leeroylink, QuestieDB, Auctionator) and the window in `leeroy/ui/*.py` (one module per page, put together in `leeroy/ui/app.py`). `leeroyzan.py` only starts it; `leeroy/api.py` offers all functions in one place for tests and scripts.
+
 ## Building the executable
 
 Every GitHub release builds `Leeroyzan.exe` and `Leeroyzan-Portable.zip` automatically (see below), so you normally never build by hand.
 
 To build the portable version from the source, double-click **`setup.bat`**. It asks for the language of its messages, then:
 
-1. builds `dist\Leeroyzan.exe` in an isolated environment (PyInstaller, `tkinterdnd2` for drag & drop),
+1. builds `dist\Leeroyzan.exe` in an isolated environment with the pinned versions from `requirements-build.txt` and the build plan `leeroyzan.spec` (PyInstaller, `tkinterdnd2` for drag & drop),
 2. updates the ready-to-use folder `dist\Leeroyzan-Portable\` (the `.exe` plus `Leeroyzan-Data`; data you already have in there is kept),
 3. creates `dist\Leeroyzan-Portable.zip` for sharing – always from a clean folder, so your own settings and API key never end up in it.
 
@@ -138,17 +151,21 @@ Nothing is installed. **Python does not have to be installed either:** if none i
 
 ## Releases and auto-update
 
-The manager checks this repository's latest GitHub release on start. With *Leeroyzan updates: Install automatically* (default) it updates itself without any download by hand: it downloads `Leeroyzan.exe`, verifies it against `Leeroyzan.exe.sha256`, replaces itself and restarts. If a release was just published and the `.exe` is still being built, the manager waits in the background (checking every minute for up to 30 minutes) and installs it as soon as it is ready. Releases without a `Leeroyzan.exe` (e.g. a failed build) are skipped, and if a downloaded update could not be put in place, the manager says so on the next start (details in `update.log`). When run as a Python script, it replaces `leeroyzan.py` with the release's version instead (keeping a `.py.bak`); inside a git checkout it leaves the file alone – use `git pull` there.
+The manager checks this repository's latest GitHub release on start. With *Leeroyzan updates: Install automatically* (default) it updates itself without any download by hand: it downloads `Leeroyzan.exe`, verifies it against `Leeroyzan.exe.sha256`, replaces itself and restarts. If a release was just published and the `.exe` is still being built, the manager waits in the background (checking every minute for up to 30 minutes) and installs it as soon as it is ready. Releases without a `Leeroyzan.exe` (e.g. a failed build) are skipped, and if a downloaded update could not be put in place, the manager says so on the next start (details in `update.log`). When run as a Python script, it replaces `leeroyzan.py`, `leeroy/` and `Leeroylink/` with the release's source instead (keeping `.bak` copies); inside a git checkout it leaves the files alone – use `git pull` there. Once releases are code-signed, the updater only accepts a new `.exe` signed by the same publisher.
 
 Publishing a new version:
 
-1. Set `APP_VERSION` in `leeroyzan.py` (e.g. `1.2.0`) and commit.
-2. Create a release with the tag `v1.2.0` (Releases → Draft a new release → Publish).
-3. The *Build release exe* workflow builds the `.exe` on a Windows runner (with the `Leeroylink` addon inside) and attaches it plus its SHA-256 checksum, `Leeroyzan-Portable.zip` and `Leeroylink.zip` to the release (takes a few minutes).
+1. Set `APP_VERSION` in `leeroy/constants.py` (e.g. `2.1.0`), add a `## 2.1.0` section to `CHANGELOG.md` and commit.
+2. Actions → *Build release exe* → *Run workflow*, enter `2.1.0`.
+3. The workflow runs all tests, creates the release as a draft (text from `CHANGELOG.md`), builds the `.exe` on a Windows runner (with the `Leeroylink` addon inside), runs the finished `.exe` once in self-test mode, attaches it plus its SHA-256 checksum, `Leeroyzan-Portable.zip` and `Leeroylink.zip`, and only then publishes the release – nobody ever sees a release without its `.exe`.
+
+Publishing a release by hand still works: the build then starts after publishing, and an empty release text is filled in from `CHANGELOG.md`.
+
+**Code signing (optional):** the workflow signs the `.exe` through the [SignPath Foundation](https://signpath.org/) (free for open source) as soon as the repository secret `SIGNPATH_API_TOKEN` and the variable `SIGNPATH_ORGANIZATION_ID` are set (project slug `leeroyzan`, signing policy `release-signing`). Signed releases no longer trigger the SmartScreen warning.
 
 ## Where data is stored
 
-Configuration, backups, kept previous addon versions (for *undo*), imported play sessions and the log file are stored in the `Leeroyzan-Data` folder next to `Leeroyzan.exe` (*Settings → Help → Open data folder*). The manager only reads and writes files inside the WoW `Interface\AddOns`, `Interface\AddOns_Disabled` and `WTF` folders – it never modifies the game client.
+Configuration, backups, kept previous addon versions (for *undo*), imported play sessions, caches and the log file are stored in the `Leeroyzan-Data` folder next to `Leeroyzan.exe` (*Settings → Help → Open data folder*). On Windows, the CurseForge API key, the GitHub token and the Discord webhook are stored encrypted for your Windows account; on another PC Leeroyzan asks for them again. While installing or updating, Leeroyzan briefly uses a work folder `Interface\.leeroyzan-…` next to `AddOns` – that makes swapping folders instant and safe, and it disappears right after. The manager only reads and writes files inside the WoW `Interface\AddOns`, `Interface\AddOns_Disabled` and `WTF` folders – it never modifies the game client.
 
 ## License
 
